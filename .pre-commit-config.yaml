@@ -1,0 +1,24 @@
+# pre-commit framework config — for users who already run `pre-commit`.
+# Pure-git users get the same checks via .githooks/pre-commit; see CONTRIBUTING.
+#
+# Install once with:  pre-commit install
+# Run on demand:      pre-commit run --all-files
+repos:
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+        args: ["--all", "--", "--check"]
+      - id: clippy
+        args: ["--all-targets", "--", "-D", "warnings"]
+      - id: cargo-check
+        args: ["--all-targets"]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: detect-private-key

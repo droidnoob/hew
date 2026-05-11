@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Hew pre-commit hook.
+#
+# Enable with:
+#   git config core.hooksPath .githooks
+#
+# Skipped automatically when no Rust files or Cargo manifests are staged
+# (e.g. docs-only commits, skill markdown updates).
+
+set -euo pipefail
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if ! printf '%s\n' "$STAGED" | grep -E '(\.rs$|(^|/)Cargo\.toml$)' >/dev/null; then
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not on PATH; skipping. Install rust via rustup to enable." >&2
+  exit 0
+fi
+
+# Emergency bypass — use sparingly. CI re-runs every check.
+if [[ "${HEW_SKIP_HOOKS:-}" == "1" ]]; then
+  echo "pre-commit: HEW_SKIP_HOOKS=1 set, skipping all checks." >&2
+  exit 0
+fi
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets --quiet -- -D warnings
+
+# Tests are gated separately. CI runs them regardless.
+if [[ "${HEW_HOOK_NO_TESTS:-}" != "1" ]]; then
+  echo "pre-commit: cargo test"
+  cargo test --quiet
+fi
+
+echo "pre-commit: ok"
