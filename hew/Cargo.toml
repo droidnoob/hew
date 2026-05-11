@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 hew-core = { path = "../hew-core" }
 clap = { workspace = true }
+clap_complete = { workspace = true }
+clap_mangen = { workspace = true }
 miette = { workspace = true }
 thiserror = { workspace = true }
 inquire = { workspace = true }

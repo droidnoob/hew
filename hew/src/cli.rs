@@ -81,4 +81,10 @@ pub enum Command {
 
     /// Self-update binary + skill files.
     Update(crate::commands::update::Args),
+
+    /// Print shell completions to stdout.
+    Completions(crate::commands::completions::Args),
+
+    /// Print a man page (roff) to stdout.
+    Manpage,
 }
