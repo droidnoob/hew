@@ -70,7 +70,7 @@ Initial release. Methodology + Rust CLI shipped together.
   `hew-scan` on brownfield projects.
 
 - **CI** — GitHub Actions workflow running fmt, clippy `-D warnings`,
-  test matrix (ubuntu + macos × stable + MSRV 1.90), cargo-audit, and
+  test matrix (ubuntu + macos × stable + MSRV 1.91), cargo-audit, and
   cargo-deny on every PR and main push.
 
 - **Release infrastructure** — `[workspace.metadata.dist]`
@@ -91,7 +91,7 @@ Initial release. Methodology + Rust CLI shipped together.
 
 - 118 tests pass; `cargo fmt --all -- --check` and
   `cargo clippy --all-targets -- -D warnings` clean.
-- MSRV pinned at `rust-version = "1.90"` in `Cargo.toml`.
+- MSRV pinned at `rust-version = "1.91"` in `Cargo.toml`.
 - Methodology distilled from observing patterns and anti-patterns in
   [Beads](https://gastownhall.github.io/beads/),
   [GSD](https://github.com/gsd-build/get-shit-done), and similar

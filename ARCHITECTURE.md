@@ -255,7 +255,7 @@ the binary via `CARGO_PKG_VERSION`.
 ## CI + release
 
 - **`.github/workflows/ci.yml`** runs on every PR and push to main:
-  fmt → clippy `-D warnings` → test matrix (ubuntu+macos × stable+1.90
+  fmt → clippy `-D warnings` → test matrix (ubuntu+macos × stable+1.91
   MSRV) → cargo-audit → cargo-deny.
 - **`.github/workflows/release.yml`** is a placeholder. Real releases
   require running `dist init` (cargo-dist 0.31+) to expand the

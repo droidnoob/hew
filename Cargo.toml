@@ -5,7 +5,7 @@ members = ["hew-core", "hew"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/droidnoob/hew"
 homepage = "https://github.com/droidnoob/hew"

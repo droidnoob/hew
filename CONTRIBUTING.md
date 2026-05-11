@@ -3,7 +3,7 @@
 ## Local setup
 
 ```sh
-# 1. Rust toolchain (MSRV is pinned to 1.90 in Cargo.toml).
+# 1. Rust toolchain (MSRV is pinned to 1.91 in Cargo.toml).
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 # 2. Beads — the runtime dependency for any e2e work.
