@@ -65,17 +65,11 @@ fn unknown_subcommand_fails() {
 }
 
 #[test]
-fn stub_init_returns_error() {
-    // Stubs error cleanly via miette — exit 1, message on stderr.
-    hew().arg("init").assert().failure().stderr(contains("not yet implemented"));
-}
-
-#[test]
 fn stub_prime_requires_skill() {
     // Missing positional arg → clap exits 2.
     hew().arg("prime").assert().failure().code(2);
 }
 
-// `hew prime` is exercised end-to-end against a stub `bd` in
-// `tests/prime_e2e.rs`. Keeping it out of the generic stub suite
-// avoids depending on whatever `bd` happens to be on PATH.
+// `hew prime` and `hew init` are exercised end-to-end against a stub `bd` in
+// `tests/prime_e2e.rs` and `tests/init_e2e.rs`. Keeping them out of the
+// generic suite avoids depending on whatever `bd` happens to be on PATH.

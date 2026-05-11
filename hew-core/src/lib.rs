@@ -6,6 +6,7 @@
 pub mod bd;
 pub mod ctx;
 pub mod error;
+pub mod install;
 pub mod prime;
 pub mod skills;
 pub mod tty;
