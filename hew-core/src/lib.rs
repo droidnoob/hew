@@ -5,6 +5,7 @@
 
 pub mod ctx;
 pub mod error;
+pub mod skills;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};
