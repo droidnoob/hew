@@ -5,6 +5,7 @@
 
 pub mod bd;
 pub mod ctx;
+pub mod doctor;
 pub mod error;
 pub mod install;
 pub mod prime;
