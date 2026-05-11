@@ -9,6 +9,7 @@ pub mod ctx;
 pub mod doctor;
 pub mod error;
 pub mod install;
+pub mod notify;
 pub mod prime;
 pub mod skills;
 pub mod status;

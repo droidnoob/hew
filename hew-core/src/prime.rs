@@ -22,6 +22,15 @@ pub struct PrimeOutput {
     pub tasks: TaskInfo,
     pub memories: MemoryBuckets,
     pub skill_instructions: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<UpdateAvailable>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct UpdateAvailable {
+    pub current: String,
+    pub latest: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, schemars::JsonSchema)]
@@ -147,6 +156,16 @@ pub fn build(client: &dyn BdClient, skill_name: &str) -> Result<PrimeOutput> {
         ready_list: ready.into_iter().take(20).collect(),
     };
 
+    // Kick off (best-effort) the passive update check and surface any
+    // cached notice from a previous run.
+    crate::notify::schedule_if_stale(env!("CARGO_PKG_VERSION"));
+    let update_available =
+        crate::notify::read_cached_notice().ok().flatten().map(|n| UpdateAvailable {
+            current: n.current,
+            latest: n.latest.clone(),
+            message: format!("Run `hew update` to upgrade to {}.", n.latest),
+        });
+
     Ok(PrimeOutput {
         schema_version: 1,
         skill: skill.name.to_string(),
@@ -156,6 +175,7 @@ pub fn build(client: &dyn BdClient, skill_name: &str) -> Result<PrimeOutput> {
         tasks,
         memories: buckets,
         skill_instructions: skill.body.to_string(),
+        update_available,
     })
 }
 

@@ -30,7 +30,7 @@ which = "8.0"
 etcetera = "0.11"
 ctrlc = "3.5"
 wait-timeout = "0.2"
-axoupdater = "0.10"
+axoupdater = { version = "0.10", features = ["blocking"] }
 schemars = "1.2"
 vergen = { version = "9.1", features = ["build", "cargo", "rustc"] }
 
