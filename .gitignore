@@ -1,0 +1,12 @@
+.planning/
+.beads/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak

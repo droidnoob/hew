@@ -1,0 +1,22 @@
+[package]
+name = "hew-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for hew — Beads-powered methodology for AI coding agents."
+
+[dependencies]
+miette = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+which = { workspace = true }
+etcetera = { workspace = true }
+wait-timeout = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
