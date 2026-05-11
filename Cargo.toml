@@ -45,3 +45,23 @@ trycmd = "1.2"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# cargo-dist (the `dist` binary, v0.31+) — release pipeline config.
+# Generate installers via `dist init`. Cut releases by tagging vX.Y.Z.
+[workspace.metadata.dist]
+cargo-dist-version = "0.31.0"
+ci = ["github"]
+installers = ["shell", "powershell", "homebrew"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+# Where the brew tap lives. Update when the repo moves.
+tap = "droidnoob/homebrew-hew"
+publish-jobs = ["homebrew"]
+# Run our CI workflow before cutting the release artifact.
+pr-run-mode = "plan"
+allow-dirty = ["ci"]

@@ -1,0 +1,28 @@
+name: Release
+
+# Cut a release by pushing a tag like `v0.1.0`.
+#
+# This workflow is a thin placeholder: in practice we generate it by
+# running `dist init` (cargo-dist 0.31+) which writes the full matrix,
+# installer steps, and Homebrew publish job. Keep this committed so the
+# repo signals where releases happen even before `dist init` runs.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    name: bootstrap (replace with `dist init` output)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Note
+        run: |
+          echo "Run `dist init` locally and commit the generated workflow."
+          echo "This stub exists so tags push to a valid workflow."

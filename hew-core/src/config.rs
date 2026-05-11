@@ -152,10 +152,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
 
-        let mut cfg = Config::default();
-        cfg.default_runtime = Some("claude".into());
-        cfg.optional_skills.deps = true;
-        cfg.update_check = false;
+        let cfg = Config {
+            default_runtime: Some("claude".into()),
+            optional_skills: OptionalSkills { deps: true, ..Default::default() },
+            update_check: false,
+            ..Default::default()
+        };
 
         save_to(&path, &cfg).unwrap();
         let loaded = load_from(&path).unwrap();
