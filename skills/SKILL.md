@@ -4,31 +4,89 @@ name: hew
 description: Index of installed hew skills. Loaded by the agent on session start.
 ---
 
-# Hew Skills
+# Hew
 
-The work loop: `plan → decompose → (ready → claim → execute → guard → close) → verify`.
+Methodology for AI coding agents. State lives in Beads (`bd`), not markdown files.
 
-## Core (always installed)
+## How to use this index
 
-- `hew-plan` — strategic planning, goal-backward reasoning
-- `hew-decompose` — translate plan into a Beads graph (epics, tasks, gates, bonds)
-- `hew-execute` — the work loop
-- `hew-verify` — post-completion verification
-- `hew-guard` — pre-close sanity gate
+On every session, run `hew prime <skill>` before invoking that skill. `hew prime`
+returns one JSON blob with: project state, `STATUS:` flags, prerequisites,
+unblocked tasks (`bd ready`), categorized memories, and the embedded skill body.
 
-## Brownfield (existing codebases)
+If the user describes intent in plain English, route by intent:
 
-- `hew-scan` — architecture mapping via `bd remember`
-- `hew-convention` — pattern extraction and enforcement
-- `hew-audit` — existing dependency health check
-- `hew-boundary` — API contract and interface mapping
-- `hew-migrate` — schema migration awareness
+| User says | Skill |
+|-----------|-------|
+| "let's build / plan X" | `hew-plan` |
+| "break this down" / "create tasks" | `hew-decompose` |
+| "start coding" / "what's next?" | `hew-execute` |
+| "fix this one bug" / "tiny tweak" | `hew-quick` |
+| "did we finish?" / "verify" | `hew-verify` |
+| "new codebase / map this repo" | `hew-scan` → `hew-convention` → `hew-audit` → `hew-boundary` |
 
-## Optional (user opts in)
+## Workflow
 
-- `hew-deps` — new dependency inspector
-- `hew-research` — domain research
-- `hew-quick` — fast mode for trivial tasks
-- `hew-security` — lightweight security patterns
+```
+plan → decompose → (ready → claim → execute → guard → close) → verify
+```
 
-Custom skills in `custom/` are auto-discovered and never overwritten by `hew update`.
+The agent does not manage phases. It manages the dependency graph. `bd ready`
+always says what to do next. `bd close` marks it done. Nothing else is required.
+
+## Skills
+
+### Core (always installed)
+
+- **hew-plan** — strategic planning, goal-backward reasoning, tech choices
+- **hew-decompose** — translate the plan into a Beads graph (epics, tasks, gates, bonds)
+- **hew-execute** — the work loop
+- **hew-verify** — end-to-end verification after a batch closes
+- **hew-guard** — pre-close sanity gate (lint, secrets, conventions)
+
+### Brownfield (for existing codebases)
+
+- **hew-scan** — architecture mapping via `bd remember`
+- **hew-convention** — extract `CONVENTION:` rules from existing code
+- **hew-audit** — dependency health check
+- **hew-boundary** — API + interface map (`BOUNDARY:` memories)
+- **hew-migrate** — schema-drift detector
+
+### Optional (opt-in)
+
+- **hew-deps** — inspect a candidate new library
+- **hew-research** — domain research with web search
+- **hew-quick** — fast mode (one task, no plan/decompose)
+- **hew-security** — lightweight checks on auth/input/secrets
+
+## Custom skills
+
+Anything in `custom/` is auto-discovered and never touched by `hew update`. Teams
+put their own deploy/review/onboard skills there.
+
+## Memory prefixes
+
+Every `bd remember` follows a prefix convention. The executor treats prefixes differently.
+
+| Prefix | Meaning | Treatment |
+|--------|---------|-----------|
+| `STATUS:` | phase completion flag | routes the agent |
+| `CONVENTION:` | prescriptive coding rule | **constraint** — do not violate |
+| `BOUNDARY:` | API contract / public interface | check before changing |
+| `AUDIT:` | dependency health finding | may open tasks |
+| `SECURITY:` | security decision or pattern | check on auth/input code |
+| `MIGRATION:` | DB schema change | match in code + migration file |
+| `DEP:` | new dependency evaluation | informational |
+| (none) | factual codebase knowledge | context |
+
+## Anti-patterns
+
+Do not create planning markdown files (`PLAN.md`, `TODO.md`, `ROADMAP.md`,
+`MEMORY.md`). All state belongs in Beads or `bd remember`. The filesystem is for
+code, not plans.
+
+Do not use string-prefixed task titles (`"GATE: ..."`, `"PHASE: ..."`) to fake
+structural roles. Beads has native types: `--type=gate`, `--type=epic`,
+`bd mol bond`. Use them.
+
+Do not skip the `hew-guard` step before `bd close`. Drift compounds.
