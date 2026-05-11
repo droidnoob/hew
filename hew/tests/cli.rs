@@ -76,7 +76,6 @@ fn stub_prime_requires_skill() {
     hew().arg("prime").assert().failure().code(2);
 }
 
-#[test]
-fn stub_prime_with_skill_runs() {
-    hew().args(["prime", "execute"]).assert().failure().stderr(contains("not yet implemented"));
-}
+// `hew prime` is exercised end-to-end against a stub `bd` in
+// `tests/prime_e2e.rs`. Keeping it out of the generic stub suite
+// avoids depending on whatever `bd` happens to be on PATH.

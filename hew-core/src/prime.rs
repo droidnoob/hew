@@ -1,0 +1,249 @@
+//! `hew prime <skill>` — assemble agent context JSON.
+//!
+//! The output shape is the contract between the binary and any agent
+//! that consumes it. Adding fields is backwards-compatible; renaming
+//! or removing is not.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::bd::{BdClient, ReadyTask, StatsSummary};
+use crate::error::Result;
+use crate::skills::{self, Skill};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PrimeOutput {
+    pub schema_version: u32,
+    pub skill: String,
+    pub project: ProjectInfo,
+    pub status: StatusMap,
+    pub prerequisites: Prerequisites,
+    pub tasks: TaskInfo,
+    pub memories: MemoryBuckets,
+    pub skill_instructions: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ProjectInfo {
+    pub beads_initialized: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bd_version: Option<String>,
+}
+
+pub type StatusMap = BTreeMap<String, StatusEntry>;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StatusEntry {
+    pub complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Prerequisites {
+    pub met: bool,
+    pub missing: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskInfo {
+    pub total: u64,
+    pub done: u64,
+    pub in_progress: u64,
+    pub ready: u64,
+    pub blocked: u64,
+    pub ready_list: Vec<ReadyTask>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct MemoryBuckets {
+    pub conventions: Vec<String>,
+    pub boundaries: Vec<String>,
+    pub audit: Vec<String>,
+    pub security: Vec<String>,
+    pub migration: Vec<String>,
+    pub dep: Vec<String>,
+    pub factual: Vec<String>,
+}
+
+/// Categorize a raw memory map (key -> value) into prefix buckets +
+/// a STATUS map parsed out of `STATUS:<phase>:complete — <timestamp>`.
+pub fn categorize(memories: &BTreeMap<String, String>) -> (MemoryBuckets, StatusMap) {
+    let mut buckets = MemoryBuckets::default();
+    let mut status: StatusMap = BTreeMap::new();
+
+    for value in memories.values() {
+        let trimmed = value.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("STATUS:") {
+            if let Some((phase, payload)) = rest.split_once(':') {
+                let complete = payload.trim_start().starts_with("complete");
+                let timestamp = payload.split('—').nth(1).map(|s| s.trim().to_string());
+                status.insert(phase.trim().to_string(), StatusEntry { complete, timestamp });
+            }
+            continue;
+        }
+        if trimmed.starts_with("CONVENTION:") {
+            buckets.conventions.push(value.clone());
+        } else if trimmed.starts_with("BOUNDARY:") {
+            buckets.boundaries.push(value.clone());
+        } else if trimmed.starts_with("AUDIT:") {
+            buckets.audit.push(value.clone());
+        } else if trimmed.starts_with("SECURITY:") {
+            buckets.security.push(value.clone());
+        } else if trimmed.starts_with("MIGRATION:") {
+            buckets.migration.push(value.clone());
+        } else if trimmed.starts_with("DEP:") {
+            buckets.dep.push(value.clone());
+        } else {
+            buckets.factual.push(value.clone());
+        }
+    }
+
+    (buckets, status)
+}
+
+/// Prerequisite chain — the agent stops or warns if these are absent.
+pub fn prerequisites_for(skill: &str, status: &StatusMap) -> Prerequisites {
+    let needs: &[&str] = match skill {
+        "decompose" | "hew-decompose" => &["plan"],
+        "execute" | "hew-execute" => &["plan"],
+        "verify" | "hew-verify" => &["plan"],
+        "guard" | "hew-guard" => &["plan"],
+        "convention" | "hew-convention" => &["scan"],
+        "boundary" | "hew-boundary" => &["scan"],
+        "audit" | "hew-audit" => &["scan"],
+        "migrate" | "hew-migrate" => &["scan"],
+        _ => &[],
+    };
+
+    let missing: Vec<String> = needs
+        .iter()
+        .filter(|p| !status.get(**p).map(|s| s.complete).unwrap_or(false))
+        .map(|p| (*p).to_string())
+        .collect();
+
+    Prerequisites { met: missing.is_empty(), missing }
+}
+
+/// Build the prime JSON for `skill_name`.
+pub fn build(client: &dyn BdClient, skill_name: &str) -> Result<PrimeOutput> {
+    let skill = resolve_skill(skill_name)?;
+
+    let stats: StatsSummary = client.stats().unwrap_or_default();
+    let ready = client.ready().unwrap_or_default();
+    let memories = client.memories().unwrap_or_default();
+    let bd_version = client.version().ok().map(|v| v.semver);
+
+    let (buckets, status) = categorize(&memories);
+    let prereqs = prerequisites_for(skill.name, &status);
+
+    let tasks = TaskInfo {
+        total: stats.total_issues,
+        done: stats.closed_issues,
+        in_progress: stats.in_progress_issues,
+        ready: stats.ready_issues,
+        blocked: stats.blocked_issues,
+        ready_list: ready.into_iter().take(20).collect(),
+    };
+
+    Ok(PrimeOutput {
+        schema_version: 1,
+        skill: skill.name.to_string(),
+        project: ProjectInfo { beads_initialized: bd_version.is_some(), bd_version },
+        status,
+        prerequisites: prereqs,
+        tasks,
+        memories: buckets,
+        skill_instructions: skill.body.to_string(),
+    })
+}
+
+fn resolve_skill(name: &str) -> Result<Skill> {
+    // Accept `execute`, `hew-execute`, or the canonical name.
+    if let Some(s) = skills::find(name) {
+        return Ok(s);
+    }
+    let prefixed = format!("hew-{name}");
+    if let Some(s) = skills::find(&prefixed) {
+        return Ok(s);
+    }
+    Err(crate::error::HewError::MissingFlag { flag: format!("skill (unknown: {name})") })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(items: &[(&str, &str)]) -> BTreeMap<String, String> {
+        items.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn categorize_routes_each_prefix() {
+        let m = map(&[
+            ("a", "CONVENTION:errors — wrap"),
+            ("b", "BOUNDARY: POST /users"),
+            ("c", "AUDIT: jose deprecated"),
+            ("d", "SECURITY: JWT 15m"),
+            ("e", "MIGRATION: add col"),
+            ("f", "DEP: chrono 0.4"),
+            ("g", "Backend: FastAPI + Postgres"),
+        ]);
+        let (b, _) = categorize(&m);
+        assert_eq!(b.conventions.len(), 1);
+        assert_eq!(b.boundaries.len(), 1);
+        assert_eq!(b.audit.len(), 1);
+        assert_eq!(b.security.len(), 1);
+        assert_eq!(b.migration.len(), 1);
+        assert_eq!(b.dep.len(), 1);
+        assert_eq!(b.factual.len(), 1);
+    }
+
+    #[test]
+    fn status_memory_is_parsed_out_and_not_bucketed() {
+        let m = map(&[("k", "STATUS:scan:complete — 2026-05-11T14:30:00")]);
+        let (b, s) = categorize(&m);
+        assert!(b.factual.is_empty(), "STATUS must not leak into factual");
+        assert!(s.get("scan").map(|e| e.complete).unwrap_or(false));
+        assert_eq!(s["scan"].timestamp.as_deref(), Some("2026-05-11T14:30:00"));
+    }
+
+    #[test]
+    fn status_in_progress_is_not_complete() {
+        let m = map(&[("k", "STATUS:plan:in-progress")]);
+        let (_, s) = categorize(&m);
+        assert!(!s["plan"].complete);
+    }
+
+    #[test]
+    fn execute_needs_plan() {
+        let mut status: StatusMap = BTreeMap::new();
+        let p = prerequisites_for("hew-execute", &status);
+        assert!(!p.met);
+        assert_eq!(p.missing, vec!["plan"]);
+
+        status.insert("plan".into(), StatusEntry { complete: true, timestamp: None });
+        let p = prerequisites_for("hew-execute", &status);
+        assert!(p.met);
+    }
+
+    #[test]
+    fn plan_has_no_prerequisites() {
+        let status: StatusMap = BTreeMap::new();
+        let p = prerequisites_for("hew-plan", &status);
+        assert!(p.met);
+        assert!(p.missing.is_empty());
+    }
+
+    #[test]
+    fn unknown_skill_errors() {
+        assert!(resolve_skill("nope").is_err());
+    }
+
+    #[test]
+    fn resolve_accepts_short_name() {
+        let s = resolve_skill("execute").unwrap();
+        assert_eq!(s.name, "hew-execute");
+    }
+}
