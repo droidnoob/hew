@@ -9,6 +9,7 @@ pub mod error;
 pub mod install;
 pub mod prime;
 pub mod skills;
+pub mod status;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};

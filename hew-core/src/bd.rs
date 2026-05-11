@@ -184,8 +184,11 @@ impl BdClient for RealBd {
 
     fn memories(&self) -> Result<std::collections::BTreeMap<String, String>> {
         let out = self.run(&[OsStr::new("memories"), OsStr::new("--json")])?;
-        let parsed = serde_json::from_str(out.stdout.trim())?;
-        Ok(parsed)
+        // bd interleaves metadata like `schema_version: 1` with string entries.
+        // Decode permissively then keep only string-valued keys.
+        let raw: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(out.stdout.trim())?;
+        Ok(raw.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect())
     }
 
     fn remember(&self, text: &str) -> Result<()> {
