@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::{HewError, Result};
+use crate::error::Result;
 use crate::skills::{self, Category, Skill};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -63,22 +63,12 @@ pub struct InstallPlan {
 pub fn install(runtime: Runtime, root: &Path) -> Result<InstallPlan> {
     let written = match runtime {
         Runtime::Claude => write_claude_layout(root)?,
-        Runtime::Cursor => return not_yet(runtime, "hew-3xq.3.2"),
-        Runtime::Codex => return not_yet(runtime, "hew-3xq.3.3"),
-        Runtime::Windsurf => return not_yet(runtime, "hew-3xq.3.4"),
+        Runtime::Cursor => write_cursorrules(root)?,
+        Runtime::Codex => write_codex_layout(root)?,
+        Runtime::Windsurf => write_windsurfrules(root)?,
         Runtime::Generic => write_generic_claude_md(root)?,
     };
     Ok(InstallPlan { runtime, root: root.to_path_buf(), written })
-}
-
-fn not_yet(runtime: Runtime, tracked_id: &str) -> Result<InstallPlan> {
-    Err(HewError::MissingFlag {
-        flag: format!(
-            "runtime `{}` adapter not yet implemented (tracked: {})",
-            runtime.as_str(),
-            tracked_id
-        ),
-    })
 }
 
 fn write_claude_layout(root: &Path) -> Result<Vec<PathBuf>> {
@@ -109,8 +99,12 @@ fn write_claude_layout(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(written)
 }
 
-fn write_generic_claude_md(root: &Path) -> Result<Vec<PathBuf>> {
-    // Bundle every skill body into one CLAUDE.md as fallback.
+/// Marker lines surrounding the hew section in single-file runtime configs.
+const SECTION_START: &str =
+    "<!-- HEW:BEGIN — do not edit between the markers; managed by `hew install` -->";
+const SECTION_END: &str = "<!-- HEW:END -->";
+
+fn bundle_all_skills() -> String {
     let mut buf = String::new();
     buf.push_str(skills::INDEX.body);
     buf.push_str("\n\n---\n\n");
@@ -122,8 +116,93 @@ fn write_generic_claude_md(root: &Path) -> Result<Vec<PathBuf>> {
         buf.push_str(s.body);
         buf.push('\n');
     }
+    buf
+}
+
+/// Inject (or replace) the hew section in a single-file rules document.
+/// Idempotent: subsequent installs replace only the section between the
+/// markers, preserving anything the user added outside.
+fn upsert_marked_section(path: &Path, body: &str) -> Result<()> {
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    let new_section = format!("{SECTION_START}\n{body}\n{SECTION_END}\n");
+    let updated = if let (Some(start), Some(end)) =
+        (existing.find(SECTION_START), existing.find(SECTION_END))
+    {
+        let end_with_marker = end + SECTION_END.len();
+        // Trim a trailing newline after the end marker, if present, then re-add ours.
+        let mut next = String::with_capacity(existing.len() + new_section.len());
+        next.push_str(&existing[..start]);
+        next.push_str(&new_section);
+        // Skip past the original end marker + any single trailing newline.
+        let remainder = &existing[end_with_marker..];
+        let remainder = remainder.strip_prefix('\n').unwrap_or(remainder);
+        next.push_str(remainder);
+        next
+    } else {
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        if !next.is_empty() {
+            next.push('\n');
+        }
+        next.push_str(&new_section);
+        next
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, updated)?;
+    Ok(())
+}
+
+fn write_cursorrules(root: &Path) -> Result<Vec<PathBuf>> {
+    let path = root.join(".cursorrules");
+    upsert_marked_section(&path, &bundle_all_skills())?;
+    Ok(vec![path])
+}
+
+fn write_windsurfrules(root: &Path) -> Result<Vec<PathBuf>> {
+    let path = root.join(".windsurfrules");
+    upsert_marked_section(&path, &bundle_all_skills())?;
+    Ok(vec![path])
+}
+
+/// Codex adapter: drop each skill into `.codex/agents/hew-<name>.toml`
+/// with the minimal frontmatter Codex expects, plus an AGENTS.md
+/// pointer at the project root.
+fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
+    let agents_dir = root.join(".codex").join("agents");
+    fs::create_dir_all(&agents_dir)?;
+    let mut written = Vec::new();
+
+    for s in skills::all() {
+        if s.category == Category::Index {
+            continue;
+        }
+        let toml = format!(
+            "name = \"{}\"\ncategory = \"{}\"\n\nbody = \"\"\"\n{}\n\"\"\"\n",
+            s.name,
+            s.category,
+            s.body.replace("\"\"\"", "\\\"\\\"\\\""),
+        );
+        let dest = agents_dir.join(format!("{}.toml", s.name));
+        fs::write(&dest, toml)?;
+        written.push(dest);
+    }
+
+    // AGENTS.md at project root as a pointer + bundled body for Codex
+    // builds that read AGENTS.md directly.
+    let agents_md = root.join("AGENTS.md");
+    upsert_marked_section(&agents_md, &bundle_all_skills())?;
+    written.push(agents_md);
+
+    Ok(written)
+}
+
+fn write_generic_claude_md(root: &Path) -> Result<Vec<PathBuf>> {
     let path = root.join("CLAUDE.md");
-    fs::write(&path, buf)?;
+    fs::write(&path, bundle_all_skills())?;
     Ok(vec![path])
 }
 
@@ -198,10 +277,60 @@ mod tests {
     }
 
     #[test]
-    fn install_other_runtimes_errors_with_tracked_id() {
+    fn install_cursor_creates_marked_cursorrules() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = install(Runtime::Cursor, tmp.path()).expect_err("cursor not yet");
-        assert!(err.to_string().contains("hew-3xq.3.2"));
+        let plan = install(Runtime::Cursor, tmp.path()).expect("install");
+        assert_eq!(plan.written.len(), 1);
+        let body = fs::read_to_string(tmp.path().join(".cursorrules")).unwrap();
+        assert!(body.contains("HEW:BEGIN"));
+        assert!(body.contains("HEW:END"));
+        assert!(body.contains("hew-execute"));
+    }
+
+    #[test]
+    fn install_cursor_is_idempotent_and_preserves_user_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".cursorrules");
+        fs::write(&path, "# user content\n\nkeep me\n").unwrap();
+
+        install(Runtime::Cursor, tmp.path()).unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        install(Runtime::Cursor, tmp.path()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+
+        assert_eq!(first, second, "second install must be idempotent");
+        assert!(second.contains("keep me"), "user content preserved");
+        assert_eq!(
+            second.matches("HEW:BEGIN").count(),
+            1,
+            "exactly one hew section even after re-install"
+        );
+    }
+
+    #[test]
+    fn install_windsurf_writes_marked_windsurfrules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = install(Runtime::Windsurf, tmp.path()).expect("install");
+        assert_eq!(plan.written.len(), 1);
+        let body = fs::read_to_string(tmp.path().join(".windsurfrules")).unwrap();
+        assert!(body.contains("HEW:BEGIN"));
+        assert!(body.contains("hew-plan"));
+    }
+
+    #[test]
+    fn install_codex_writes_per_skill_toml_and_agents_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = install(Runtime::Codex, tmp.path()).expect("install");
+        // 14 skills + AGENTS.md
+        assert_eq!(plan.written.len(), 15);
+        let agents = tmp.path().join(".codex").join("agents");
+        assert!(agents.join("hew-execute.toml").exists());
+        assert!(agents.join("hew-scan.toml").exists());
+        let body = fs::read_to_string(agents.join("hew-execute.toml")).unwrap();
+        assert!(body.starts_with("name = \"hew-execute\""));
+        assert!(body.contains("category = \"core\""));
+        assert!(body.contains("hew-execute")); // body field present
+        assert!(tmp.path().join("AGENTS.md").exists());
     }
 
     #[test]
