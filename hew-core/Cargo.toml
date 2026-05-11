@@ -17,6 +17,10 @@ etcetera = { workspace = true }
 wait-timeout = { workspace = true }
 tracing = { workspace = true }
 
+[lib]
+name = "hew_core"
+path = "src/lib.rs"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }

@@ -3,6 +3,7 @@
 //! Keep this crate free of clap/inquire/tracing-subscriber so it stays
 //! easy to unit test. The `hew` binary wires presentation on top.
 
+pub mod bd;
 pub mod ctx;
 pub mod error;
 pub mod skills;
