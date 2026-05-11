@@ -96,6 +96,16 @@ fn write_claude_layout(root: &Path) -> Result<Vec<PathBuf>> {
         written.push(dest);
     }
 
+    // Slash commands at .claude/commands/hew/<name>.md so they become
+    // /hew:<name> inside Claude Code.
+    let commands_dir = root.join(".claude").join("commands").join("hew");
+    fs::create_dir_all(&commands_dir)?;
+    for c in crate::slash::ALL {
+        let dest = commands_dir.join(format!("{}.md", c.name));
+        fs::write(&dest, c.body)?;
+        written.push(dest);
+    }
+
     Ok(written)
 }
 
@@ -252,18 +262,31 @@ mod tests {
     }
 
     #[test]
-    fn install_claude_writes_every_skill() {
+    fn install_claude_writes_every_skill_and_slash_command() {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Claude, tmp.path()).expect("install");
         assert_eq!(plan.runtime, Runtime::Claude);
-        // 1 SKILL.md + 14 skills.
-        assert_eq!(plan.written.len(), 15);
+        // 1 SKILL.md + 14 skills + 23 slash commands = 38 files.
+        assert_eq!(plan.written.len(), 38);
+
         let hew_root = tmp.path().join(".claude").join("skills").join("hew");
         assert!(hew_root.join("SKILL.md").exists());
         assert!(hew_root.join("core").join("hew-execute.md").exists());
         assert!(hew_root.join("brownfield").join("hew-scan.md").exists());
         assert!(hew_root.join("optional").join("hew-quick.md").exists());
         assert!(hew_root.join("custom").exists(), "custom/ dir reserved for team skills");
+
+        // Slash commands.
+        let cmd_root = tmp.path().join(".claude").join("commands").join("hew");
+        for name in ["do", "next", "auto", "plan", "execute-loop", "doctor"]
+            .iter()
+            .filter(|n| **n != "execute-loop")
+        {
+            assert!(cmd_root.join(format!("{name}.md")).exists(), "/{}", name);
+        }
+        // Spot-check that a known command body landed verbatim.
+        let plan_body = fs::read_to_string(cmd_root.join("plan.md")).unwrap();
+        assert!(plan_body.contains("hew-plan skill"));
     }
 
     #[test]

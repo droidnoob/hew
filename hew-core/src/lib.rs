@@ -12,6 +12,7 @@ pub mod install;
 pub mod notify;
 pub mod prime;
 pub mod skills;
+pub mod slash;
 pub mod status;
 pub mod tty;
 
