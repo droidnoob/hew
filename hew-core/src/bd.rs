@@ -27,7 +27,7 @@ pub struct BdVersion {
     pub semver: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReadyTask {
     pub id: String,
     pub title: String,
@@ -43,7 +43,7 @@ pub struct ReadyTask {
     pub parent: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 pub struct StatsSummary {
     #[serde(default)]
     pub total_issues: u64,

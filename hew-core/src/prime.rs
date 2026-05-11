@@ -12,7 +12,7 @@ use crate::bd::{BdClient, ReadyTask, StatsSummary};
 use crate::error::Result;
 use crate::skills::{self, Skill};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PrimeOutput {
     pub schema_version: u32,
     pub skill: String,
@@ -24,7 +24,7 @@ pub struct PrimeOutput {
     pub skill_instructions: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct ProjectInfo {
     pub beads_initialized: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,20 +33,20 @@ pub struct ProjectInfo {
 
 pub type StatusMap = BTreeMap<String, StatusEntry>;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusEntry {
     pub complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Prerequisites {
     pub met: bool,
     pub missing: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskInfo {
     pub total: u64,
     pub done: u64,
@@ -56,7 +56,7 @@ pub struct TaskInfo {
     pub ready_list: Vec<ReadyTask>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct MemoryBuckets {
     pub conventions: Vec<String>,
     pub boundaries: Vec<String>,

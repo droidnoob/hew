@@ -928,6 +928,7 @@ dependencies = [
  "etcetera",
  "insta",
  "miette",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

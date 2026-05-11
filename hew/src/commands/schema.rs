@@ -1,5 +1,6 @@
 use clap::Args as ClapArgs;
 use hew_core::Ctx;
+use schemars::schema_for;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -10,11 +11,19 @@ pub struct Args {
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum Which {
+    /// Schema for `hew prime <skill>` output.
     Prime,
-    Status,
+    /// Schema for the persistent config TOML.
     Config,
 }
 
-pub fn run(_ctx: &Ctx, _args: Args) -> miette::Result<()> {
-    miette::bail!("`hew schema` is not yet implemented (tracked: hew-3xq.2.14)");
+pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
+    let schema = match args.which {
+        Which::Prime => schema_for!(hew_core::prime::PrimeOutput),
+        Which::Config => schema_for!(hew_core::config::Config),
+    };
+    let json = serde_json::to_string_pretty(&schema)
+        .map_err(|e| miette::miette!("serialize schema: {e}"))?;
+    println!("{json}");
+    Ok(())
 }

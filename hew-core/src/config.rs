@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{HewError, Result};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
     pub update_check: bool,
@@ -32,7 +32,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub struct OptionalSkills {
     pub deps: bool,
