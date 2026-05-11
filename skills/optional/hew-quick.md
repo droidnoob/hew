@@ -5,8 +5,135 @@ category: optional
 init: hew prime quick
 ---
 
-# hew-quick
+# hew-quick — Fast Mode
 
-Fast mode. One task, claim, fix, test, close, commit. Skip plan + decompose.
+For work that is small enough that going through `hew-plan` and
+`hew-decompose` is more ceremony than it's worth. One task in, one
+task out, one commit.
 
-> Full instructions are filled in by the corresponding planning task; this stub locks the file path, frontmatter, and version contract.
+This is the escape hatch. Use it for bug fixes, tiny tweaks, one-line
+config changes — anything where the plan fits in the task description
+and decomposition would just produce one task anyway.
+
+## When this skill runs
+
+- The user types `/hew:quick <description>` or any synonym ("fix
+  this," "just add X," "one-liner to do Y").
+- The task is obviously single-shot: one file, one behavior, one
+  test, ≤ 30 min of agent work.
+- No architectural decisions needed.
+- No new dependencies introduced.
+
+If any of those don't hold, **escalate to `hew-plan`**. Quick mode is
+not "skip the discipline" — it's "the discipline collapses to one
+step because the work is genuinely small."
+
+## What quick mode actually does
+
+```
+1. bd create the task (one task, no epic)
+2. bd update --claim
+3. do the work
+4. invoke hew-guard
+5. bd close
+6. git commit
+```
+
+Same as the regular loop, with steps 1 collapsed into the user's
+prompt and steps 2–6 unchanged.
+
+The skipped steps are:
+- `hew-plan` — the user already stated the goal in plain English.
+- `hew-decompose` — there's nothing to decompose; it's one task.
+- The acceptance-criteria conversation — quick-mode tasks self-verify
+  via tests + manual confirmation.
+
+## What quick mode does NOT skip
+
+- `hew-guard` — still runs before close. The seven checks are fast
+  and the cost of skipping them on "small" work is exactly the kind
+  of drift quick mode shouldn't cause.
+- Tests — if the change has any behavior, a test covers it.
+- Commit discipline — atomic commit with conventional message.
+- `bd remember` for any gotcha you discovered.
+
+## Sizing rule
+
+If, halfway through, the work turns out to be bigger than expected:
+
+1. **Stop.** Don't keep going under quick-mode discipline.
+2. **Sub-decompose inline**: create sub-tasks under the current task
+   for the unexpected pieces, wire deps.
+3. **Surface to the user**: "This is bigger than a quick — three
+   subtasks now. Continue or pause to plan?"
+
+Quick mode that turns into a saga without acknowledgment is how
+quick-mode discipline rots.
+
+## Example
+
+User: "fix the off-by-one in the pagination cursor."
+
+```
+bd create --type=bug --priority=1 \
+  --title="Fix off-by-one in pagination cursor" \
+  --description="Pagination skips the last item per page. See app/repos/users.py:list_users — cursor is exclusive but consumer expects inclusive. Fix + test."
+
+bd update <id> --claim
+
+# read app/repos/users.py:list_users
+# read tests/repos/test_users.py
+# notice the bug; fix cursor handling
+# add a regression test covering the edge
+
+# invoke hew-guard → pass
+bd close <id> --reason "Cursor handling fixed; test_list_users_returns_last_item added; existing pagination tests still pass."
+
+# commit
+git commit -m "fix(repos): pagination cursor includes last item
+
+- correct exclusive vs inclusive boundary in list_users
+- regression test for the edge case
+"
+```
+
+Done. No plan, no decompose. One file touched, one test added, one
+commit. Total: ~10 minutes.
+
+## When the user thinks it's quick but it isn't
+
+The most common quick-mode failure is "this is a one-liner" turning
+into "we need to change three modules and add a new abstraction." If
+you notice any of these, push back:
+
+- Multiple files need touching.
+- A new dependency is involved.
+- An interface in a `BOUNDARY:` memory changes.
+- A new test fixture / harness piece is needed.
+- The fix has subtle correctness implications (e.g., concurrency, money).
+
+For each, say so and propose escalation to `hew-plan`. The user can
+override (and you proceed under quick discipline anyway), but the
+default is to escalate.
+
+## What you don't do
+
+- **Skip tests** because "it's tiny." Tiny changes break tiny things,
+  and the test catches it next time you forget.
+- **Skip `hew-guard`.** The whole point of guard is preventing the
+  drift quick mode invites.
+- **Open epics from quick mode.** If you need an epic, you needed
+  `hew-plan`.
+- **Persist the work without `bd close`.** Even quick-mode tasks
+  appear in `bd show` history — that's the audit trail.
+
+## Anti-patterns
+
+- **Quick mode that touches > 3 files.** Stop, escalate.
+- **Quick mode introducing a new dep.** Stop, run `hew-deps`.
+- **Quick mode without a test.** If the change is truly behavior-free
+  (config-only, comment-only, type-only), say so in the close
+  reason. Otherwise: write a test.
+- **Quick mode skipping the commit.** No commit = no audit trail.
+- **Saga creep** — what started quick is now five files in.
+  Surface to the user before it becomes a half-baked epic.
