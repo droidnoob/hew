@@ -16,6 +16,7 @@ which = { workspace = true }
 etcetera = { workspace = true }
 wait-timeout = { workspace = true }
 tracing = { workspace = true }
+toml = "0.9"
 
 [lib]
 name = "hew_core"

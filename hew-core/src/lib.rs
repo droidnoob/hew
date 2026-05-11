@@ -4,6 +4,7 @@
 //! easy to unit test. The `hew` binary wires presentation on top.
 
 pub mod bd;
+pub mod config;
 pub mod ctx;
 pub mod doctor;
 pub mod error;
