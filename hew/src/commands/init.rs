@@ -25,12 +25,6 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Scope::Local)]
     pub scope: Scope,
 
-    /// How to install `bd` if missing. `brew` runs `brew install beads`,
-    /// `curl` pipes the beads.sh installer through sh, `skip` errors out
-    /// asking the user to install Beads themselves.
-    #[arg(long, value_enum, default_value_t = InstallBd::Skip)]
-    pub install_bd: InstallBd,
-
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
@@ -63,20 +57,13 @@ pub enum Scope {
     Global,
 }
 
-#[derive(Debug, Copy, Clone, clap::ValueEnum, PartialEq, Eq)]
-pub enum InstallBd {
-    Brew,
-    Curl,
-    Skip,
-}
-
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
 
     let runtime = resolve_runtime(ctx, &args, &project_root)?;
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
-    let bd = ensure_bd(ctx, args.install_bd)?;
+    let bd = ensure_bd(ctx)?;
     run_bd_init(&bd, &project_root, args.prefix.as_deref())?;
 
     if !args.git_track {
@@ -161,42 +148,38 @@ fn resolve_install_root(scope: Scope, project_root: &std::path::Path) -> miette:
     }
 }
 
-fn ensure_bd(ctx: &Ctx, mode: InstallBd) -> miette::Result<RealBd> {
+/// Beads is a hard requirement. If it's not on PATH, install it.
+/// Prefers `brew` if available, falls back to `curl ... beads.sh/install | sh`.
+fn ensure_bd(ctx: &Ctx) -> miette::Result<RealBd> {
     if let Ok(bd) = RealBd::discover() {
         return Ok(bd);
     }
 
-    // bd is missing. Honor --install-bd by actually installing.
     if !ctx.quiet {
-        eprintln!("hew init: `bd` not on PATH.");
+        eprintln!("hew init: `bd` not on PATH — installing Beads.");
     }
-    match mode {
-        InstallBd::Brew => install_via_brew(ctx)?,
-        InstallBd::Curl => install_via_curl(ctx)?,
-        InstallBd::Skip => {
-            if !ctx.quiet {
-                eprintln!(
-                    "  -> skipping auto-install. Install Beads and re-run, or pass --install-bd=brew|curl."
-                );
-                eprintln!("     docs: https://gastownhall.github.io/beads/");
-            }
-            return Err(HewError::BdNotFound.into());
-        }
+
+    if which::which("brew").is_ok() {
+        install_via_brew(ctx)?;
+    } else if which::which("curl").is_ok() && which::which("sh").is_ok() {
+        install_via_curl(ctx)?;
+    } else {
+        return Err(miette::miette!(
+            "Beads is required and neither `brew` nor `curl` is on PATH. \
+             Install Homebrew (https://brew.sh) or curl, then re-run. \
+             Beads docs: https://gastownhall.github.io/beads/"
+        ));
     }
 
     RealBd::discover().map_err(|_| {
         miette::miette!(
-            "auto-install ran but `bd` still isn't on PATH. Try opening a new shell so PATH refreshes, then re-run `hew init`."
+            "Beads install ran but `bd` still isn't on PATH. \
+             Open a new shell so PATH refreshes, then re-run `hew init`."
         )
     })
 }
 
 fn install_via_brew(ctx: &Ctx) -> miette::Result<()> {
-    if which::which("brew").is_err() {
-        return Err(miette::miette!(
-            "--install-bd=brew but `brew` isn't on PATH. Install Homebrew first (https://brew.sh) or pass --install-bd=curl."
-        ));
-    }
     if !ctx.quiet {
         eprintln!("  -> brew install beads");
     }
@@ -205,12 +188,6 @@ fn install_via_brew(ctx: &Ctx) -> miette::Result<()> {
 }
 
 fn install_via_curl(ctx: &Ctx) -> miette::Result<()> {
-    if which::which("curl").is_err() {
-        return Err(miette::miette!("--install-bd=curl but `curl` isn't on PATH."));
-    }
-    if which::which("sh").is_err() {
-        return Err(miette::miette!("--install-bd=curl but `sh` isn't on PATH."));
-    }
     if !ctx.quiet {
         eprintln!("  -> curl -sSL https://beads.sh/install | sh");
     }

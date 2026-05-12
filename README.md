@@ -2,9 +2,9 @@
 
 > Carve code, not chaos.
 
-A methodology and CLI for AI coding agents that replaces markdown-based
-planning with [Beads](https://gastownhall.github.io/beads/) — a
-dependency-aware graph issue tracker backed by Dolt.
+A methodology and CLI for AI coding agents, backed by
+[Beads](https://gastownhall.github.io/beads/) — a dependency-aware
+graph issue tracker on Dolt.
 
 ## Why
 
@@ -57,58 +57,56 @@ From source (any platform with `rustup`):
 cargo install --git https://github.com/droidnoob/hew --bin hew
 ```
 
-## Getting started
-
-Three paths in. Pick the one that matches your starting point.
-
-### A. New project, no Beads yet
+## Set up a project
 
 ```sh
 cd your-project
-hew init --install-bd=brew      # also installs Beads if missing
+hew init
 ```
 
 `hew init` detects your agent runtime (Claude Code, Cursor, Codex,
 Windsurf), runs `bd init`, installs the 14 skills + 23 slash commands,
-and gitignores `.beads/`. Open the agent and say:
+and gitignores `.beads/`. It's non-interactive by default — override
+with `--runtime=...`, `--scope=...`, `--git-track`, `--prefix=...`.
+
+Re-running is idempotent. Run it again any time to re-sync skills.
+
+## Run inside the coding agent
+
+Once `hew init` has run, open your agent (or just keep it open) and
+talk to it. The skills route on intent.
+
+### New project
 
 > Plan and start building &lt;thing&gt;. Use `/hew:plan`.
 
-The agent runs `hew prime plan`, walks goal-backward, decomposes into
-a Beads graph, then enters the work loop.
+The agent walks goal-backward through `hew-plan`, decomposes into a
+Beads graph via `hew-decompose`, then enters the work loop:
+`/hew:next` claims the highest-priority unblocked task, codes it,
+runs `hew-guard`, closes it, commits. Repeat until `bd ready` is
+empty, then `/hew:verify`.
 
-### B. Existing codebase
+### Existing codebase
 
-```sh
-cd existing-project
-hew init --install-bd=brew
-```
+> Map this codebase, then plan a feature: &lt;description&gt;.
 
-Then in the agent:
-
-> This is an existing codebase. Run `/hew:scan` first, then plan a
-> feature: &lt;description&gt;.
-
-The agent walks the codebase, persists architecture as discrete
-`bd remember` facts (no `CODEBASE.md` summary file), then extracts
-`CONVENTION:` rules, audits dependencies, and maps API boundaries
-before planning the feature. Brownfield work that respects existing
-patterns, every session.
+The agent runs the brownfield chain — `hew-scan` (architecture
+mapping), `hew-convention` (extract coding rules), `hew-audit`
+(dependency health), `hew-boundary` (API contracts) — before any
+feature planning starts. Subsequent work respects existing patterns
+because the `CONVENTION:` memories are mandatory constraints to the
+executor.
 
 See [`examples/brownfield-feature/walkthrough.md`](./examples/brownfield-feature/walkthrough.md)
 for the full flow.
 
-### C. Hew is already installed (globally), new repo
+### One-off fix
 
-If you installed hew globally (`hew init --scope=global` in any prior
-project) the skills are already loaded in your agent runtime. You don't
-need to run `hew init` again — just talk to the agent:
+> Fix &lt;bug&gt; — small change, no planning needed.
 
-> Open my Claude Code in `~/repos/new-thing` and run `/hew:do`. It's a
-> new repo; set up Beads, scan if there's code, and plan.
-
-The agent runs `hew init` itself (it's on PATH), then follows the same
-flow as A or B depending on what it finds.
+Routes to `/hew:quick` — one task, one commit, no plan/decompose
+overhead. Escalates back to `/hew:plan` if the fix turns out to be
+bigger than expected.
 
 ## What ships
 
@@ -119,7 +117,7 @@ flow as A or B depending on what it finds.
   verbatim into the agent runtime.
 - **23 slash commands** under [`commands/`](./commands) — `/hew:plan`,
   `/hew:next`, `/hew:auto`, `/hew:quick`, `/hew:verify`, `/hew:ship`,
-  `/hew:doctor`, `/hew:config`, …
+  `/hew:doctor`, …
 
 ## Where to go next
 

@@ -112,9 +112,11 @@ fn init_non_interactive_without_runtime_fails_loudly() {
 }
 
 #[test]
-fn init_errors_when_bd_missing() {
+fn init_errors_clearly_when_bd_missing_and_no_installer_available() {
+    // Empty stub dir → no bd, no brew, no curl on PATH. hew init now
+    // *requires* Beads, so it must surface a clear message naming the
+    // installers it tried.
     let empty = tempfile::tempdir().unwrap();
-    // Empty stub_dir → no bd on PATH.
     let project = tempfile::tempdir().unwrap();
     fs::create_dir(project.path().join(".claude")).unwrap();
 
@@ -122,7 +124,9 @@ fn init_errors_when_bd_missing() {
         .args(["init", "--non-interactive"])
         .assert()
         .failure()
-        .stderr(contains("`bd` binary not found"));
+        .stderr(contains("Beads is required"))
+        .stderr(contains("brew"))
+        .stderr(contains("curl"));
 }
 
 #[test]
