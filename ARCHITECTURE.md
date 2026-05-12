@@ -214,6 +214,107 @@ Adding a stack requires only a new `[[stacks]]` table in the TOML;
 no Rust code changes. Removing a stack is a breaking change for
 projects that bootstrapped against it.
 
+### Craft-principles data layer + soft-warning model
+
+The craft system is the methodology's quality dial: principles like
+SOLID, DRY, KISS, Clean Architecture, and Idempotence are catalogued
+once and selected per project. The architecture has three loosely
+coupled layers.
+
+**1. The catalog** (`hew_core::craft`).
+
+- Source: `skills/data/craft-principles.toml`. v1 ships 28 entries
+  across four categories (`code-level`, `architecture`,
+  `reliability`, `rule-set`).
+- Each entry: stable kebab-case `id`, `name`, `category`, `summary`,
+  `when_to_apply`, `when_not_to_apply`, optional `conflicts_with`,
+  `example`, and `default_for_stacks` (which seeded stack ids
+  preselect this principle in the picker).
+- Embedded at compile time via `include_str!` in
+  `hew_core::craft::EMBEDDED`.
+- API: `craft::load()` / `craft::find(id)` / `craft::ids()` /
+  `craft::for_stack(stack_id)`. The last one drives the picker's
+  defaults — `hew-new-project` Phase C reads it; brownfield
+  `hew-convention` Step 11 reads it for suggestion-style nudges.
+- Schema: `hew schema craft-principles` (schemars-derived from
+  `CraftTable` → `CraftPrinciple` → `CraftCategory`).
+- Drift: ~12 unit tests assert parse, kebab-case id discipline, id
+  uniqueness, `conflicts_with` reference validity, breadth across
+  categories, `consistency-with-existing-code` defaulting on every
+  stack (the brownfield-deference invariant), and signature
+  principles being present.
+
+Adding a principle is a TOML-only change. Removing one is breaking
+for any project that wrote a `CONVENTION:craft.<id>` against it.
+
+**2. The membership memory** (`CONVENTION:craft.<id>`).
+
+A project's *chosen* principles live as memories — not as config —
+because the choice is part of the project's identity, not the agent's
+runtime tuning. Three entry points populate them:
+
+- `hew-new-project` Phase C (greenfield picker, defaults from
+  `for_stack`).
+- `hew-convention` Step 11 (brownfield extraction from layering,
+  function-length distribution, test-to-source ratio, style
+  fingerprints).
+- `hew-plan`'s Craft refinement step writes
+  `DECISION:craft-feature:<plan-id>` for per-plan adds/relaxes; these
+  are *scoped* to the plan id and don't bleed across features.
+
+The executor and reviewer read both layers when deciding what's in
+force for a given task.
+
+**3. The enforcement surface** (`hew_core::guard`).
+
+`craft_warnings(memories, diff, cfg) -> Vec<CraftWarning>` is the
+sole programmatic surface. It's a pure function — takes the memories
+map, a unified diff, and the loaded `Config`; no bd / git calls —
+which makes the heuristics trivially unit-testable on synthetic
+diffs. The hew-guard skill calls it on the staged diff and prints
+warnings under the seven hard checks.
+
+Three heuristics ship today, each gated differently:
+
+| Rule              | Gate                                  | Severity                              |
+|-------------------|---------------------------------------|---------------------------------------|
+| `missing-tests`   | always-on                             | `Warn`; `Fail` iff `testing.require`  |
+| `function-length` | `craft.max_function_lines > 0`        | `Warn`                                |
+| `duplication`     | `CONVENTION:craft.dry` memory present | `Warn`                                |
+
+Per `DECISION:craft-enforcement` (memory), hew-guard does **not**
+block close on craft warnings on its own — the only current promotion
+path is `testing.require = true` lifting `missing-tests` from
+`Warn` to `Fail`, and even then the executor decides whether to
+refuse the close. The contract is "surface, don't block."
+
+`Severity::Warn` vs `Severity::Fail` and the `CraftWarning` struct
+(`rule`, `severity`, `file`, `line`, `message`, `silence`) are
+schemars-derived so future callers (review bundles, CI surfaces) can
+deserialize without ad-hoc parsing.
+
+**Methodology flow.**
+
+`CONVENTION:craft.*` threads through every skill in the loop:
+
+```
+new-project    → CONVENTION:craft.* picked (Phase C)
+hew-convention → CONVENTION:craft.* extracted (Step 11, brownfield)
+hew-plan       → DECISION:craft-feature:<plan-id> deviations
+hew-decompose  → Tests + Craft lines per task description (Step 3)
+hew-execute    → Step 5a inline craft check before writing
+hew-guard      → soft warnings on the staged diff
+hew-verify     → 5th dimension Maintainability across batch
+hew-review     → Craft pillar walks picked principles
+hew-adversarial-review → attacks gaps left by unpicked principles
+```
+
+Soft enforcement is deliberate: drift is surfaced everywhere it can
+appear, but only the project decides which gates promote to hard
+blocks (currently only `testing.require`). New per-rule promotion
+keys (e.g., `craft.max_function_lines_require`) would slot into
+`CraftConfig` the same way.
+
 ## Runtime adapters
 
 `hew_core::install::install(runtime, root)` writes the skill tree (and

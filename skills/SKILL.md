@@ -89,12 +89,65 @@ Every `bd remember` follows a prefix convention. The executor treats prefixes di
 |--------|---------|-----------|
 | `STATUS:` | phase completion flag | routes the agent |
 | `CONVENTION:` | prescriptive coding rule | **constraint** — do not violate |
+| `CONVENTION:craft.<id>` | adaptive craft principle the project picked | hew-guard soft-warns; hew-review walks each |
 | `BOUNDARY:` | API contract / public interface | check before changing |
 | `AUDIT:` | dependency health finding | may open tasks |
 | `SECURITY:` | security decision or pattern | check on auth/input code |
 | `MIGRATION:` | DB schema change | match in code + migration file |
 | `DEP:` | new dependency evaluation | informational |
 | (none) | factual codebase knowledge | context |
+
+## Craft principles
+
+Hew ships a catalog of craft principles (SOLID, DRY, KISS, Clean
+Architecture, Hexagonal, DDD, Idempotence, Fail Fast, Pure Functions,
+…) at `skills/data/craft-principles.toml`. The catalog is embedded
+into the binary and exposed as the `CraftTable` JSON schema via
+`hew schema craft-principles`.
+
+**Adaptive, not universal.** Principles are *picked per project*, not
+applied globally. Three entry points populate the project's set:
+
+- `hew-new-project` Phase C surfaces a multi-select picker; defaults
+  come from each principle's `default_for_stacks` list. Each chosen
+  principle persists as a `CONVENTION:craft.<id>` memory.
+- `hew-convention` Step 11 (brownfield) extracts the principles the
+  codebase *already* follows — function-length distribution → suggested
+  `craft.max_function_lines`; layering style → architecture principle;
+  test-to-source ratio → `testing.require`; opportunistic style
+  fingerprints.
+- `hew-plan`'s Craft refinement step records per-feature deviations
+  as `DECISION:craft-feature:<plan-id>` memories. The executor and
+  reviewer read these *in addition to* the project-wide set.
+
+**Soft warnings, not hard blocks.** `hew-guard` reads the picked set
+plus per-plan deviations and emits soft warnings via
+`hew_core::guard::craft_warnings(memories, diff, cfg)`. Three
+heuristics ship today: `missing-tests`, `function-length` (gated on
+`craft.max_function_lines > 0`), and `duplication` (gated on
+`CONVENTION:craft.dry`). Soft by default; `testing.require = true`
+is the one current promotion from warn to fail.
+
+**Brownfield deference.** `CONVENTION:craft.consistency-with-existing-code`
+defaults on every seeded stack. When a picked principle conflicts
+with an existing `CONVENTION:` memory describing how the code is
+actually written, the existing convention wins. New work does not
+refactor the codebase to satisfy a craft rule the rest of the project
+ignores.
+
+The full lifecycle:
+
+```
+new-project → CONVENTION:craft.* picked
+  hew-convention (brownfield) → CONVENTION:craft.* extracted
+hew-plan → DECISION:craft-feature:<plan-id> per-feature deviations
+hew-decompose → Tests + Craft lines per task description
+hew-execute Step 5a → inline craft check before writing code
+hew-guard → soft warnings on the staged diff
+hew-verify → batch-level Maintainability dimension
+hew-review → Craft pillar walks picked principles
+hew-adversarial-review → attacks gaps left by unpicked principles
+```
 
 ## Anti-patterns
 
