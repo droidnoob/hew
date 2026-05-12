@@ -1,0 +1,163 @@
+# Stack-conventions seed table for `hew-new-project`.
+#
+# The synthesis step (NP3) maps the detected tech stack to one of these
+# stack_ids and writes each `[[stacks.conventions]]` entry as a
+# `CONVENTION:<key>` memory. Bodies are intentionally generic — they
+# capture the *shape* of a convention, not project-specific rules.
+# Users tighten them after the walking skeleton lands.
+
+# ── TypeScript + Next.js (App Router) ──────────────────────────────
+
+[[stacks]]
+stack_id = "ts-next"
+language = "TypeScript"
+framework = "Next.js 14+ (App Router)"
+
+[[stacks.conventions]]
+key = "components"
+body = "components — Functional components only. Props typed via TypeScript `interface`, not `type` alias. Default exports for pages (app/); named exports for shared components (components/)."
+
+[[stacks.conventions]]
+key = "state"
+body = "state — Zustand for client global state (one store per feature). React Query for server state. Never `useState` for state shared across components."
+
+[[stacks.conventions]]
+key = "styling"
+body = "styling — Tailwind classes only. No CSS modules, no inline styles, no css-in-js. Reuse via `cn()` helper for variant-aware class merging."
+
+[[stacks.conventions]]
+key = "routing"
+body = "routing — App Router only (app/). Route handlers in app/api/<resource>/route.ts. Server actions in app/actions/*.ts. No pages/ directory."
+
+[[stacks.conventions]]
+key = "errors"
+body = "errors — Throw typed errors (subclasses of AppError). Top-level error boundary in app/error.tsx renders a fallback. API route handlers catch + return Response.json({ error }, { status })."
+
+[[stacks.conventions]]
+key = "tests"
+body = "tests — Vitest for unit + integration. Playwright for E2E. Test files colocated as <name>.test.ts(x). One test file per source module."
+
+[[stacks.conventions]]
+key = "types"
+body = "types — Strict mode on. No `any` without a `// reason` comment. Prefer `unknown` + narrowing over `any`. Public API types live in src/types/ and are re-exported from a barrel."
+
+[[stacks.conventions]]
+key = "naming"
+body = "naming — camelCase for variables + functions. PascalCase for components + types. SCREAMING_SNAKE_CASE for constants. kebab-case for file names except React components (PascalCase.tsx)."
+
+# ── Python + FastAPI ────────────────────────────────────────────────
+
+[[stacks]]
+stack_id = "py-fastapi"
+language = "Python 3.12+"
+framework = "FastAPI"
+
+[[stacks.conventions]]
+key = "services"
+body = "services — Class-based with constructor DI. One service per domain (app/services/<domain>_service.py). Public methods async. Services never raise; they return `Result[T, AppError]`."
+
+[[stacks.conventions]]
+key = "routes"
+body = "routes — Route handlers are thin: parse + validate + delegate to service + map result to response. No business logic in handlers. Routes register under /api/v1/<resource> in app/api/v1/<resource>.py."
+
+[[stacks.conventions]]
+key = "errors"
+body = "errors — Never raise raw exceptions. Wrap in `AppError(code: str, message: str, details: dict)` defined in app/exceptions.py. error_middleware (app/middleware/errors.py) converts to JSON responses; never call `jsonify`/`Response` directly from a route."
+
+[[stacks.conventions]]
+key = "db"
+body = "db — All queries go through repository classes in app/repos/. No raw SQL outside app/repos/. Transactions managed via `async with db.transaction():` in the service layer, never in routes."
+
+[[stacks.conventions]]
+key = "tests"
+body = "tests — pytest with pytest-asyncio. One test file per source module: tests/{path}/test_{module}.py mirrors app/{path}/{module}.py. Real Postgres via testcontainers; no mocking the DB layer."
+
+[[stacks.conventions]]
+key = "imports"
+body = "imports — Stdlib first, third-party second, local third. Blank line between groups. Absolute imports from `app.*`, never relative."
+
+[[stacks.conventions]]
+key = "naming"
+body = "naming — snake_case for functions, variables, modules. PascalCase for classes. SCREAMING_SNAKE_CASE for constants. Private fields prefix with `_`."
+
+[[stacks.conventions]]
+key = "types"
+body = "types — All public functions annotated. Return type explicit even when `None`. mypy --strict in CI. No `Any` without an annotated `# reason:` comment."
+
+# ── Rust + Axum ─────────────────────────────────────────────────────
+
+[[stacks]]
+stack_id = "rust-axum"
+language = "Rust 2024 edition"
+framework = "Axum"
+
+[[stacks.conventions]]
+key = "handlers"
+body = "handlers — Route handlers in src/api/<resource>.rs. Take `State<AppState>`, extractors, return `Result<Json<T>, AppError>`. Logic delegated to src/services/."
+
+[[stacks.conventions]]
+key = "state"
+body = "state — Shared state via `Arc<AppState>` injected through `axum::extract::State`. Never global statics for mutable state. AppState fields are `Arc`-wrapped where shared across handlers."
+
+[[stacks.conventions]]
+key = "errors"
+body = "errors — Library code uses `thiserror`-derived enums; bin code uses `miette` for diagnostics. Implement `IntoResponse` for AppError so handlers return `Result<_, AppError>` and clients see structured JSON."
+
+[[stacks.conventions]]
+key = "traits"
+body = "traits — Public interfaces between modules go through traits, not concrete types. Mock implementations live next to the real ones (`MockFoo` alongside `RealFoo`). Inject via generics or `Arc<dyn Trait>`."
+
+[[stacks.conventions]]
+key = "tests"
+body = "tests — Inline `#[cfg(test)] mod tests` at the bottom of every module for unit tests. Integration tests in `tests/<topic>.rs`. PATH-stub external binaries via shell scripts in tempdirs."
+
+[[stacks.conventions]]
+key = "naming"
+body = "naming — Rust standard: snake_case for functions/modules/variables. PascalCase for types. SCREAMING_SNAKE_CASE for consts. Acronyms in PascalCase prefix (BdClient, not BDClient)."
+
+[[stacks.conventions]]
+key = "imports"
+body = "imports — std first, then external crates, then crate-local. Blank line between groups. Absolute paths (`use crate::error::Result`); rustfmt enforces ordering."
+
+[[stacks.conventions]]
+key = "formatting"
+body = "formatting — `cargo fmt` + `cargo clippy -- -D warnings` enforced via pre-commit hook. rustfmt.toml: edition=2024, max_width=100."
+
+# ── Go + Echo ───────────────────────────────────────────────────────
+
+[[stacks]]
+stack_id = "go-echo"
+language = "Go 1.22+"
+framework = "Echo v4"
+
+[[stacks.conventions]]
+key = "handlers"
+body = "handlers — One handler file per resource in internal/api/<resource>.go. Handlers take `echo.Context`, validate, delegate to service, return JSON. No business logic in handlers."
+
+[[stacks.conventions]]
+key = "services"
+body = "services — Plain structs with constructor functions returning `*Service`. Constructor injects deps (DB, logger, clients). Services return `(T, error)` or `error` for side-effect-only methods."
+
+[[stacks.conventions]]
+key = "errors"
+body = "errors — Wrap errors with `fmt.Errorf(\"<context>: %w\", err)`. Define sentinel errors as `var ErrFoo = errors.New(...)`. Echo error middleware translates AppError to HTTP response."
+
+[[stacks.conventions]]
+key = "middleware"
+body = "middleware — Cross-cutting concerns (logging, auth, request_id) as Echo middleware in internal/middleware/. Apply via e.Use() in main.go, ordered: recover → logger → request_id → auth."
+
+[[stacks.conventions]]
+key = "tests"
+body = "tests — _test.go colocated with source. Table-driven tests for branchy logic. httptest.NewRecorder + echo.New().NewContext for handler tests. testcontainers for integration."
+
+[[stacks.conventions]]
+key = "naming"
+body = "naming — Go standard: camelCase for unexported, PascalCase for exported. No underscores in identifiers. Package names are short, lowercase, single-word."
+
+[[stacks.conventions]]
+key = "layout"
+body = "layout — Standard Go project layout: cmd/<binary>/main.go, internal/<package>/, pkg/<exposed>/. Never put domain code under cmd/."
+
+[[stacks.conventions]]
+key = "formatting"
+body = "formatting — `gofmt` + `golangci-lint run` enforced in CI. No manual formatting; let the tools win."

@@ -68,3 +68,11 @@ fn schema_new_task_emits_args() {
     assert_eq!(parsed["title"], "NewTaskArgs");
     assert!(parsed["properties"]["title"].is_object());
 }
+
+#[test]
+fn schema_stacks_emits_stack_table() {
+    let out = hew().args(["schema", "stacks"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "StackTable");
+    assert!(parsed["properties"]["stacks"].is_object());
+}

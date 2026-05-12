@@ -17,6 +17,7 @@ pub mod prime;
 pub mod review;
 pub mod skills;
 pub mod slash;
+pub mod stacks;
 pub mod status;
 pub mod tasks;
 pub mod tty;

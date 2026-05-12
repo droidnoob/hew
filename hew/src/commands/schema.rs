@@ -27,6 +27,8 @@ pub enum Which {
     TaskListFilter,
     /// Schema for `hew task new` args (NewTaskArgs).
     NewTask,
+    /// Schema for the embedded stack-conventions table (StackTable).
+    Stacks,
 }
 
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
@@ -39,6 +41,7 @@ pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
         Which::Epic => schema_for!(hew_core::tasks::EpicSummary),
         Which::TaskListFilter => schema_for!(hew_core::tasks::TaskListFilter),
         Which::NewTask => schema_for!(hew_core::tasks::NewTaskArgs),
+        Which::Stacks => schema_for!(hew_core::stacks::StackTable),
     };
     let json = serde_json::to_string_pretty(&schema)
         .map_err(|e| miette::miette!("serialize schema: {e}"))?;
