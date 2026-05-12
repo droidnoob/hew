@@ -135,6 +135,35 @@ reasons should mention any deviation rules applied.
 - TODOs / FIXMEs left in the diff (`hew-guard` should catch these but
   sometimes lets them through).
 
+### 7. Craft pillar — picked principles
+
+Walk every `CONVENTION:craft.<id>` memory in the bundle (the bundle
+already collects them under `memories.conventions`). For each picked
+principle, inspect the diff for violations:
+
+| Principle (id)               | What to look for in the diff                                                      |
+|------------------------------|-----------------------------------------------------------------------------------|
+| `craft.solid` / SRP          | A class/module grew a second unrelated reason to change (e.g. service handles routing AND persistence). |
+| `craft.dry`                  | Identical 5+ line blocks across two files / two functions; missed helper extraction. |
+| `craft.kiss` / `craft.yagni` | A new abstraction introduced for a single caller; speculative interfaces.         |
+| `craft.small-functions`      | Functions exceeding `craft.max_function_lines`; obvious split points ignored.     |
+| `craft.fail-fast`            | Endpoint persists/sends side-effects before validating input.                     |
+| `craft.idempotence`          | Retry-unsafe handler in a flow advertised as retryable.                           |
+| `craft.tell-dont-ask`        | New code reads a getter then branches on the result, where a method on the owner would be cleaner. |
+| `craft.consistency-with-existing-code` | The diff adopts a pattern that contradicts an existing `CONVENTION:` memory — always wins, file as drift. |
+
+Skip principles **not** present in the project's set — applying SOLID
+universally is exactly what `DECISION:craft-adaptive` rejected.
+
+Cross-reference any unresolved soft-warnings `hew-guard` surfaced for
+the closing tasks (`missing-tests`, `function-length`, `duplication`).
+A warning that the executor silenced without a `DECISION:` justifying
+it is a finding here.
+
+If a `DECISION:craft-feature:<plan-id>` memory documents a deliberate
+deviation for this plan's scope, don't flag the deviation — note it as
+*acknowledged* in the review output.
+
 ## Severity → filing
 
 Every finding lands in bd. **No memory pollution.** Two types:
@@ -144,6 +173,12 @@ Every finding lands in bd. **No memory pollution.** Two types:
 | BLOCKER — actively broken, security risk, contract break | `bug` | `[Review][BLOCKER] …` |
 | WARNING — convention drift, missing test, dead code, doc gap | `bug` | `[Review][WARNING] …` |
 | INFO — suggestion, future improvement, "consider X" | `chore` | `[Review][INFO] …` |
+
+Craft findings use the same severities with a `[CRAFT]` tag appended:
+`[Review][WARNING][CRAFT] services/billing.py — DRY violation…`. Pick
+severity by the project's existing rules, not the principle itself —
+a missed extraction is usually WARNING; a SRP violation that hides a
+race is BLOCKER.
 
 Filing template:
 

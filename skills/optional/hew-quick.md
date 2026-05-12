@@ -57,6 +57,28 @@ The skipped steps are:
 - Commit discipline — atomic commit with conventional message.
 - `hew remember --type=gotcha "..."` for any gotcha you discovered.
 
+## Craft minimum
+
+Quick mode is the most common place craft discipline silently lapses
+("it's small, I'll skip the test"). Two rules survive every quick
+task:
+
+1. **A test, unless the change is provably behavior-free.** Config
+   tweaks, comment edits, type-only renames, and dead-code deletions
+   are the only exemptions. If you exempt, name the reason in the
+   close: `--reason "comment-only: clarified pagination boundary"`.
+   `hew-guard`'s `missing-tests` warning fires if you skip a test on
+   a behavior-changing file; `testing.require=true` promotes that to
+   fail.
+2. **Don't violate the project's existing `CONVENTION:craft.*` set.**
+   You don't need to enumerate them — they're picked once at
+   `hew-new-project` time and carry through every task. Just don't
+   ship code that contradicts a principle the project actively chose
+   (e.g., DRY-violating copy-paste in a project that picked
+   `CONVENTION:craft.dry`).
+
+That's the floor. The rest of quick mode is unchanged.
+
 ## Sizing rule
 
 If, halfway through, the work turns out to be bigger than expected:
@@ -137,3 +159,7 @@ default is to escalate.
 - **Quick mode skipping the commit.** No commit = no audit trail.
 - **Saga creep** — what started quick is now five files in.
   Surface to the user before it becomes a half-baked epic.
+- **Skipping the test silently.** "Quick mode means no tests" is the
+  myth that produces the worst regressions. Either write the test or
+  spell out the behavior-free exemption in the close reason — silence
+  isn't an exemption.

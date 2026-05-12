@@ -137,6 +137,14 @@ Include:
   `BOUNDARY:` interfaces not to break, `AUDIT:` warnings about libs.
 - **Files the work should touch** — exact paths if known, glob if a known
   module. `src/auth/jwt.py` beats "the auth code."
+- **Tests** — one line naming the test file plus the specific behavior the
+  test will pin. Tasks that legitimately can't be unit-tested (config,
+  pure glue, docs) must say so and explain why.
+- **Craft** — one line listing which `CONVENTION:craft.<id>` bindings the
+  executor should honor for this task, and any planned deviations the
+  reviewer should expect. Pull from the project-wide
+  `CONVENTION:craft.*` set plus any `DECISION:craft-feature:<plan-id>`
+  refinement memory written by hew-plan.
 
 ```
 hew task new --type=task --priority=1 \
@@ -147,6 +155,8 @@ hew task new --type=task --priority=1 \
   Convention: wrap errors in AppError per CONVENTION:errors. Service layer per CONVENTION:services.
   Boundary: must not change the existing POST /api/v1/users contract (BOUNDARY:users-create).
   Files: app/api/v1/auth.py (new), app/services/auth_service.py (new), tests/api/test_auth.py (new).
+  Tests: tests/api/test_auth.py pins (a) 200 + tokens on valid creds, (b) 401 + AppError on invalid, (c) refresh rotation. Each maps to one acceptance criterion.
+  Craft: CONVENTION:craft.solid (service-layer SRP), CONVENTION:craft.fail-fast (reject malformed body before DB hit), CONVENTION:craft.dry (share token-encode helper with /refresh). No deviations from project set.
   "
 ```
 
@@ -274,12 +284,12 @@ hew task new --parent=hew-a3f8 --type=task --priority=1 \
 
 hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/login" \
-  --description="Why: D-04. What: validates {email,password}, returns AuthResponse. CONVENTION:errors (AppError), CONVENTION:services (DI). Files: app/services/auth_service.py, app/api/v1/auth/login.py, tests/api/test_login.py."
+  --description="Why: D-04. What: validates {email,password}, returns AuthResponse. CONVENTION:errors (AppError), CONVENTION:services (DI). Files: app/services/auth_service.py, app/api/v1/auth/login.py, tests/api/test_login.py. Tests: test_login.py pins 200+tokens (valid), 401+AppError (invalid), brute-force throttle. Craft: CONVENTION:craft.solid + craft.fail-fast (validate before DB hit)."
 # → hew-a3f8.2
 
 hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/refresh + rotation" \
-  --description="Why: D-04 refresh rotation requirement. Files: app/api/v1/auth/refresh.py, tests/api/test_refresh.py."
+  --description="Why: D-04 refresh rotation requirement. Files: app/api/v1/auth/refresh.py, tests/api/test_refresh.py. Tests: test_refresh.py pins rotation-on-use + revoke-old-token + reuse-detection. Craft: CONVENTION:craft.idempotence (rotate is replay-safe), craft.dry (reuse token-encode helper from .2)."
 # → hew-a3f8.3
 
 hew task new --parent=hew-a3f8 --type=task --priority=2 \

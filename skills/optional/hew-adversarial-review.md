@@ -142,6 +142,50 @@ If the answer is "nobody until someone complains," it's a finding.
 These are the bugs that survive `/hew:review` because no convention
 exists for them yet. The adversarial pass exists to surface them.
 
+### 7. Craft pillar — attack the gaps the project didn't pick
+
+Friendly review walks the principles the project **chose**. Adversarial
+review attacks the principles the project **left out**. Read the
+`CONVENTION:craft.*` set, then list every catalog principle *not*
+present and ask: what failure mode does this absence enable?
+
+Examples:
+
+- Project didn't pick `craft.fail-fast`. → Where in the diff does an
+  endpoint persist or send a side-effect before validating input?
+  What happens when validation fails after the write?
+- Project didn't pick `craft.idempotence`. → Which new handler is
+  retried by the client / queue / load balancer? What happens on a
+  duplicate?
+- Project didn't pick `craft.pure-functions`. → Which "computation"
+  reaches out to a clock, a DB, an env var, making it untestable?
+- Project didn't pick `craft.dry`. → Where will the next person copy
+  this code block, and what will go wrong when only one copy gets
+  fixed?
+- Project didn't pick `craft.tell-dont-ask`. → Where does the diff
+  reach into another object's state and branch on it, creating an
+  invariant that lives in the caller?
+
+A *picked* craft principle whose violation `/hew:review` already
+flagged is not adversarial-scope — friendly review owns those. Look
+for what friendly review *couldn't* see because no `CONVENTION:craft.<id>`
+authorized it.
+
+File findings under the `[CRAFT]` tag with severity calibrated to the
+realized risk:
+
+```
+[Adversarial][WARNING][CRAFT] app/api/billing.py:34 — handler is non-idempotent
+  but POST /charge is retried by Stripe on 5xx. Project didn't pick
+  craft.idempotence so this isn't a CONVENTION violation, but a duplicate
+  retry will double-charge. Either pick craft.idempotence and fix, or
+  document the retry-unsafe boundary in a SECURITY:/DECISION: memory.
+```
+
+The output of this pillar is sometimes "the project should pick
+principle X" — that's a legitimate finding, filed as a chore so the
+team can revisit the picker.
+
 ## Steelman the alternative
 
 For the **biggest** chunk of changed code, write a one-paragraph
@@ -176,6 +220,12 @@ Identical to `hew-review`:
 | BLOCKER  | `bug`   | `[Adversarial][BLOCKER] …` |
 | WARNING  | `bug`   | `[Adversarial][WARNING] …` |
 | INFO     | `chore` | `[Adversarial][INFO] …` |
+
+Craft-gap findings append `[CRAFT]`:
+`[Adversarial][WARNING][CRAFT] …`. Severity reflects the realized
+failure mode, not the principle's prestige — an unenforced
+`craft.idempotence` on a payment endpoint is BLOCKER; the same gap on
+a cached read is INFO.
 
 Filing template:
 

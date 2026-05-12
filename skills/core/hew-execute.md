@@ -184,8 +184,59 @@ Quick TDD when it fits:
 2. Make it pass with the minimum code.
 3. Refactor only if needed.
 
+Test-first is the default when behavior is new. The cost is a handful
+of extra tokens; the win is a hard pin on the acceptance criterion
+that survives every later refactor. If `hew config get testing.require`
+is `true`, hew-guard escalates "missing tests" from warn to fail at
+close-time — see `DECISION:craft-testing` and `hew-guard`'s
+soft-warning table.
+
 If TDD doesn't fit (UI, config, glue), still write tests covering the
 acceptance criteria before claiming done.
+
+### Step 5a — Craft check
+
+Before writing the first line of new code, read the project's craft
+set:
+
+```
+hew memories --prefix CONVENTION   # filter for CONVENTION:craft.* entries
+```
+
+Plus any feature-level deviations from `hew-plan`'s craft refinement
+step:
+
+```
+hew memories --prefix DECISION     # look for DECISION:craft-feature:<plan-id>
+```
+
+The task description's `Craft:` line (added by `hew-decompose` Step 3)
+tells you which bindings are load-bearing for this task. Honor them
+inline as you code:
+
+- **SOLID / SRP** — if a class or function grows two unrelated reasons
+  to change, split it before closing.
+- **DRY** — when you copy-paste a block that you already wrote in
+  another file this session, extract a helper. `hew-guard`'s
+  `duplication` soft-warning fires when a 5+ line block repeats; treat
+  the warning as a nudge, not noise.
+- **Small functions / Single Level of Abstraction** — if a function
+  spans more than `craft.max_function_lines` (config), `hew-guard`
+  will flag it. Split or justify in the close reason.
+- **Fail Fast / Idempotence / Pure Functions** — pick the right one
+  for the boundary (input validation, retries, computation cores).
+
+These are watchpoints, not universal rules. If a `CONVENTION:craft.<id>`
+isn't in the project set, don't apply it. If a
+`DECISION:craft-feature:<plan-id>` relaxes one, follow the deviation
+and note it in the close reason so the reviewer doesn't flag it.
+
+Brownfield deference: when a chosen craft principle conflicts with a
+pre-existing `CONVENTION:` memory describing how the code is actually
+written today, the existing convention wins (see
+`CONVENTION:craft.consistency-with-existing-code` — it defaults on
+every seeded stack). Don't refactor to satisfy a craft rule the rest
+of the codebase ignores; surface the conflict instead.
 
 ## The four deviation rules
 
@@ -463,3 +514,15 @@ There is no "save state" step. The graph IS the state.
   for every gotcha relearned.
 - **Closing while guard fails.** The whole point of guard is to prevent
   this.
+- **Mega-function.** A 200-line handler with five distinct concerns
+  inside it. Split before close; lean on
+  `CONVENTION:craft.small-functions` / `single-level-of-abstraction`
+  when the project picked them.
+- **Duplicated logic across files.** If `hew-guard`'s `duplication`
+  soft-warning fires (5+ identical lines across two locations),
+  extract a helper. Silencing the warning by removing the DRY memory
+  is a smell, not a fix.
+- **Applying craft rules the project didn't pick.** Universal SOLID /
+  DRY enforcement isn't the contract. Only honor
+  `CONVENTION:craft.<id>` memories that actually exist in this
+  project's set.

@@ -138,6 +138,42 @@ novel domain, unknown library landscape) and the user picked "Skip,"
 record the uncertainty in a `DECISION:` memory tagged `[ASSUMED]` so it
 can be revisited.
 
+## Craft refinement — feature-level deviations
+
+The project picked its craft set in `hew-new-project` Phase C; those
+choices live as `CONVENTION:craft.<id>` memories and apply to every
+plan by default. Sometimes a single feature legitimately needs a
+narrower or wider set — an event-sourced slice in an otherwise CRUD
+codebase, a perf-critical hot path that locally relaxes
+`single-level-of-abstraction`, a transaction-script in a generally
+DDD project.
+
+Read the project's `CONVENTION:craft.*` set, then ask once:
+
+```
+Does this plan need to deviate from the project's craft set?
+> No — project defaults apply unchanged
+  Add: this slice needs <principle> in addition (e.g. event-sourcing)
+  Relax: <principle> doesn't fit here (state the reason)
+```
+
+Record any deviation as a `DECISION:craft-feature:<plan-id>` memory.
+The executor and reviewer pick these up alongside the project-wide
+`CONVENTION:craft.*` set:
+
+```
+hew remember --type=decision "craft-feature:auth-mvp — ADD event-sourcing for the audit log slice (auditable token issuance). Project default: CRUD. Reason: regulatory replay requirement."
+hew remember --type=decision "craft-feature:hot-render — RELAX single-level-of-abstraction in src/render/inner_loop.rs (perf). Justified by benchmark notes."
+```
+
+If the user picks "No," skip the memory write — silence means the
+project-wide set applies.
+
+Both `hew-execute` (Step 5 craft check) and `hew-review` (Craft pillar)
+read these per-plan deviations *in addition to* the project's
+`CONVENTION:craft.*` memories. Deviations are scoped to the plan id;
+they do not bleed across features.
+
 ## What you don't do
 
 - **No tasks.** That is `hew-decompose`. Do not run `hew task new` here.
