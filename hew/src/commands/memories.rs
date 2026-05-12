@@ -13,14 +13,25 @@ pub struct Args {
     /// Filter to memories whose value contains this substring (case-insensitive).
     #[arg(long)]
     pub grep: Option<String>,
+
+    /// Sugar for `--prefix=RESEARCH --grep=<topic>`. Conflicts with --prefix.
+    #[arg(long, value_name = "TOPIC", conflicts_with = "prefix")]
+    pub research: Option<String>,
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let client = RealBd::discover()?;
     let memories = client.memories()?;
 
-    let needle = args.grep.as_ref().map(|s| s.to_lowercase());
-    let pfx = args.prefix.as_ref().map(|p| format!("{}:", p.trim_end_matches(':')));
+    // Resolve --research sugar into the underlying prefix/grep filters.
+    let (prefix, grep) = if let Some(topic) = args.research.as_ref() {
+        (Some("RESEARCH".to_string()), Some(topic.clone()))
+    } else {
+        (args.prefix.clone(), args.grep.clone())
+    };
+
+    let needle = grep.as_ref().map(|s| s.to_lowercase());
+    let pfx = prefix.as_ref().map(|p| format!("{}:", p.trim_end_matches(':')));
 
     let mut hits: Vec<(&String, &String)> = memories
         .iter()

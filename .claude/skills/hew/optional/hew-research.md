@@ -70,19 +70,39 @@ bd remember "RESEARCH: Stripe has trials."
 If a finding could have been written without doing any research, it's
 not a finding.
 
-## Citation discipline
+## Citation discipline — provenance tags required
 
-Every finding includes the source it came from. The verbosity is
-worth it:
+Every finding includes a **provenance tag** and a source. Tag picks one
+of three:
 
-- If the framework's docs changed, you can re-check the original.
-- The user can audit the claim.
-- "I read it somewhere" loses to "Source: nextjs-docs/app-router#dynamic, verified 2026-05-10."
+| Tag | When |
+|-----|------|
+| `[VERIFIED]` | Cross-checked against 2+ independent authoritative sources. |
+| `[CITED]` | A single authoritative source backs the claim (docs, RFC, vendor blog by the maintainer). |
+| `[ASSUMED]` | Agent inference — no source. Use sparingly; downstream skills treat these as load-bearing assumptions to revisit. |
 
 Format:
+
 ```
-RESEARCH:<topic-tag> — <finding>. Source: <url-or-doc-ref>, verified <YYYY-MM>.
+RESEARCH:<topic-tag> [TAG] <finding>. Source: <url-or-doc-ref>, verified <YYYY-MM>.
 ```
+
+Examples:
+
+```
+bd remember "RESEARCH:auth [VERIFIED] passwordless email-link auth: TTL 15 min, single-use, same-origin redirect. Source: NIST SP 800-63B §5.1.3.2 + OWASP ASVS v4 §2.10, verified 2026-05."
+bd remember "RESEARCH:stripe [CITED] trial_period_days cannot be extended via API; user must cancel + re-subscribe. Source: stripe-docs/checkout/subscriptions#trials, verified 2026-05."
+bd remember "RESEARCH:rate-limit [ASSUMED] 5 attempts / 15 min / IP is a reasonable default for the link endpoint. Source: n/a — agent inference based on common defaults."
+```
+
+`[ASSUMED]` is acceptable only when no source is available; flag it
+explicitly so the planner knows it's untested.
+
+The verbosity is worth it:
+- If the framework's docs changed, you can re-check the original.
+- The user can audit the claim.
+- Future planners reading the cache via `hew memories --research <topic>`
+  can sort findings by trust level.
 
 ## Cross-checking
 
@@ -119,13 +139,25 @@ Open questions for the user (1):
     No → simpler path; record decision in DECISION:auth.
 ```
 
-## Step — mark phase complete (optional)
+## Step — mark phase complete + route back to hew-plan
 
-For research that resolves a planning blocker, write a status memory
-the planner can check:
+On completion, write the status marker and route back to `hew-plan`
+to finalize — *not* directly to `hew-decompose`. The planner needs
+to incorporate the findings into the plan before tasks get cut.
 
 ```
-bd remember "STATUS:research:<topic>:complete — <ISO-8601 timestamp>"
+bd remember "STATUS:research:complete — <ISO-8601 timestamp>"
+```
+
+Then: "Research complete. Returning to `hew-plan` with findings — the
+planner will fold them in before handing off to `hew-decompose`."
+
+The user (or a future session) can review the cached findings any time
+via:
+
+```
+hew memories --research <topic>
+# sugar for: hew memories --prefix=RESEARCH --grep=<topic>
 ```
 
 ## What you don't do
