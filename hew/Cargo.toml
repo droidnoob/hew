@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description.workspace = true
+homepage = "https://github.com/droidnoob/hew"
 
 [[bin]]
 name = "hew"

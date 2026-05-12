@@ -56,16 +56,32 @@ methodology, one CLI.
 
 ```sh
 brew install beads
-# or
-curl -sSL https://beads.sh/install | sh
 ```
 
 ### Install hew
 
+macOS / Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/droidnoob/hew/releases/latest/download/hew-installer.sh | sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/droidnoob/hew/releases/latest/download/hew-installer.ps1 | iex"
+```
+
+Homebrew:
+
 ```sh
 brew install droidnoob/hew/hew
-# or
-curl -sSL https://hew.sh/install | sh
+```
+
+From source (any platform with `rustup`):
+
+```sh
+cargo install --git https://github.com/droidnoob/hew --bin hew
 ```
 
 ### Wire it into your project
