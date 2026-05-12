@@ -211,11 +211,8 @@ pub fn latest_checkpoint(memories: &BTreeMap<String, String>) -> Option<Checkpoi
         .filter(|(_, v)| v.trim_start().starts_with("CHECKPOINT:"))
         .map(|(k, v)| {
             let rest = v.trim_start().strip_prefix("CHECKPOINT:").unwrap_or("");
-            let timestamp = rest
-                .split_whitespace()
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
+            let timestamp =
+                rest.split_whitespace().next().filter(|s| !s.is_empty()).map(|s| s.to_string());
             Checkpoint { key: k.clone(), timestamp, body: v.clone() }
         })
         .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
@@ -350,10 +347,7 @@ mod tests {
 
     #[test]
     fn latest_checkpoint_returns_none_when_absent() {
-        let m = map(&[
-            ("a", "CONVENTION:errors — wrap"),
-            ("b", "Backend: FastAPI"),
-        ]);
+        let m = map(&[("a", "CONVENTION:errors — wrap"), ("b", "Backend: FastAPI")]);
         assert!(latest_checkpoint(&m).is_none());
     }
 

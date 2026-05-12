@@ -156,12 +156,7 @@ fn prime_resume_emits_skill_agnostic_json() {
     // Latest checkpoint is the newer one.
     assert_eq!(parsed["latest_checkpoint"]["key"], "ck-new");
     assert_eq!(parsed["latest_checkpoint"]["timestamp"], "2026-05-12T14:30");
-    assert!(
-        parsed["latest_checkpoint"]["body"]
-            .as_str()
-            .unwrap()
-            .contains("refresh rotation")
-    );
+    assert!(parsed["latest_checkpoint"]["body"].as_str().unwrap().contains("refresh rotation"));
 }
 
 #[test]

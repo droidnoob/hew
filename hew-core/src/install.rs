@@ -281,22 +281,20 @@ fn upsert_claude_session_hook(claude_dir: &Path) -> Result<PathBuf> {
     let hooks_entry = root
         .entry("hooks".to_string())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let hooks = hooks_entry.as_object_mut().ok_or_else(|| {
-        crate::error::HewError::SettingsMalformed {
+    let hooks =
+        hooks_entry.as_object_mut().ok_or_else(|| crate::error::HewError::SettingsMalformed {
             path: settings_path.display().to_string(),
             reason: "`hooks` must be a JSON object".to_string(),
-        }
-    })?;
+        })?;
 
     let session_entry = hooks
         .entry("SessionStart".to_string())
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    let arr = session_entry.as_array_mut().ok_or_else(|| {
-        crate::error::HewError::SettingsMalformed {
+    let arr =
+        session_entry.as_array_mut().ok_or_else(|| crate::error::HewError::SettingsMalformed {
             path: settings_path.display().to_string(),
             reason: "`hooks.SessionStart` must be an array".to_string(),
-        }
-    })?;
+        })?;
 
     arr.retain(|v| !v.get(HEW_MANAGED_FLAG).and_then(|f| f.as_bool()).unwrap_or(false));
     arr.push(serde_json::json!({
@@ -449,12 +447,11 @@ fn upsert_claude_allowlist(claude_dir: &Path) -> Result<PathBuf> {
     let allow_entry = permissions
         .entry("allow".to_string())
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    let allow = allow_entry.as_array_mut().ok_or_else(|| {
-        crate::error::HewError::SettingsMalformed {
+    let allow =
+        allow_entry.as_array_mut().ok_or_else(|| crate::error::HewError::SettingsMalformed {
             path: settings_path.display().to_string(),
             reason: "`permissions.allow` must be an array".to_string(),
-        }
-    })?;
+        })?;
 
     // Drop prior-hew entries; preserve everything else.
     allow.retain(|v| match v.as_str() {
@@ -1000,8 +997,12 @@ mod tests {
 
         install(Runtime::Claude, tmp.path()).unwrap();
         let v = parse_settings(&claude.join("settings.json"));
-        let allow_strs: Vec<&str> =
-            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        let allow_strs: Vec<&str> = v["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
         assert!(allow_strs.contains(&"Bash(npm:*)"), "user entry preserved");
         assert!(allow_strs.contains(&"Bash(make:*)"), "user entry preserved");
         assert!(allow_strs.contains(&"Bash(bd:*)"), "hew entry added");
@@ -1025,8 +1026,12 @@ mod tests {
 
         install(Runtime::Claude, tmp.path()).unwrap();
         let v = parse_settings(&claude.join("settings.json"));
-        let allow_strs: Vec<&str> =
-            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        let allow_strs: Vec<&str> = v["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
         let bd_count = allow_strs.iter().filter(|s| **s == "Bash(bd:*)").count();
         assert_eq!(bd_count, 1, "no duplicate of Bash(bd:*) even when user pre-added it");
     }
@@ -1049,8 +1054,12 @@ mod tests {
         uninstall(Runtime::Claude, tmp.path()).unwrap();
 
         let v = parse_settings(&claude.join("settings.json"));
-        let allow_strs: Vec<&str> =
-            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        let allow_strs: Vec<&str> = v["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
         assert_eq!(allow_strs, vec!["Bash(npm:*)", "Bash(make:*)"], "only hew entries removed");
         assert!(v["permissions"].get(HEW_MANAGED_ALLOWLIST_KEY).is_none(), "tracker cleared");
         assert_eq!(v["permissions"]["deny"][0], "Bash(rm -rf /:*)", "deny preserved");
