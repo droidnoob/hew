@@ -48,6 +48,11 @@ pub const ALL: &[SlashCommand] = &[
     cmd!("decompose", "decompose.md"),
     cmd!("resume", "resume.md"),
     cmd!("prime", "prime.md"),
+    cmd!("scan", "scan.md"),
+    cmd!("convention", "convention.md"),
+    cmd!("audit", "audit.md"),
+    cmd!("boundary", "boundary.md"),
+    cmd!("migrate", "migrate.md"),
 ];
 
 #[cfg(test)]
@@ -55,8 +60,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ships_thirty_one_commands() {
-        assert_eq!(ALL.len(), 31);
+    fn ships_thirty_six_commands() {
+        assert_eq!(ALL.len(), 36);
     }
 
     #[test]
