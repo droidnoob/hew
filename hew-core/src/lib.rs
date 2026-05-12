@@ -8,6 +8,7 @@ pub mod config;
 pub mod ctx;
 pub mod doctor;
 pub mod error;
+pub mod git;
 pub mod install;
 pub mod notify;
 pub mod prime;

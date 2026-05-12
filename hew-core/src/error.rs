@@ -35,6 +35,17 @@ pub enum HewError {
         help("fix or remove the file and re-run `hew init`")
     )]
     SettingsMalformed { path: String, reason: String },
+
+    #[error("`git` binary not found on PATH")]
+    #[diagnostic(
+        code(hew::git::not_found),
+        help("install git: `brew install git` on macOS, or use your distro's package manager")
+    )]
+    GitNotFound,
+
+    #[error("`git` exited with status {code}: {stderr}")]
+    #[diagnostic(code(hew::git::nonzero_exit))]
+    GitNonZero { code: i32, stderr: String },
 }
 
 pub type Result<T> = std::result::Result<T, HewError>;
