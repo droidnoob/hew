@@ -6,6 +6,123 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-13
+
+The Craft + Compaction release. The methodology now adapts to each project's chosen quality dial, surfaces drift as soft warnings without blocking close, and ships a controlled compaction surface for noisy memory prefixes. Plus 12 new slash commands and a docs refresh.
+
+### Added — Craft system
+
+- **Catalogue** — 28 craft principles (SOLID, DRY, KISS, YAGNI, Clean Architecture, Hexagonal, DDD, Idempotence, Fail Fast, Pure Functions, Small Functions, Single Level of Abstraction, Tell-Don't-Ask, Command-Query Separation, Meaningful Names, No Magic Numbers, Consistency With Existing Code, …) at `skills/data/craft-principles.toml`, embedded via `include_str!` and exposed as `hew schema craft-principles`. New `hew_core::craft` API: `load`, `find`, `ids`, `for_stack(stack_id)`.
+- **Adaptive selection** — principles are picked per project, not applied universally. Three entry points populate the project's set:
+  - `hew-new-project` Phase C surfaces a multi-select picker; defaults from each principle's `default_for_stacks` list. Each chosen principle persists as `CONVENTION:craft.<id>`.
+  - `hew-convention` Step 11 (brownfield) extracts the principles the codebase already follows via four heuristics: function-length distribution, layering style, test-to-source ratio, opportunistic style fingerprints.
+  - `hew-plan` Craft refinement records per-feature deviations as `DECISION:craft-feature:<plan-id>` memories.
+- **Soft-warning enforcement** — `hew_core::guard::craft_warnings(memories, diff, cfg) -> Vec<CraftWarning>` is a pure function the hew-guard skill body calls on the staged diff. Three heuristics ship: `missing-tests` (always-on; promoted from Warn to Fail when `testing.require=true`), `function-length` (gated on `craft.max_function_lines > 0`), `duplication` (gated on a `CONVENTION:craft.dry` memory). Per `DECISION:craft-enforcement`, warnings never block close on their own.
+- **Brownfield deference** — `craft.consistency-with-existing-code` defaults on every seeded stack; existing `CONVENTION:*` always wins over a freshly-picked principle.
+- **Methodology threading** — every loop skill (`hew-plan`, `hew-decompose`, `hew-execute`, `hew-quick`, `hew-guard`, `hew-verify`, `hew-review`, `hew-adversarial-review`) reads and reacts to the picked set: task descriptions gain `Tests:` + `Craft:` lines, executor has a Step 5a inline craft check, verify has a Maintainability dimension across the batch, review walks picked principles, adversarial-review attacks gaps left by unpicked ones.
+- **Brownfield audit** — `hew-audit` gains Craft drift checks as a 7th finding category that greps for code regions contradicting a persisted `CONVENTION:craft.<id>`.
+
+### Added — `hew-new-project` skill
+
+- New core skill bootstraps a project from a 1–3 sentence outline. Phases: Capture + Socratic clarifying (4–6 PROJECT memories) → Parallel research (RESEARCH memories with `[VERIFIED]` / `[CITED]` / `[ASSUMED]` provenance tags) → Synthesis pickers (stack family + craft principles + database + auth + hosting) → Milestone-vocabulary picker → Roadmap construction (one epic per milestone, sequenced via task-level deps) → First-milestone decompose. Idempotency: refuses re-run if `STATUS:new-project:complete` exists unless `--re-bootstrap` is passed.
+- Companion `/hew:new-project` slash command.
+
+### Added — Memory compaction
+
+- **`hew_core::compact` module** — pure-data layer with `CompactPlan { prefix, target_clusters, granularity, allow_recompact, clusters }`, `Cluster { topic, source_keys, replacement_bodies }`, `Granularity { Broad, Fine }`, `ApplyReport`, `validate`, and `default_k(n) = ceil(sqrt(n)).clamp(1, cap)`. All schemars-derived.
+- **Safety invariants** in `compact::apply`, encoded per the four locked DECISION:compact-* memories: **adds-before-forgets** (replacements written FIRST so a mid-apply crash leaves more memory, not less), **provenance suffix** (every replacement body gets `[compacted-from: k1, k2, ...]` appended), **drift-guard** (sources already carrying the suffix are skipped unless `allow_recompact=true`), **exempt allowlist** (`STATUS:scan/convention/plan/decompose` hardcoded plus user-configured `compact.exempt`).
+- **CLI** — `hew compact apply` reads a CompactPlan from stdin (validates before any bd contact); `hew compact list-prefixes` surveys per-prefix memory counts with strict UPPER-SNAKE prefix detection so natural-language colons don't pollute the histogram. Schema variants `compact-plan` + `compact-apply-report`.
+- **Config knobs** — `compact.dry_run_default` (true), `compact.granularity_default` (`"broad"`), `compact.target_clusters_cap` (6), `compact.allow_recompact_default` (false), `compact.exempt`.
+- **`hew-compact` skill** — nine-step compaction loop documented: survey → pick prefix → read → cluster in-context (K = ceil(√N) capped at 6, dual-prompt granularity) → draft prescriptive replacement bodies → render diff preview → wait for explicit approval → emit CompactPlan JSON and pipe to `hew compact apply` → show ApplyReport. Refuses to compact `DECISION:` / `STATUS:` / `BOUNDARY:` prefixes.
+- Companion `/hew:compact <PREFIX>` slash command.
+
+### Added — Slash commands (12 new, 27 → 39 total)
+
+- `/hew:compact` — memory compaction
+- `/hew:decompose` — direct invocation of the hew-decompose skill
+- `/hew:resume` — manual re-run of the SessionStart-hook prime payload
+- `/hew:prime <skill>` — manual primer for a specific skill
+- Brownfield chain: `/hew:scan`, `/hew:convention`, `/hew:audit`, `/hew:boundary`, `/hew:migrate`
+- Optional skills: `/hew:deps`, `/hew:research`, `/hew:security`
+- (Also new: `/hew:new-project` and `/hew:spec` shipped earlier in this cycle.)
+
+### Added — Curated bd wrappers (agent-facing stable contract)
+
+- `hew task {show, list, claim, close, new, reopen, children, note, search}` — stable JSON via `--json`; schemas via `hew schema {task, task-list-filter, new-task, epic}`.
+- `hew dep {add, remove, tree, blocked}` — dependency-edge ops.
+- `hew epic {show, tree, close, audit, summary}` — epic-level ops.
+- `hew remember --type=<allowlist>` — 13-prefix allowlist; `--raw` escape for the 5 non-allowlisted prefixes.
+- `hew memories [--prefix|--grep|--research|--recall|--forget]` — curated read/inspect/forget surface. Text-default output; `--json` opts in.
+
+### Added — Review pipeline
+
+- `hew-review` skill + `/hew:review` slash — friendly second-pass code review against CONVENTION/BOUNDARY/SECURITY memories. Files findings as `[Review][BLOCKER|WARNING|INFO]` bd bugs/chores. Includes a Craft pillar walking each `CONVENTION:craft.<id>`.
+- `hew-adversarial-review` skill + `/hew:adversarial-review` slash — red-team pass attacking gaps the friendly review can't see. Steelman of the not-taken alternative. Attacks principles the project *didn't* pick.
+- `hew review bundle` CLI — assembles the agent-facing input (closed-tasks-in-scope, diff, applicable memories, epic body, last review timestamp) with stable schema.
+- Step 10a executor picker fires on `review.after_n_tasks` or `review.after_epic` config triggers.
+
+### Added — Spec-clarity gate
+
+- `hew-spec` skill + `/hew:spec` slash — scores user asks on goal-clarity + acceptance-clarity and loops Socratic questions until the ambiguity gate passes (or 4 rounds elapse). Use before `/hew:plan` when the ask is vague.
+
+### Added — Branching + research detour
+
+- `hew_core::branch` + `hew branch new --prefix=<type> --slug=<text>` — conventional-prefix branch creation. `branching.strategy` config (`none` / `epic` / `always`) controls when `hew-execute` first-claim auto-creates a branch.
+- `hew-plan` research-or-decompose tail picker honoring `research.default` config (`ask` / `auto-skip` / `auto-run`).
+- `hew-research` skill provenance discipline: every finding tagged `[VERIFIED]` / `[CITED]` / `[ASSUMED]` with a source citation.
+
+### Added — Session resume
+
+- Claude Code `SessionStart` hook wired by `hew init` runs `hew prime resume` on every session entry. Marked `hew_managed: true` so re-installs replace in place.
+- `hew prime resume` emits the resume JSON payload (project state, STATUS flags, categorized memories, latest CHECKPOINT) with stable schema for non-Claude runtimes.
+- `hew-checkpoint` skill + `/hew:checkpoint` slash dump in-flight state to a `CHECKPOINT:` memory before `/clear`.
+
+### Added — Documentation
+
+- New `docs/COMMANDS.md` — full slash-command reference, 39 entries grouped into 9 categories with descriptions pulled verbatim from command frontmatter.
+- README.md restructured to the established Claude-Code-methodology section order; all `>` blockquote-as-code-block misuses fixed; all `&lt;` / `&gt;` HTML entity escapes replaced with literal angle brackets inside fenced blocks.
+- ARCHITECTURE.md gains a "Craft-principles data layer + soft-warning model" section covering the three layers (catalog / membership memory / enforcement) and the methodology flow.
+- SKILL.md (the always-loaded agent index) gains a "Craft principles" section + a `CONVENTION:craft.<id>` row in the memory-prefix table.
+
+### Changed
+
+- Skill bodies migrated from raw `bd remember "PREFIX:..."` / `bd create --type=...` calls to the curated `hew remember --type=<prefix>` / `hew task new` wrappers. Frees skill bodies from coupling to bd's evolving JSON schema while keeping a stable agent-facing contract.
+- Big-output bd queries (`list`, `prime`, `memories`, `ready`) now route through `read_via_temp` (Stdio::from(File)) instead of pipe-buffer reads after `wait_timeout` — fixes a pipe-deadlock that bit large memory stores above the OS pipe buffer (~16KB on macOS / ~64KB on Linux).
+- `hew task list` default `--n 20` newest-first; `--n 0` unlimited; `--head` reverses to oldest-first.
+- `hew task show` text-default; `--json` opts in (matches `hew memories` + `hew status` pattern).
+
+### Fixed
+
+- HTML-entity-escaped angle brackets in README.md (`&lt;` / `&gt;`) → literal `<` / `>` inside fenced blocks.
+- `>` blockquote-as-code-block misuses in README.md → fenced ` ```text ` blocks.
+
+### Configuration
+
+New config keys (full list via `hew config keys`):
+
+| Key | Default | What it does |
+|-----|---------|--------------|
+| `testing.require` | `false` | When `true`, hew-guard fails close on missing tests instead of warning |
+| `craft.max_function_lines` | `0` | Soft-warn when a changed function exceeds this many lines |
+| `craft.warn_on_unused` | `true` | Soft-warn on lint-detected unused imports / dead code |
+| `compact.dry_run_default` | `true` | `hew compact apply` starts in dry-run mode |
+| `compact.granularity_default` | `"broad"` | Strict vs relaxed clustering prompt |
+| `compact.target_clusters_cap` | `6` | Upper bound on `default_k(n)` |
+| `compact.allow_recompact_default` | `false` | Drift-guard override |
+| `compact.exempt` | `[]` | Literal memory keys never forgotten |
+| `branching.strategy` | `"none"` | `none` / `epic` / `always` |
+| `research.default` | `"ask"` | `ask` / `auto-skip` / `auto-run` |
+| `review.after_n_tasks` | `0` | Fire review picker after N closed tasks |
+| `review.after_epic` | `false` | Fire review picker on epic close |
+| `review.batch_size` | `8` | Default scope size for `hew review-bundle` |
+
+### Stats
+
+- 20 skills (was 14) + SKILL.md index
+- 39 slash commands (was 23)
+- 28 craft principles in the v1 catalogue, 4 stacks seeded (`ts-next`, `py-fastapi`, `rust-axum`, `go-echo`)
+- 25 test binaries, all green; clippy + fmt clean across the workspace
+
 ## [0.1.0] — 2026-05-12
 
 Initial release. Methodology + Rust CLI shipped together.

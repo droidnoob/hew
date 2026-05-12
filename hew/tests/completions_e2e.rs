@@ -44,5 +44,5 @@ fn manpage_emits_roff_header() {
         .assert()
         .success()
         .stdout(contains(".TH hew 1"))
-        .stdout(contains("hew 0.1.0"));
+        .stdout(contains(concat!("hew ", env!("CARGO_PKG_VERSION"))));
 }
