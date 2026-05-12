@@ -14,6 +14,7 @@ pub mod install;
 pub mod notify;
 pub mod os;
 pub mod prime;
+pub mod review;
 pub mod skills;
 pub mod slash;
 pub mod status;
