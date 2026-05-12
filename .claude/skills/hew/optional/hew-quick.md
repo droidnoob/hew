@@ -31,11 +31,11 @@ step because the work is genuinely small."
 ## What quick mode actually does
 
 ```
-1. bd create the task (one task, no epic)
-2. bd update --claim
+1. hew task new (one task, no epic)
+2. hew task claim
 3. do the work
 4. invoke hew-guard
-5. bd close
+5. hew task close
 6. git commit
 ```
 
@@ -55,7 +55,29 @@ The skipped steps are:
   of drift quick mode shouldn't cause.
 - Tests — if the change has any behavior, a test covers it.
 - Commit discipline — atomic commit with conventional message.
-- `bd remember` for any gotcha you discovered.
+- `hew remember --type=gotcha "..."` for any gotcha you discovered.
+
+## Craft minimum
+
+Quick mode is the most common place craft discipline silently lapses
+("it's small, I'll skip the test"). Two rules survive every quick
+task:
+
+1. **A test, unless the change is provably behavior-free.** Config
+   tweaks, comment edits, type-only renames, and dead-code deletions
+   are the only exemptions. If you exempt, name the reason in the
+   close: `--reason "comment-only: clarified pagination boundary"`.
+   `hew-guard`'s `missing-tests` warning fires if you skip a test on
+   a behavior-changing file; `testing.require=true` promotes that to
+   fail.
+2. **Don't violate the project's existing `CONVENTION:craft.*` set.**
+   You don't need to enumerate them — they're picked once at
+   `hew-new-project` time and carry through every task. Just don't
+   ship code that contradicts a principle the project actively chose
+   (e.g., DRY-violating copy-paste in a project that picked
+   `CONVENTION:craft.dry`).
+
+That's the floor. The rest of quick mode is unchanged.
 
 ## Sizing rule
 
@@ -75,11 +97,11 @@ quick-mode discipline rots.
 User: "fix the off-by-one in the pagination cursor."
 
 ```
-bd create --type=bug --priority=1 \
+hew task new --type=bug --priority=1 \
   --title="Fix off-by-one in pagination cursor" \
   --description="Pagination skips the last item per page. See app/repos/users.py:list_users — cursor is exclusive but consumer expects inclusive. Fix + test."
 
-bd update <id> --claim
+hew task claim <id>
 
 # read app/repos/users.py:list_users
 # read tests/repos/test_users.py
@@ -87,7 +109,7 @@ bd update <id> --claim
 # add a regression test covering the edge
 
 # invoke hew-guard → pass
-bd close <id> --reason "Cursor handling fixed; test_list_users_returns_last_item added; existing pagination tests still pass."
+hew task close <id> --reason "Cursor handling fixed; test_list_users_returns_last_item added; existing pagination tests still pass."
 
 # commit
 git commit -m "fix(repos): pagination cursor includes last item
@@ -124,8 +146,8 @@ default is to escalate.
   drift quick mode invites.
 - **Open epics from quick mode.** If you need an epic, you needed
   `hew-plan`.
-- **Persist the work without `bd close`.** Even quick-mode tasks
-  appear in `bd show` history — that's the audit trail.
+- **Persist the work without `hew task close`.** Even quick-mode tasks
+  appear in `hew task show` history — that's the audit trail.
 
 ## Anti-patterns
 
@@ -137,3 +159,7 @@ default is to escalate.
 - **Quick mode skipping the commit.** No commit = no audit trail.
 - **Saga creep** — what started quick is now five files in.
   Surface to the user before it becomes a half-baked epic.
+- **Skipping the test silently.** "Quick mode means no tests" is the
+  myth that produces the worst regressions. Either write the test or
+  spell out the behavior-free exemption in the close reason — silence
+  isn't an exemption.

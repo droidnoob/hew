@@ -29,7 +29,7 @@ per-task — running too often produces noise and burns context.
 ## Inputs from `hew prime verify`
 
 - `tasks.done` history — the closed tasks since the last verification.
-  Use `bd list --status=closed --since=<last-verify-timestamp>` if needed.
+  Use `hew task list --status=closed --since=<last-verify-timestamp>` if needed.
 - `memories.boundaries` — every public interface that must still work.
 - `memories.security` — security baselines that must still hold.
 - The epic's acceptance criteria (in the epic's own description) — the
@@ -39,7 +39,7 @@ You may also need to consult the conversation context from `hew-plan` if
 the epic predates persistent memories on this project. Acceptance
 criteria captured at plan time are what verify checks against.
 
-## The four verification dimensions
+## The five verification dimensions
 
 ### 1. Full test suite passes
 
@@ -103,7 +103,7 @@ Surface to user: "Boundary X changed, was that intended?"
 If the change was intentional and the boundary should be updated:
 
 ```
-bd remember "BOUNDARY: POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline: <date>. Old shape returns 400."
+hew remember --type=boundary "POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline: <date>. Old shape returns 400."
 ```
 
 ### 4. End-to-end golden path
@@ -122,6 +122,41 @@ to walk and report back).
 The full suite (dimension 1) often misses integration breaks because
 units pass in isolation. The golden path is the last sanity check.
 
+### 5. Maintainability
+
+Walk the project's `CONVENTION:craft.*` set and confirm each picked
+principle was honored across the batch that just closed. The hard
+checks in `hew-guard` ran per-task; this dimension is the *batch-level*
+re-read with the whole epic in view, where cross-task drift surfaces
+that a per-task review can't see.
+
+For each `CONVENTION:craft.<id>`:
+
+- **SRP / SOLID** — read each new module's public surface; does it
+  still have one reason to change after the full batch landed?
+- **DRY** — diff the closed tasks' added code as one unit. If the
+  same logic appears in two files because two different tasks both
+  needed it, that's the kind of duplication per-task guard misses.
+- **Small functions / Single Level of Abstraction** — any function
+  that grew across multiple closing commits? Flag it.
+- **Idempotence / Fail Fast / Pure Functions** — check the new
+  boundaries (handlers, retries, computation cores).
+
+Also surface any unresolved `hew-guard` craft soft-warnings from the
+batch (the executor may have legitimately deferred them with a
+`DECISION:craft-feature:<plan-id>` justification — note those as
+*documented* deviations, not drift).
+
+If you find drift, either:
+
+1. Open a chore task to fix (preferred when the fix is small and the
+   batch hasn't shipped).
+2. Document the deviation as a `DECISION:` memory if the team
+   consciously accepted it.
+
+Don't silently let craft drift through verify — that's how a picked
+principle quietly stops binding.
+
 ## Output
 
 ### Pass — every dimension green
@@ -133,13 +168,18 @@ VERIFY: pass
 [2] Acceptance:  6/6 met
 [3] Boundaries:  3 checked (POST /users, GET /users/{id}, POST /login) — unchanged
 [4] Golden path:  signup → login → fetch /me → logout end-to-end OK
+[5] Maintainability:  craft set honored
+                      - CONVENTION:craft.solid: AuthService SRP intact
+                      - CONVENTION:craft.dry: token encode/decode shared via _token_codec.py
+                      - CONVENTION:craft.fail-fast: input validation pre-DB on all 3 endpoints
+                      - 0 unresolved craft soft-warnings from this batch
 ```
 
 Then:
 
 ```
-bd close <epic-id> --reason "verified end-to-end. all 6 acceptance criteria met. 248 tests pass. boundaries unchanged."
-bd remember "STATUS:verify:<epic-id>:complete — <ISO-8601 timestamp>"
+hew epic close <epic-id> --reason "verified end-to-end. all 6 acceptance criteria met. 248 tests pass. boundaries unchanged."
+hew remember --type=status "verify:<epic-id>:complete — <ISO-8601 timestamp>"
 ```
 
 The epic closes; if this was the milestone's last epic, the milestone is
@@ -148,7 +188,7 @@ ready to ship.
 ### Fail — at least one dimension red
 
 ```
-VERIFY: fail (2/4 dimensions)
+VERIFY: fail (2/5 dimensions)
 
 [1] Tests:  248 pass, 0 fail ✓
 [2] Acceptance:  4/6 met, 1 partial, 1 missing
@@ -160,6 +200,11 @@ VERIFY: fail (2/4 dimensions)
                  → opening bd-a3f8.8: restore 400 contract or update BOUNDARY memory
 [4] Golden path:  fail — logout button on frontend does nothing
                   → covered by bd-a3f8.7
+[5] Maintainability:  craft drift detected
+    CONVENTION:craft.dry — token encode logic duplicated across login.py + refresh.py
+                 → opening bd-a3f8.9: extract _token_codec.py helper
+    CONVENTION:craft.small-functions — login_handler grew to 84 lines after rebase
+                 → opening bd-a3f8.10: split validation out of login_handler
 
 Epic stays open. Re-run hew-verify after the new tasks close.
 ```
@@ -167,15 +212,15 @@ Epic stays open. Re-run hew-verify after the new tasks close.
 Then actually create the tasks:
 
 ```
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement refresh-token revocation on reuse" \
   --description="Verified missing in hew-verify. Per epic acceptance: revoked tokens must 401."
 
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/logout" \
   --description="Verified missing in hew-verify. Per epic acceptance: logout invalidates server-side session."
 
-bd create --parent=bd-a3f8 --type=bug --priority=0 \
+hew task new --parent=hew-a3f8 --type=bug --priority=0 \
   --title="POST /users contract regression: 422 vs 400" \
   --description="Verified in hew-verify boundary check. Decide: restore 400 or update BOUNDARY:users-create memory."
 ```

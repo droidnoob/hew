@@ -2,7 +2,7 @@
 ---
 name: hew-review
 category: optional
-init: hew review bundle
+init: hew review bundle --json
 ---
 
 # hew-review — Friendly Second-Pass Code Review
@@ -43,8 +43,9 @@ config.
 
 ## Inputs from `hew review bundle`
 
-`hew review bundle [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
-emits a JSON `ReviewBundle` with:
+`hew review bundle --json [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
+emits a JSON `ReviewBundle` (use `--json` — the text default is a
+short summary, not the full payload) with:
 
 - `scope` — what the caller asked for (LastN / Epic / Task / GitRef).
 - `closed_tasks` — oldest-first list of tasks in scope, each with id,
@@ -134,6 +135,35 @@ reasons should mention any deviation rules applied.
 - TODOs / FIXMEs left in the diff (`hew-guard` should catch these but
   sometimes lets them through).
 
+### 7. Craft pillar — picked principles
+
+Walk every `CONVENTION:craft.<id>` memory in the bundle (the bundle
+already collects them under `memories.conventions`). For each picked
+principle, inspect the diff for violations:
+
+| Principle (id)               | What to look for in the diff                                                      |
+|------------------------------|-----------------------------------------------------------------------------------|
+| `craft.solid` / SRP          | A class/module grew a second unrelated reason to change (e.g. service handles routing AND persistence). |
+| `craft.dry`                  | Identical 5+ line blocks across two files / two functions; missed helper extraction. |
+| `craft.kiss` / `craft.yagni` | A new abstraction introduced for a single caller; speculative interfaces.         |
+| `craft.small-functions`      | Functions exceeding `craft.max_function_lines`; obvious split points ignored.     |
+| `craft.fail-fast`            | Endpoint persists/sends side-effects before validating input.                     |
+| `craft.idempotence`          | Retry-unsafe handler in a flow advertised as retryable.                           |
+| `craft.tell-dont-ask`        | New code reads a getter then branches on the result, where a method on the owner would be cleaner. |
+| `craft.consistency-with-existing-code` | The diff adopts a pattern that contradicts an existing `CONVENTION:` memory — always wins, file as drift. |
+
+Skip principles **not** present in the project's set — applying SOLID
+universally is exactly what `DECISION:craft-adaptive` rejected.
+
+Cross-reference any unresolved soft-warnings `hew-guard` surfaced for
+the closing tasks (`missing-tests`, `function-length`, `duplication`).
+A warning that the executor silenced without a `DECISION:` justifying
+it is a finding here.
+
+If a `DECISION:craft-feature:<plan-id>` memory documents a deliberate
+deviation for this plan's scope, don't flag the deviation — note it as
+*acknowledged* in the review output.
+
 ## Severity → filing
 
 Every finding lands in bd. **No memory pollution.** Two types:
@@ -144,10 +174,16 @@ Every finding lands in bd. **No memory pollution.** Two types:
 | WARNING — convention drift, missing test, dead code, doc gap | `bug` | `[Review][WARNING] …` |
 | INFO — suggestion, future improvement, "consider X" | `chore` | `[Review][INFO] …` |
 
+Craft findings use the same severities with a `[CRAFT]` tag appended:
+`[Review][WARNING][CRAFT] services/billing.py — DRY violation…`. Pick
+severity by the project's existing rules, not the principle itself —
+a missed extraction is usually WARNING; a SRP violation that hides a
+race is BLOCKER.
+
 Filing template:
 
 ```
-bd create --type=bug --priority=<1|2|3> \
+hew task new --type=bug --priority=<1|2|3> \
   --title='[Review][BLOCKER] auth/jwt.rs:42 — missing CSRF check on POST /login' \
   --description='Found during /hew:review scope=LastN(8).
 Originating tasks: hew-abc.3, hew-abc.4.
@@ -167,7 +203,7 @@ Write the review marker so the next run computes
 `tasks_since_last_review` correctly:
 
 ```
-bd remember "STATUS:review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+hew remember --type=status "review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 The `STATUS:review:<ts>` memory is the ONLY memory this skill writes.
@@ -220,7 +256,7 @@ If nothing was found, say so plainly — and write the marker anyway
   to bound the review; wandering through the codebase makes the review
   unbounded and the findings vague.
 - **Re-file an existing open `[Review]` bug.** Before creating, check
-  with `bd list --label review` (or `bd search '[Review]'`); update the
+  with `hew task search '[Review]'`; update the
   existing one if it's still open.
 
 ## Anti-patterns

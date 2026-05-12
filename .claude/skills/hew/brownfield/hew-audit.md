@@ -89,6 +89,9 @@ Record an `AUDIT:` memory when **any** of these apply:
 5. **Duplicate incompatible versions** in the dep tree (bloats
    bundle, diverges behavior).
 6. **License conflict** with the project's stated license.
+7. **Craft drift** — code regions that contradict a
+   `CONVENTION:craft.<id>` memory the project has committed to
+   (see "Craft drift checks" below).
 
 For everything else (mildly outdated, no security implication, still
 maintained): don't open a finding. Audit is for action items, not
@@ -97,11 +100,11 @@ homework.
 ## Memory shape
 
 ```
-bd remember "AUDIT: jsonwebtoken@8.5.1 — DEPRECATED, last publish 3yr ago. Migrate to jose@5.x. Used in app/auth/jwt.py."
-bd remember "AUDIT: lodash@4.17.20 — CVE-2021-23337 (prototype pollution). Bump to 4.17.21+ or migrate to lodash-es."
-bd remember "AUDIT: cryptography@38.0.4 — 7 majors behind. Bump path 38→39→40→…→42 with type changes at 39, 41."
-bd remember "AUDIT: moment — UNMAINTAINED, last publish 2y, README recommends dayjs/date-fns."
-bd remember "AUDIT: duplicate uuid@8.3.2 + uuid@9.0.0 in tree. Unify to 9.x."
+hew remember --type=audit "jsonwebtoken@8.5.1 — DEPRECATED, last publish 3yr ago. Migrate to jose@5.x. Used in app/auth/jwt.py."
+hew remember --type=audit "lodash@4.17.20 — CVE-2021-23337 (prototype pollution). Bump to 4.17.21+ or migrate to lodash-es."
+hew remember --type=audit "cryptography@38.0.4 — 7 majors behind. Bump path 38→39→40→…→42 with type changes at 39, 41."
+hew remember --type=audit "moment — UNMAINTAINED, last publish 2y, README recommends dayjs/date-fns."
+hew remember --type=audit "duplicate uuid@8.3.2 + uuid@9.0.0 in tree. Unify to 9.x."
 ```
 
 Be specific: package name + version + why + suggested action + where
@@ -112,19 +115,68 @@ it's used (file path if known).
 For severity ≥ High and clear-cut paths (deprecation, CVE):
 
 ```
-bd create --type=bug --priority=1 \
+hew task new --type=bug --priority=1 \
   --title="Migrate from jsonwebtoken to jose (deprecated upstream)" \
   --description="
   AUDIT: jsonwebtoken@8.5.1 deprecated 2023; jose is the maintained replacement.
   Touch: app/auth/jwt.py, tests/auth/test_jwt.py.
   See https://github.com/auth0/node-jsonwebtoken#readme-deprecation.
-  " \
-  --acceptance="jsonwebtoken removed from package.json; pytest tests/auth -k jwt passes; auth flow works end-to-end."
+  Acceptance: jsonwebtoken removed from package.json; pytest tests/auth -k jwt passes; auth flow works end-to-end.
+  "
 ```
 
 For lower-severity findings (slight version drift, unmaintained but
 not vulnerable): leave them as memories. Surface them when relevant;
 the user prioritizes.
+
+## Craft drift checks
+
+After the dependency pass, walk the project's `CONVENTION:craft.<id>`
+memories (extracted by `hew-convention` Step 11) and grep the
+codebase for obvious contradictions. This is a *brownfield-only*
+audit dimension — it surfaces places where the codebase has *already*
+diverged from a principle it claims to follow.
+
+For each persisted `CONVENTION:craft.<id>`, run a cheap structural
+check. The goal is **at least one** concrete drift finding per audit
+on a typical mid-size project. Common probes:
+
+| Memory present                          | What to grep / look for                                                                                         |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `craft.errors-as-values` / Result type  | `raise ` in service-layer files when most of the project uses `Result[T, AppError]`.                            |
+| `craft.fail-fast`                       | Endpoints that write to DB / send messages before validating their inputs.                                      |
+| `craft.dry`                             | Two files containing the same 5+ line block (the cheap version of the duplication check `hew-guard` runs on diffs). |
+| `craft.small-functions`                 | Functions exceeding the persisted threshold by 2x or more.                                                      |
+| `craft.clean-architecture`              | Import edges from `domain/` into `infrastructure/` (forbidden direction).                                       |
+| `craft.idempotence`                     | POST handlers that mutate state without an idempotency key, in a project that committed to idempotent writes.   |
+| `craft.pure-functions`                  | Modules named like "utils" / "compute" that nonetheless import `os`, `time`, `random`, DB clients.              |
+| `craft.test-first`                      | Behavior-bearing modules with no sibling test in `tests/`.                                                      |
+
+Persist each finding as an `AUDIT:` memory with the principle id, the
+location, and the suggested fix:
+
+```
+hew remember --type=audit "craft.errors-as-values drift — app/services/billing.py:42 raises raw BillingError; project convention is Result[T, BillingError] (per CONVENTION:craft.errors-as-values). Wrap or refactor."
+hew remember --type=audit "craft.clean-architecture drift — app/domain/user.py imports app/infrastructure/db.py at line 8. Forbidden direction (domain must not depend on infrastructure). Inject the repo via interface in app/domain/ports.py."
+hew remember --type=audit "craft.small-functions drift — app/api/checkout.py:checkout_handler is 142 lines (threshold 25). Split per single-level-of-abstraction; payment, fulfillment, notification are three reasons-to-change."
+```
+
+Skip principles **not** in the project's set — universal SOLID
+enforcement is not what this audit is for. The signal is "the
+codebase claims X and contradicts itself" — drift between word and
+deed.
+
+Open a `bug` task for each drift finding whose fix is clear-cut and
+local; leave the rest as `AUDIT:` memories for the user to triage.
+
+Add a `craft drift` section to the audit output:
+
+```
+craft drift (3):
+  errors-as-values  → app/services/billing.py:42  opens bd-X.10
+  clean-architecture → app/domain/user.py:8       opens bd-X.11
+  small-functions   → checkout_handler (142 LOC)  surfaced for triage
+```
 
 ## When to auto-open vs surface
 
@@ -157,13 +209,18 @@ warnings (5):
   uuid 8.3.2 + 9.0.0     duplicate
   …
 
-Tasks opened: 3. Memories written: 8. Run `hew status` to confirm.
+craft drift (3):
+  errors-as-values   app/services/billing.py:42  → opens bd-X.10
+  clean-architecture app/domain/user.py:8        → opens bd-X.11
+  small-functions    checkout_handler (142 LOC)  surfaced for triage
+
+Tasks opened: 5. Memories written: 11. Run `hew status` to confirm.
 ```
 
 ## Step — mark phase complete + continue the chain
 
 ```
-bd remember "STATUS:audit:complete — <ISO-8601 timestamp>"
+hew remember --type=status "audit:complete — <ISO-8601 timestamp>"
 ```
 
 Then **continue directly into `hew-boundary`.** Brownfield onboarding

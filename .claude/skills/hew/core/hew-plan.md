@@ -81,9 +81,9 @@ When you commit to non-obvious choices, persist them so future sessions inherit
 the reasoning:
 
 ```
-bd remember "DECISION:auth — JWT with 15min access + 7d refresh in httpOnly cookies. Reason: SPA + mobile share the API."
-bd remember "DECISION:db — Postgres over SQLite because we need RLS for the multi-tenant story."
-bd remember "DECISION:framework — FastAPI over Flask. Async-first, OpenAPI generation, pydantic models reused for DB."
+hew remember --type=decision "auth — JWT with 15min access + 7d refresh in httpOnly cookies. Reason: SPA + mobile share the API."
+hew remember --type=decision "db — Postgres over SQLite because we need RLS for the multi-tenant story."
+hew remember --type=decision "framework — FastAPI over Flask. Async-first, OpenAPI generation, pydantic models reused for DB."
 ```
 
 These are factual decision memories (no special prefix beyond `DECISION:`),
@@ -138,11 +138,47 @@ novel domain, unknown library landscape) and the user picked "Skip,"
 record the uncertainty in a `DECISION:` memory tagged `[ASSUMED]` so it
 can be revisited.
 
+## Craft refinement — feature-level deviations
+
+The project picked its craft set in `hew-new-project` Phase C; those
+choices live as `CONVENTION:craft.<id>` memories and apply to every
+plan by default. Sometimes a single feature legitimately needs a
+narrower or wider set — an event-sourced slice in an otherwise CRUD
+codebase, a perf-critical hot path that locally relaxes
+`single-level-of-abstraction`, a transaction-script in a generally
+DDD project.
+
+Read the project's `CONVENTION:craft.*` set, then ask once:
+
+```
+Does this plan need to deviate from the project's craft set?
+> No — project defaults apply unchanged
+  Add: this slice needs <principle> in addition (e.g. event-sourcing)
+  Relax: <principle> doesn't fit here (state the reason)
+```
+
+Record any deviation as a `DECISION:craft-feature:<plan-id>` memory.
+The executor and reviewer pick these up alongside the project-wide
+`CONVENTION:craft.*` set:
+
+```
+hew remember --type=decision "craft-feature:auth-mvp — ADD event-sourcing for the audit log slice (auditable token issuance). Project default: CRUD. Reason: regulatory replay requirement."
+hew remember --type=decision "craft-feature:hot-render — RELAX single-level-of-abstraction in src/render/inner_loop.rs (perf). Justified by benchmark notes."
+```
+
+If the user picks "No," skip the memory write — silence means the
+project-wide set applies.
+
+Both `hew-execute` (Step 5 craft check) and `hew-review` (Craft pillar)
+read these per-plan deviations *in addition to* the project's
+`CONVENTION:craft.*` memories. Deviations are scoped to the plan id;
+they do not bleed across features.
+
 ## What you don't do
 
-- **No tasks.** That is `hew-decompose`. Do not run `bd create` here.
+- **No tasks.** That is `hew-decompose`. Do not run `hew task new` here.
 - **No code.** Planning produces words and decisions, not files.
-- **No markdown plan files.** State lives in conversation + `bd remember`.
+- **No markdown plan files.** State lives in conversation + `hew remember`.
 - **No premature decomposition into 50 tiny steps.** Plans should fit on one
   screen. If yours is sprawling, your acceptance criteria are too vague.
 - **No assumption-loading without confirmation.** If the user said "build a
@@ -166,12 +202,13 @@ On "Skip" or after `/hew:research` completes:
 "Plan is approved. Calling `hew-decompose` to build the Beads graph."
 Then invoke `hew-decompose` with the plan in context.
 `hew-decompose` will read the same memories, plus the conversation it inherits
-from you, and produce `bd create` / `bd dep add` / `bd mol bond` calls.
+from you, and produce `hew task new` / `hew dep add` calls (and `bd
+create --type=gate` for external blockers; gates aren't wrapped).
 
 After `hew-decompose` finishes, write the phase marker:
 
 ```
-bd remember "STATUS:plan:complete — <ISO-8601 timestamp>"
+hew remember --type=status "plan:complete — <ISO-8601 timestamp>"
 ```
 
 This unblocks every downstream skill's prerequisite check.

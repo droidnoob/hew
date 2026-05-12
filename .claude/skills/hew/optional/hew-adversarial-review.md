@@ -2,7 +2,7 @@
 ---
 name: hew-adversarial-review
 category: optional
-init: hew review bundle
+init: hew review bundle --json
 ---
 
 # hew-adversarial-review — Red-Team / Steelman Pass
@@ -37,9 +37,11 @@ hew config set optional-skills.review true   # same flag as hew-review
 
 ## Inputs from `hew review bundle`
 
-Same JSON bundle as `hew-review`: `scope`, `closed_tasks`, `diff`,
-`diff_base`, `memories`, `epic`, `last_review_at`. The shape is
-identical; what differs is the stance you take reading it.
+Same JSON bundle as `hew-review` (invoke `hew review bundle --json` —
+the text default is a short summary, not the full payload): `scope`,
+`closed_tasks`, `diff`, `diff_base`, `memories`, `epic`,
+`last_review_at`. The shape is identical; what differs is the stance
+you take reading it.
 
 ## Stance — be the antagonist
 
@@ -140,6 +142,50 @@ If the answer is "nobody until someone complains," it's a finding.
 These are the bugs that survive `/hew:review` because no convention
 exists for them yet. The adversarial pass exists to surface them.
 
+### 7. Craft pillar — attack the gaps the project didn't pick
+
+Friendly review walks the principles the project **chose**. Adversarial
+review attacks the principles the project **left out**. Read the
+`CONVENTION:craft.*` set, then list every catalog principle *not*
+present and ask: what failure mode does this absence enable?
+
+Examples:
+
+- Project didn't pick `craft.fail-fast`. → Where in the diff does an
+  endpoint persist or send a side-effect before validating input?
+  What happens when validation fails after the write?
+- Project didn't pick `craft.idempotence`. → Which new handler is
+  retried by the client / queue / load balancer? What happens on a
+  duplicate?
+- Project didn't pick `craft.pure-functions`. → Which "computation"
+  reaches out to a clock, a DB, an env var, making it untestable?
+- Project didn't pick `craft.dry`. → Where will the next person copy
+  this code block, and what will go wrong when only one copy gets
+  fixed?
+- Project didn't pick `craft.tell-dont-ask`. → Where does the diff
+  reach into another object's state and branch on it, creating an
+  invariant that lives in the caller?
+
+A *picked* craft principle whose violation `/hew:review` already
+flagged is not adversarial-scope — friendly review owns those. Look
+for what friendly review *couldn't* see because no `CONVENTION:craft.<id>`
+authorized it.
+
+File findings under the `[CRAFT]` tag with severity calibrated to the
+realized risk:
+
+```
+[Adversarial][WARNING][CRAFT] app/api/billing.py:34 — handler is non-idempotent
+  but POST /charge is retried by Stripe on 5xx. Project didn't pick
+  craft.idempotence so this isn't a CONVENTION violation, but a duplicate
+  retry will double-charge. Either pick craft.idempotence and fix, or
+  document the retry-unsafe boundary in a SECURITY:/DECISION: memory.
+```
+
+The output of this pillar is sometimes "the project should pick
+principle X" — that's a legitimate finding, filed as a chore so the
+team can revisit the picker.
+
 ## Steelman the alternative
 
 For the **biggest** chunk of changed code, write a one-paragraph
@@ -175,10 +221,16 @@ Identical to `hew-review`:
 | WARNING  | `bug`   | `[Adversarial][WARNING] …` |
 | INFO     | `chore` | `[Adversarial][INFO] …` |
 
+Craft-gap findings append `[CRAFT]`:
+`[Adversarial][WARNING][CRAFT] …`. Severity reflects the realized
+failure mode, not the principle's prestige — an unenforced
+`craft.idempotence` on a payment endpoint is BLOCKER; the same gap on
+a cached read is INFO.
+
 Filing template:
 
 ```
-bd create --type=bug --priority=<1|2|3> \
+hew task new --type=bug --priority=<1|2|3> \
   --title='[Adversarial][BLOCKER] auth/jwt.rs:42 — token compare is non-constant-time, enables timing attack' \
   --description='Found during /hew:adversarial-review scope=Epic(hew-auth).
 Originating tasks: hew-auth.3.
@@ -193,7 +245,7 @@ auth surface — file the missing convention as part of the fix.'
 ```
 
 Title prefix is `[Adversarial]`, not `[Review]`, so the two passes
-are distinguishable in `bd list`.
+are distinguishable in `hew task list` / `hew task search`.
 
 ## After filing
 
@@ -204,7 +256,7 @@ overwrites cleanly. The `tasks_since_last_review` counter resets on
 either.
 
 ```
-bd remember "STATUS:review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+hew remember --type=status "review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 ## Output to the user

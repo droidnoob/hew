@@ -139,9 +139,9 @@ output is corroboration; the agent's web-driven analysis is primary.
 ## Memory shape
 
 ```
-bd remember "DEP: Using jose@5.2.0 (latest stable, 2026-04). Actively maintained. MIT. Replaces deprecated jsonwebtoken. No known CVEs."
-bd remember "DEP: Adopted dayjs@1.11.10. MIT. 2KB gzipped. Replaces moment (unmaintained)."
-bd remember "DEP: REJECTED ricecake@1.0 (GPL-3.0 — incompatible with this project's MIT license). Use cake-mix@2.x (MIT) instead."
+hew remember --type=dep "Using jose@5.2.0 (latest stable, 2026-04). Actively maintained. MIT. Replaces deprecated jsonwebtoken. No known CVEs."
+hew remember --type=dep "Adopted dayjs@1.11.10. MIT. 2KB gzipped. Replaces moment (unmaintained)."
+hew remember --type=dep "REJECTED ricecake@1.0 (GPL-3.0 — incompatible with this project's MIT license). Use cake-mix@2.x (MIT) instead."
 ```
 
 Record the verdict + why + the chosen alternative if rejected.

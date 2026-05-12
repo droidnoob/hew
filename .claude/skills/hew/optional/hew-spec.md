@@ -117,8 +117,8 @@ memories the planner inherits. Don't loop forever; planning can proceed
 with explicit assumptions.
 
 ```
-bd remember "DECISION:spec:<topic> [ASSUMED] goal: <best-guess restatement>. Confirmed only at clarity 0.4 — planner should re-validate after first decompose pass."
-bd remember "DECISION:spec:<topic> [ASSUMED] acceptance: <best-guess>. Clarity 0.3."
+hew remember --type=decision "spec:<topic> [ASSUMED] goal: <best-guess restatement>. Confirmed only at clarity 0.4 — planner should re-validate after first decompose pass."
+hew remember --type=decision "spec:<topic> [ASSUMED] acceptance: <best-guess>. Clarity 0.3."
 ```
 
 Tell the user: "Spec stays partial. The planner will proceed with
@@ -129,9 +129,11 @@ Tell the user: "Spec stays partial. The planner will proceed with
 Persist the spec body verbatim plus the completion marker:
 
 ```
-bd remember "SPEC:<topic> goal=<final-restated-goal>; acceptance=<final-acceptance>. Goal-clarity=<n>; Acceptance-clarity=<n>; Ambiguity=<n>."
-bd remember "STATUS:spec:complete — <ISO-8601 timestamp>"
+hew remember --raw "SPEC:<topic> goal=<final-restated-goal>; acceptance=<final-acceptance>. Goal-clarity=<n>; Acceptance-clarity=<n>; Ambiguity=<n>."
+hew remember --type=status "spec:complete — <ISO-8601 timestamp>"
 ```
+
+(`SPEC:` isn't in the standard `--type` allowlist; use `--raw`.)
 
 Then hand off: "Spec is solid. Calling `hew-plan` now."
 

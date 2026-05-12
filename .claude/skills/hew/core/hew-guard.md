@@ -82,11 +82,11 @@ executor (not pre-existing).
 task waiting to be created. Either resolve inline, or:
 
 ```
-bd create --type=chore --priority=2 --title="..."
+hew task new --type=chore --priority=2 --title="..."
 ```
 
 and remove the TODO comment in favor of the issue ID in a comment if
-truly needed (`// see bd-X.5`).
+truly needed (`// see hew-X.5`).
 
 ### 4. Unused imports / dead code
 
@@ -172,6 +172,52 @@ pattern the convention describes?
 Convention drift is the most common failure category. It's also the most
 expensive — once two patterns coexist, future agents won't know which to
 use, and the codebase splits.
+
+### Craft soft-warnings (advisory)
+
+In parallel with the seven hard checks, hew-guard surfaces craft-principle
+soft-warnings from `hew_core::guard::craft_warnings(memories, diff, cfg)`.
+These are **advisory** — by design they do NOT block `bd close` (see
+`DECISION:craft-enforcement`). They appear in the guard output so the
+executor can decide whether to act, document, or ignore.
+
+Three heuristics ship today:
+
+| Rule              | Fires when                                                                 | Promote to fail by                          |
+|-------------------|----------------------------------------------------------------------------|---------------------------------------------|
+| `missing-tests`   | A behavior-changing source file lacks a co-changed test sibling.           | `hew config set testing.require true`       |
+| `function-length` | A function in the diff exceeds `craft.max_function_lines`.                 | (warn only; tune threshold to silence)      |
+| `duplication`     | 5+ consecutive non-trivial added lines appear in two locations in the diff. Gated on a `CONVENTION:craft.dry` memory. | (warn only; extract a helper to silence)    |
+
+**Silencing.** Each warning carries a `silence` field describing the
+narrowest fix:
+
+- `missing-tests` — co-change a test, or add a `CONVENTION:tests-exempt`
+  memory for paths that are pure glue / config. Setting
+  `testing.require=false` demotes back to warn.
+- `function-length` — split the function, raise the threshold via
+  `hew config set craft.max_function_lines <n>`, or set the threshold
+  to `0` to disable the check entirely.
+- `duplication` — extract a shared helper, or remove the
+  `CONVENTION:craft.dry` memory if your project doesn't want this
+  check.
+
+Render warnings beneath the seven-check report so they don't get
+confused with hard failures:
+
+```
+GUARD: pass (7/7)
+- no debug statements
+- ...
+
+CRAFT WARNINGS (3):
+- [missing-tests] src/auth.py — behavior-changing file with no co-changed test
+- [function-length] src/auth.py:42 — function `login` spans 38 added lines (threshold: 30)
+- [duplication] src/notify.py:12 — 5-line block duplicates `src/alert.py`:7 (DRY)
+```
+
+The executor proceeds to `bd close` even with warnings present unless
+`testing.require=true` and a `missing-tests` warning shows `Severity::Fail`.
 
 ### Optional checks (project-specific)
 
