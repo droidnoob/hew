@@ -12,6 +12,23 @@
 # stack_ids in `hew-new-project` Phase C. Users can deselect or add.
 # `conflicts_with` declares siblings that fight this principle; the
 # picker warns if both are chosen.
+#
+# ── Brownfield deference (load-bearing) ──────────────────────────
+# In brownfield projects, EXISTING `CONVENTION:*` memories take
+# precedence over these picked principles. The methodology is:
+#
+#   1. hew-scan / hew-convention extract the codebase's actual
+#      conventions and persist them as CONVENTION:* memories.
+#   2. hew-plan offers the craft picker but defaults to "match
+#      existing conventions" — only deviates when the user
+#      explicitly opts in to a craft.<id> that doesn't conflict.
+#   3. hew-guard soft-warns on craft.<id> violations ONLY for
+#      surfaces where the existing convention doesn't already
+#      cover the dimension; otherwise the existing CONVENTION
+#      memory wins.
+#
+# See the `consistency-with-existing-code` rule below for the
+# explicit meta-principle that codifies this behavior.
 
 # ─── Code-level ───────────────────────────────────────────────────
 
@@ -91,6 +108,83 @@ when_not_to_apply = "Languages where inheritance is idiomatic for the domain (UI
 conflicts_with = []
 example = "Instead of `class AdminUser(User)` add a `roles: Set<Role>` field to User. Compose behavior; don't subclass identity."
 default_for_stacks = ["py-fastapi", "rust-axum", "go-echo", "ts-next"]
+
+[[principles]]
+id = "meaningful-names"
+name = "Meaningful Names"
+category = "code-level"
+summary = "Names reveal intent. Variables, functions, classes, and modules use descriptive, pronounceable, searchable names. No single-letter variables except in tight loops; no abbreviations that hide meaning."
+when_to_apply = "Always. The cheapest readability win in any codebase."
+when_not_to_apply = "Math-heavy code where short variable names match the published formula (use a comment linking to the paper). True conventional abbreviations within the codebase's stack (e.g., `ctx`, `req`, `res`)."
+conflicts_with = []
+example = "Replace `def process(d, l)` with `def filter_orders_by_status(orders, status)`. The name now documents the contract."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "small-functions"
+name = "Small Functions"
+category = "code-level"
+summary = "Functions stay short — ideally under 20 lines and doing one thing. Long functions hide intent and resist testing. Pair this with `craft.max_function_lines` config knob for a soft-warn threshold."
+when_to_apply = "Always — the size-creep moment is when adding another `if` branch to an already-busy function. Extract before the third branch."
+when_not_to_apply = "Top-level orchestrators / `main` that are intentionally long because they're sequencing calls. State-machine handlers where splitting would obscure the state graph."
+conflicts_with = []
+example = "A 60-line `register_user` becomes `validate_input` + `persist_user` + `send_welcome_email` + `register_user` (now 5 lines, orchestrating the three)."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "single-level-of-abstraction"
+name = "Single Level of Abstraction (SLA)"
+category = "code-level"
+summary = "Every statement in a function operates at the same level of abstraction. Mixing 'iterate over orders' and 'open SQL connection' in one function is a smell — extract the lower-level statement into its own function."
+when_to_apply = "Functions that read 'jumpy' — high-level loop body followed by low-level byte manipulation. Refactor targets in code review."
+when_not_to_apply = "Truly leaf functions doing one thing at one level. Tiny utilities where adding another layer is overhead."
+conflicts_with = []
+example = "`fn handle_request(req)` should not call `parse_jwt(...)` inline; extract `authenticate(req) -> Result<User>` so handle_request reads as one level."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "tell-dont-ask"
+name = "Tell, Don't Ask"
+category = "code-level"
+summary = "Issue commands to objects rather than query their state and act on it from the outside. Behavior belongs WITH data. Reduces coupling; prevents shotgun-surgery refactors when invariants change."
+when_to_apply = "Object-oriented codebases where rich domain models earn their keep. Anywhere you see `if obj.status == X: obj.do_y()` repeated across callers."
+when_not_to_apply = "Pure-data DTOs at boundaries (request/response shapes). Functional codebases where data + transforms are deliberately separate."
+conflicts_with = []
+example = "Replace `if account.balance > amount: account.balance -= amount` with `account.withdraw(amount)`. Account encapsulates the invariant; callers don't reimplement it."
+default_for_stacks = ["py-fastapi", "ts-next"]
+
+[[principles]]
+id = "command-query-separation"
+name = "Command-Query Separation (CQS)"
+category = "code-level"
+summary = "Methods are either commands (perform an action; may have side effects; return void or status) OR queries (return data; no side effects; can be called freely). Never both. Bertrand Meyer's rule; predates and underpins CQRS."
+when_to_apply = "Service / domain layers. Anywhere mocking pain in tests stems from 'reading' a value that mutates state. Functions named `get_X()` that actually upsert."
+when_not_to_apply = "Idiomatic constructs that conflate by design (Stack.pop returns + mutates). Iterator protocols. Atomic compare-and-swap APIs."
+conflicts_with = []
+example = "Split `acquire_token()` (which both fetches and renews) into `current_token() -> Option<Token>` (query) and `renew_token() -> Token` (command). Callers compose."
+default_for_stacks = ["py-fastapi", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "pure-functions"
+name = "Pure Functions"
+category = "reliability"
+summary = "A pure function's output depends only on its inputs; it has no side effects. Trivially testable; trivially memoizable; trivially parallelizable. Push impurity to the edges (I/O, DB, time) and keep the core pure."
+when_to_apply = "Business logic. Validation. Transformation pipelines. Anywhere unit tests are flaky due to hidden state."
+when_not_to_apply = "I/O-bound code by nature (handlers, repository methods). Performance-critical paths where in-place mutation matters."
+conflicts_with = []
+example = "Rewrite `def discount(order): order.total *= 0.9; return order.total` as `def discount(total: Decimal) -> Decimal: return total * Decimal('0.9')`. Caller decides what to do with the result."
+default_for_stacks = ["rust-axum"]
+
+[[principles]]
+id = "no-magic-numbers"
+name = "No Magic Numbers"
+category = "code-level"
+summary = "Numeric and string literals with non-obvious meaning live as named constants. `if user.role == 3` is a smell; `if user.role == Role.ADMIN` is a contract."
+when_to_apply = "Always — even one literal repeated twice deserves a constant. HTTP status codes, retry counts, timeouts, magic flag values."
+when_not_to_apply = "Truly local literals with no semantic meaning (`for i in range(3)` for retry). Idiomatic mathematical constants (`pi`, `e`) when the language exposes them."
+conflicts_with = []
+example = "Replace `time.sleep(30)` with `time.sleep(BACKOFF_INITIAL_SECONDS)` defined as `BACKOFF_INITIAL_SECONDS = 30` near the top of the module."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
 
 [[principles]]
 id = "law-of-demeter"
@@ -239,4 +333,15 @@ when_to_apply = "Public APIs. Helper utilities. Anywhere a function name implies
 when_not_to_apply = "Domain-specific frameworks where the conventions ARE the API (e.g., pytest fixtures, Rails ActiveRecord)."
 conflicts_with = []
 example = "A function called `parse_date(s)` returns Option<Date> on failure — not `None` for empty string and `Date(1970-01-01)` for malformed input."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "consistency-with-existing-code"
+name = "Consistency with Existing Code (Brownfield Deference)"
+category = "rule-set"
+summary = "In brownfield projects, match the codebase's existing style, patterns, and conventions even when they differ from universal craft principles. A consistent codebase that violates a 'best practice' beats a half-clean codebase fighting itself."
+when_to_apply = "ALWAYS in brownfield projects. New code in an existing module must look like its neighbors before it tries to look like a textbook. Refactors stay scoped — don't drag in a craft-principle rewrite as a side effect."
+when_not_to_apply = "Greenfield projects (no existing code to defer to — pick principles deliberately). Cross-cutting upgrades the user explicitly scoped (e.g., 'migrate every service to Result<T,E>'). Code so broken that 'consistent with existing' would propagate a known defect."
+conflicts_with = []
+example = "Repo uses `getUserByID` everywhere (not the more idiomatic `get_user_by_id`). When you add a new function, name it `getOrderByID` — the consistency win outweighs the per-name preference. Open a chore task if you want to migrate the whole codebase."
 default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]

@@ -166,10 +166,13 @@ mod tests {
     #[test]
     fn catalog_v1_has_full_breadth() {
         let table = load().unwrap();
-        // v1 ships ~20 principles across the four categories.
+        // v1 ships 28 principles across the four categories (20 core +
+        // 8 added by CR.2.1: meaningful-names, small-functions, SLA,
+        // tell-dont-ask, CQS, pure-functions, no-magic-numbers,
+        // consistency-with-existing-code).
         assert!(
-            table.principles.len() >= 15,
-            "v1 catalog should ship at least 15 principles, got {}",
+            table.principles.len() >= 25,
+            "v1 catalog should ship at least 25 principles, got {}",
             table.principles.len()
         );
     }
@@ -227,8 +230,38 @@ mod tests {
         let table = load().unwrap();
         let ids: std::collections::HashSet<&str> =
             table.principles.iter().map(|p| p.id.as_str()).collect();
-        for expected in ["solid", "dry", "kiss", "yagni", "clean-architecture", "idempotence"] {
+        for expected in [
+            "solid",
+            "dry",
+            "kiss",
+            "yagni",
+            "clean-architecture",
+            "idempotence",
+            // CR.2.1 additions:
+            "meaningful-names",
+            "small-functions",
+            "single-level-of-abstraction",
+            "tell-dont-ask",
+            "command-query-separation",
+            "pure-functions",
+            "no-magic-numbers",
+            "consistency-with-existing-code",
+        ] {
             assert!(ids.contains(expected), "v1 catalog missing `{expected}`");
+        }
+    }
+
+    #[test]
+    fn consistency_with_existing_code_is_universal() {
+        // The brownfield deference rule must default for every seeded
+        // stack — it's the meta-principle that prevents universal
+        // principles from steamrolling existing conventions.
+        let p = find("consistency-with-existing-code").expect("must exist");
+        for stack in ["py-fastapi", "ts-next", "rust-axum", "go-echo"] {
+            assert!(
+                p.default_for_stacks.iter().any(|s| s == stack),
+                "consistency-with-existing-code must default for `{stack}` (brownfield deference)"
+            );
         }
     }
 }
