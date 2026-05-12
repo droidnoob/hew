@@ -29,7 +29,7 @@ per-task — running too often produces noise and burns context.
 ## Inputs from `hew prime verify`
 
 - `tasks.done` history — the closed tasks since the last verification.
-  Use `bd list --status=closed --since=<last-verify-timestamp>` if needed.
+  Use `hew task list --status=closed --since=<last-verify-timestamp>` if needed.
 - `memories.boundaries` — every public interface that must still work.
 - `memories.security` — security baselines that must still hold.
 - The epic's acceptance criteria (in the epic's own description) — the
@@ -103,7 +103,7 @@ Surface to user: "Boundary X changed, was that intended?"
 If the change was intentional and the boundary should be updated:
 
 ```
-bd remember "BOUNDARY: POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline: <date>. Old shape returns 400."
+hew remember --type=boundary "POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline: <date>. Old shape returns 400."
 ```
 
 ### 4. End-to-end golden path
@@ -138,8 +138,8 @@ VERIFY: pass
 Then:
 
 ```
-bd close <epic-id> --reason "verified end-to-end. all 6 acceptance criteria met. 248 tests pass. boundaries unchanged."
-bd remember "STATUS:verify:<epic-id>:complete — <ISO-8601 timestamp>"
+hew epic close <epic-id> --reason "verified end-to-end. all 6 acceptance criteria met. 248 tests pass. boundaries unchanged."
+hew remember --type=status "verify:<epic-id>:complete — <ISO-8601 timestamp>"
 ```
 
 The epic closes; if this was the milestone's last epic, the milestone is
@@ -167,15 +167,15 @@ Epic stays open. Re-run hew-verify after the new tasks close.
 Then actually create the tasks:
 
 ```
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement refresh-token revocation on reuse" \
   --description="Verified missing in hew-verify. Per epic acceptance: revoked tokens must 401."
 
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/logout" \
   --description="Verified missing in hew-verify. Per epic acceptance: logout invalidates server-side session."
 
-bd create --parent=bd-a3f8 --type=bug --priority=0 \
+hew task new --parent=hew-a3f8 --type=bug --priority=0 \
   --title="POST /users contract regression: 422 vs 400" \
   --description="Verified in hew-verify boundary check. Decide: restore 400 or update BOUNDARY:users-create memory."
 ```

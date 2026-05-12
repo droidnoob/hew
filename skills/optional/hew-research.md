@@ -41,7 +41,7 @@ When they do, opt in via `hew config set optional-skills.research true`.
      a. Search for authoritative sources (docs, RFCs, vendor blogs)
      b. Skim 2–3 results, extract the load-bearing fact
      c. Cross-check with a second source if the claim is non-obvious
-     d. Write a bd remember with the finding + citation
+     d. Write a `hew remember --type=research "<topic> [TAG] <finding>"` with the citation
 4. Surface contradictions you couldn't resolve as open questions for the user
 5. Mark research complete
 ```
@@ -57,14 +57,14 @@ returning to the same source.
 
 Good:
 ```
-bd remember "RESEARCH: passwordless email-link auth — recommended TTL 15 min for the link, single-use, redirect to same-origin only. Source: NIST SP 800-63B §5.1.3.2."
-bd remember "RESEARCH: Stripe checkout — fixed_price subscriptions support trial_period_days but trials cannot be extended via API; user must cancel + re-subscribe. Source: stripe-docs/checkout/subscriptions#trials, verified 2026-05."
+hew remember --type=research "passwordless email-link auth — recommended TTL 15 min for the link, single-use, redirect to same-origin only. Source: NIST SP 800-63B §5.1.3.2."
+hew remember --type=research "Stripe checkout — fixed_price subscriptions support trial_period_days but trials cannot be extended via API; user must cancel + re-subscribe. Source: stripe-docs/checkout/subscriptions#trials, verified 2026-05."
 ```
 
 Bad:
 ```
-bd remember "RESEARCH: auth is complicated, lots of options."
-bd remember "RESEARCH: Stripe has trials."
+hew remember --type=research "auth is complicated, lots of options."
+hew remember --type=research "Stripe has trials."
 ```
 
 If a finding could have been written without doing any research, it's
@@ -90,9 +90,9 @@ RESEARCH:<topic-tag> [TAG] <finding>. Source: <url-or-doc-ref>, verified <YYYY-M
 Examples:
 
 ```
-bd remember "RESEARCH:auth [VERIFIED] passwordless email-link auth: TTL 15 min, single-use, same-origin redirect. Source: NIST SP 800-63B §5.1.3.2 + OWASP ASVS v4 §2.10, verified 2026-05."
-bd remember "RESEARCH:stripe [CITED] trial_period_days cannot be extended via API; user must cancel + re-subscribe. Source: stripe-docs/checkout/subscriptions#trials, verified 2026-05."
-bd remember "RESEARCH:rate-limit [ASSUMED] 5 attempts / 15 min / IP is a reasonable default for the link endpoint. Source: n/a — agent inference based on common defaults."
+hew remember --type=research "auth [VERIFIED] passwordless email-link auth: TTL 15 min, single-use, same-origin redirect. Source: NIST SP 800-63B §5.1.3.2 + OWASP ASVS v4 §2.10, verified 2026-05."
+hew remember --type=research "stripe [CITED] trial_period_days cannot be extended via API; user must cancel + re-subscribe. Source: stripe-docs/checkout/subscriptions#trials, verified 2026-05."
+hew remember --type=research "rate-limit [ASSUMED] 5 attempts / 15 min / IP is a reasonable default for the link endpoint. Source: n/a — agent inference based on common defaults."
 ```
 
 `[ASSUMED]` is acceptable only when no source is available; flag it
@@ -146,7 +146,7 @@ to finalize — *not* directly to `hew-decompose`. The planner needs
 to incorporate the findings into the plan before tasks get cut.
 
 ```
-bd remember "STATUS:research:complete — <ISO-8601 timestamp>"
+hew remember --type=status "research:complete — <ISO-8601 timestamp>"
 ```
 
 Then: "Research complete. Returning to `hew-plan` with findings — the

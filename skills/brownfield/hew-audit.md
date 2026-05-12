@@ -97,11 +97,11 @@ homework.
 ## Memory shape
 
 ```
-bd remember "AUDIT: jsonwebtoken@8.5.1 — DEPRECATED, last publish 3yr ago. Migrate to jose@5.x. Used in app/auth/jwt.py."
-bd remember "AUDIT: lodash@4.17.20 — CVE-2021-23337 (prototype pollution). Bump to 4.17.21+ or migrate to lodash-es."
-bd remember "AUDIT: cryptography@38.0.4 — 7 majors behind. Bump path 38→39→40→…→42 with type changes at 39, 41."
-bd remember "AUDIT: moment — UNMAINTAINED, last publish 2y, README recommends dayjs/date-fns."
-bd remember "AUDIT: duplicate uuid@8.3.2 + uuid@9.0.0 in tree. Unify to 9.x."
+hew remember --type=audit "jsonwebtoken@8.5.1 — DEPRECATED, last publish 3yr ago. Migrate to jose@5.x. Used in app/auth/jwt.py."
+hew remember --type=audit "lodash@4.17.20 — CVE-2021-23337 (prototype pollution). Bump to 4.17.21+ or migrate to lodash-es."
+hew remember --type=audit "cryptography@38.0.4 — 7 majors behind. Bump path 38→39→40→…→42 with type changes at 39, 41."
+hew remember --type=audit "moment — UNMAINTAINED, last publish 2y, README recommends dayjs/date-fns."
+hew remember --type=audit "duplicate uuid@8.3.2 + uuid@9.0.0 in tree. Unify to 9.x."
 ```
 
 Be specific: package name + version + why + suggested action + where
@@ -112,14 +112,14 @@ it's used (file path if known).
 For severity ≥ High and clear-cut paths (deprecation, CVE):
 
 ```
-bd create --type=bug --priority=1 \
+hew task new --type=bug --priority=1 \
   --title="Migrate from jsonwebtoken to jose (deprecated upstream)" \
   --description="
   AUDIT: jsonwebtoken@8.5.1 deprecated 2023; jose is the maintained replacement.
   Touch: app/auth/jwt.py, tests/auth/test_jwt.py.
   See https://github.com/auth0/node-jsonwebtoken#readme-deprecation.
-  " \
-  --acceptance="jsonwebtoken removed from package.json; pytest tests/auth -k jwt passes; auth flow works end-to-end."
+  Acceptance: jsonwebtoken removed from package.json; pytest tests/auth -k jwt passes; auth flow works end-to-end.
+  "
 ```
 
 For lower-severity findings (slight version drift, unmaintained but
@@ -163,7 +163,7 @@ Tasks opened: 3. Memories written: 8. Run `hew status` to confirm.
 ## Step — mark phase complete + continue the chain
 
 ```
-bd remember "STATUS:audit:complete — <ISO-8601 timestamp>"
+hew remember --type=status "audit:complete — <ISO-8601 timestamp>"
 ```
 
 Then **continue directly into `hew-boundary`.** Brownfield onboarding

@@ -147,7 +147,7 @@ Every finding lands in bd. **No memory pollution.** Two types:
 Filing template:
 
 ```
-bd create --type=bug --priority=<1|2|3> \
+hew task new --type=bug --priority=<1|2|3> \
   --title='[Review][BLOCKER] auth/jwt.rs:42 — missing CSRF check on POST /login' \
   --description='Found during /hew:review scope=LastN(8).
 Originating tasks: hew-abc.3, hew-abc.4.
@@ -167,7 +167,7 @@ Write the review marker so the next run computes
 `tasks_since_last_review` correctly:
 
 ```
-bd remember "STATUS:review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+hew remember --type=status "review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 The `STATUS:review:<ts>` memory is the ONLY memory this skill writes.
@@ -220,7 +220,7 @@ If nothing was found, say so plainly — and write the marker anyway
   to bound the review; wandering through the codebase makes the review
   unbounded and the findings vague.
 - **Re-file an existing open `[Review]` bug.** Before creating, check
-  with `bd list --label review` (or `bd search '[Review]'`); update the
+  with `hew task search '[Review]'`; update the
   existing one if it's still open.
 
 ## Anti-patterns

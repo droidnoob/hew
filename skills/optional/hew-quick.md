@@ -31,11 +31,11 @@ step because the work is genuinely small."
 ## What quick mode actually does
 
 ```
-1. bd create the task (one task, no epic)
-2. bd update --claim
+1. hew task new (one task, no epic)
+2. hew task claim
 3. do the work
 4. invoke hew-guard
-5. bd close
+5. hew task close
 6. git commit
 ```
 
@@ -55,7 +55,7 @@ The skipped steps are:
   of drift quick mode shouldn't cause.
 - Tests — if the change has any behavior, a test covers it.
 - Commit discipline — atomic commit with conventional message.
-- `bd remember` for any gotcha you discovered.
+- `hew remember --type=gotcha "..."` for any gotcha you discovered.
 
 ## Sizing rule
 
@@ -75,11 +75,11 @@ quick-mode discipline rots.
 User: "fix the off-by-one in the pagination cursor."
 
 ```
-bd create --type=bug --priority=1 \
+hew task new --type=bug --priority=1 \
   --title="Fix off-by-one in pagination cursor" \
   --description="Pagination skips the last item per page. See app/repos/users.py:list_users — cursor is exclusive but consumer expects inclusive. Fix + test."
 
-bd update <id> --claim
+hew task claim <id>
 
 # read app/repos/users.py:list_users
 # read tests/repos/test_users.py
@@ -87,7 +87,7 @@ bd update <id> --claim
 # add a regression test covering the edge
 
 # invoke hew-guard → pass
-bd close <id> --reason "Cursor handling fixed; test_list_users_returns_last_item added; existing pagination tests still pass."
+hew task close <id> --reason "Cursor handling fixed; test_list_users_returns_last_item added; existing pagination tests still pass."
 
 # commit
 git commit -m "fix(repos): pagination cursor includes last item
@@ -124,8 +124,8 @@ default is to escalate.
   drift quick mode invites.
 - **Open epics from quick mode.** If you need an epic, you needed
   `hew-plan`.
-- **Persist the work without `bd close`.** Even quick-mode tasks
-  appear in `bd show` history — that's the audit trail.
+- **Persist the work without `hew task close`.** Even quick-mode tasks
+  appear in `hew task show` history — that's the audit trail.
 
 ## Anti-patterns
 

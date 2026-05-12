@@ -49,10 +49,10 @@ Does it deliver one coherent feature with multiple parts?
   no  → continue.
 
 Does it span multiple features that depend on each other?
-  yes → MULTI-EPIC + BONDS. One epic per feature.
-        `bd mol bond B A` → B's tasks unready until A closes.
-        Parallel features = no bond.
-        Conditional path (B runs only on A failure) = `bd mol bond B A --type conditional`.
+  yes → MULTI-EPIC + task-level deps. One epic per feature.
+        Sequence B-after-A via `hew dep add <first-B-task> --on <last-A-task>`.
+        Parallel features = no deps.
+        (Avoid `bd mol bond` — semantics are broken; see GOTCHA:bd-mol-bond.)
 ```
 
 ### Brownfield onboarding before features
@@ -62,16 +62,18 @@ Brownfield projects with any of `STATUS:scan` / `STATUS:convention` /
 Feature epics bond to it.
 
 ```
-bd create --type=epic --priority=0 --title="Codebase Onboarding"
-  bd create --parent=<epic> --title="Scan architecture"
-  bd create --parent=<epic> --title="Extract conventions"
-  bd create --parent=<epic> --title="Audit dependencies"
-  bd create --parent=<epic> --title="Map API boundaries"
+hew task new --type=epic --priority=0 --title="Codebase Onboarding"
+  hew task new --parent=<epic> --title="Scan architecture"
+  hew task new --parent=<epic> --title="Extract conventions"
+  hew task new --parent=<epic> --title="Audit dependencies"
+  hew task new --parent=<epic> --title="Map API boundaries"
 
-bd mol bond <feature-epic> <onboarding-epic>
+# bd mol bond is intentionally NOT wrapped — semantics are broken
+# (see GOTCHA:bd-mol-bond). Use task-level deps instead:
+hew dep add <first-feature-task> --on <last-onboarding-task>
 ```
 
-Feature tasks stay out of `bd ready` until onboarding closes.
+Feature tasks stay unready until onboarding closes.
 
 ## Step 2 — decide vertical slice vs horizontal layer
 
@@ -107,13 +109,13 @@ slices.
 Persist the skeleton's architectural commitments:
 
 ```
-bd remember "DECISION:skeleton — Next.js 14 (app router) + FastAPI + Postgres. Set in walking skeleton; later phases inherit."
+hew remember --type=decision "skeleton — Next.js 14 (app router) + FastAPI + Postgres. Set in walking skeleton; later phases inherit."
 ```
 
 ## Step 3 — build each task with discipline
 
-For every unit of work in the plan, `bd create` it. Each task gets four
-things, all of which the executor will read on `bd show <id>`:
+For every unit of work in the plan, `hew task new` it. Each task gets four
+things, all of which the executor will read on `hew task show <id>`:
 
 ### Title (verb phrase, ≤ 60 chars)
 
@@ -122,7 +124,7 @@ things, all of which the executor will read on `bd show <id>`:
 
 ### Description — the *why*, *what*, and *which conventions apply*
 
-The executor reads this *first* on `bd show`. Write so the description
+The executor reads this *first* on `hew task show`. Write so the description
 plus `hew prime execute` output is enough to do the work without asking.
 
 Include:
@@ -137,7 +139,7 @@ Include:
   module. `src/auth/jwt.py` beats "the auth code."
 
 ```
-bd create --type=task --priority=1 \
+hew task new --type=task --priority=1 \
   --title="Implement JWT issuance for /api/v1/auth/login" \
   --description="
   Why: D-04 specifies JWT auth (DECISION:auth memory).
@@ -195,8 +197,8 @@ Then merge it into the next task.
 
 ## Step 4 — wire dependencies
 
-A task `bd dep add child parent-id` if it cannot start until the other is
-done. Be tight — chain only what truly must wait.
+A task `hew dep add <child> --on <prerequisite>` if it cannot start until
+the other is done. Be tight — chain only what truly must wait.
 
 **Interface-first ordering:** when a plan creates new types/interfaces
 consumed by later tasks, the first task defines the contract (types,
@@ -204,13 +206,13 @@ function signatures, route paths). Implementation tasks depend on the
 contract task. This prevents executors from scavenger-hunting for context.
 
 ```
-bd create --title="Define auth contracts (types, route paths)"  # → bd-X.1
-bd create --title="Implement /login against contracts"          # → bd-X.2
-bd create --title="Implement /refresh against contracts"        # → bd-X.3
-bd create --title="Wire login button to /login"                 # → bd-X.4
-bd dep add bd-X.2 bd-X.1
-bd dep add bd-X.3 bd-X.1
-bd dep add bd-X.4 bd-X.2
+hew task new --title="Define auth contracts (types, route paths)"  # → hew-X.1
+hew task new --title="Implement /login against contracts"          # → hew-X.2
+hew task new --title="Implement /refresh against contracts"        # → hew-X.3
+hew task new --title="Wire login button to /login"                 # → hew-X.4
+hew dep add hew-X.2 --on hew-X.1
+hew dep add hew-X.3 --on hew-X.1
+hew dep add hew-X.4 --on hew-X.2
 ```
 
 ## Step 5 — place gates for external blockers
@@ -225,7 +227,11 @@ with a title prefix.
 | Manual approval | `bd create --type=gate --title="Staging approved"` |
 | Timer / cooldown | `bd create --type=gate --title="30m cooldown" --await-type=timer --await-id=30m` |
 
-Then `bd dep add <next-task> <gate-id>` so the next work blocks on the gate.
+Gates use `bd create` directly — `hew task new` is task-shaped and
+doesn't expose `--await-type` / `--await-id` flags yet.
+
+Then `hew dep add <next-task> --on <gate-id>` so the next work blocks
+on the gate.
 
 ## Step 6 — pick types and priorities
 
@@ -256,47 +262,44 @@ everything is P0, you have not decomposed enough.
 User asks for "auth on an existing FastAPI app." Plan is approved.
 
 ```
-bd create --type=epic --priority=1 --title="Auth System" \
+hew task new --type=epic --priority=1 --title="Auth System" \
   --description="JWT auth for /api/v1/*. See DECISION:auth, DECISION:db memories."
-# → bd-a3f8
+# → hew-a3f8
 
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Define auth contracts" \
-  --description="Why: D-04 + interface-first ordering. What: AuthResponse, RefreshRequest, route paths /login /refresh /logout. Files: app/api/v1/auth/types.py (new)." \
-  --acceptance="types import cleanly; mypy passes; route constants exported."
-# → bd-a3f8.1
+  --description="Why: D-04 + interface-first ordering. What: AuthResponse, RefreshRequest, route paths /login /refresh /logout. Files: app/api/v1/auth/types.py (new)."
+# → hew-a3f8.1
+# (--acceptance lives in bd; surface it via `bd update --acceptance "…"` if needed.)
 
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/login" \
-  --description="Why: D-04. What: validates {email,password}, returns AuthResponse. CONVENTION:errors (AppError), CONVENTION:services (DI). Files: app/services/auth_service.py, app/api/v1/auth/login.py, tests/api/test_login.py." \
-  --acceptance="200+tokens on valid creds; 401+AppError on invalid; pytest -k login passes; CONVENTION:errors honored."
-# → bd-a3f8.2
+  --description="Why: D-04. What: validates {email,password}, returns AuthResponse. CONVENTION:errors (AppError), CONVENTION:services (DI). Files: app/services/auth_service.py, app/api/v1/auth/login.py, tests/api/test_login.py."
+# → hew-a3f8.2
 
-bd create --parent=bd-a3f8 --type=task --priority=1 \
+hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/refresh + rotation" \
-  --description="Why: D-04 refresh rotation requirement. Files: app/api/v1/auth/refresh.py, tests/api/test_refresh.py." \
-  --acceptance="Refresh rotates; revoked tokens 401; pytest -k refresh passes."
-# → bd-a3f8.3
+  --description="Why: D-04 refresh rotation requirement. Files: app/api/v1/auth/refresh.py, tests/api/test_refresh.py."
+# → hew-a3f8.3
 
-bd create --parent=bd-a3f8 --type=task --priority=2 \
+hew task new --parent=hew-a3f8 --type=task --priority=2 \
   --title="Wire frontend login button to /login" \
-  --description="Files: frontend/src/auth/login.tsx, frontend/src/auth/auth-client.ts. CONVENTION:errors-frontend." \
-  --acceptance="Submit calls API; token stored httpOnly; redirect on success."
-# → bd-a3f8.4
+  --description="Files: frontend/src/auth/login.tsx, frontend/src/auth/auth-client.ts. CONVENTION:errors-frontend."
+# → hew-a3f8.4
 
-bd create --parent=bd-a3f8 --type=task --priority=2 \
+hew task new --parent=hew-a3f8 --type=task --priority=2 \
   --title="End-to-end auth integration tests" \
   --description="Full login → protected → refresh → logout cycle. Files: tests/e2e/test_auth.py."
-# → bd-a3f8.5
+# → hew-a3f8.5
 
-bd dep add bd-a3f8.2 bd-a3f8.1
-bd dep add bd-a3f8.3 bd-a3f8.1
-bd dep add bd-a3f8.4 bd-a3f8.2
-bd dep add bd-a3f8.5 bd-a3f8.2
-bd dep add bd-a3f8.5 bd-a3f8.3
+hew dep add hew-a3f8.2 --on hew-a3f8.1
+hew dep add hew-a3f8.3 --on hew-a3f8.1
+hew dep add hew-a3f8.4 --on hew-a3f8.2
+hew dep add hew-a3f8.5 --on hew-a3f8.2
+hew dep add hew-a3f8.5 --on hew-a3f8.3
 ```
 
-`bd dep tree bd-a3f8` should now show:
+`hew dep tree hew-a3f8` should now show:
 
 ```
 bd-a3f8 Auth System [epic] [P1] (open)
@@ -314,13 +317,16 @@ critical path.
 
 Run each:
 
-1. **`bd ready`** — must return ≥1 task. If empty, you have a cycle or
-   over-constrained the graph. Inspect with `bd blocked`.
-2. **`bd orphans`** — must return nothing. Orphans = broken dependency refs.
-3. **`bd dep tree <epic-id>`** for each epic — visualize the hierarchy and
-   confirm it matches the plan's "order of work."
-4. **`bd lint`** — flags tasks missing descriptions or acceptance criteria.
-5. **Read three random tasks with `bd show <id>`** — descriptions must be
+1. **`hew prime execute`** — `ready_list` must be ≥1 task. If empty, you
+   have a cycle or over-constrained the graph. Inspect with `hew dep
+   blocked`.
+2. **`bd orphans`** — must return nothing. Orphans = broken dependency
+   refs. No `hew` wrapper yet; bd is fine.
+3. **`hew epic tree <epic-id>`** for each epic — visualize the hierarchy
+   and confirm it matches the plan's "order of work."
+4. **`bd lint`** — flags tasks missing descriptions or acceptance
+   criteria. No `hew` wrapper yet.
+5. **Read three random tasks with `hew task show <id>`** — descriptions must be
    self-contained. If you cannot understand the task without conversation
    context, rewrite the description.
 
@@ -352,7 +358,7 @@ locked it, plan it.
   `"EPIC: …"`). Use `--type=`.
 - **Strings for priority** (`"high"`, `"medium"`, `"low"`). Numeric.
 - **One giant flat task list** when the work is clearly multi-feature.
-- **Cycle creation.** Verify with `bd ready` after every batch of `bd dep add`.
+- **Cycle creation.** Verify with `hew prime execute` after every batch of `hew dep add`.
 - **Priority inflation.** Everything P0 = no signal.
 - **Empty descriptions** or **acceptance criteria.**
 - **Horizontal-layer decomposition** unless a shared foundation truly demands it.
@@ -364,14 +370,14 @@ locked it, plan it.
 
 When the graph is built and validation passes:
 
-1. Print `bd dep tree <epic-id>` to the user.
+1. Print `hew epic tree <epic-id>` to the user.
 2. Ask: "Graph looks like this. Approve and start work, or revise?"
 3. On approval, invoke `hew-execute`.
 
 Then write the phase marker so downstream skills know decomposition is done:
 
 ```
-bd remember "STATUS:decompose:complete — <ISO-8601 timestamp>"
+hew remember --type=status "decompose:complete — <ISO-8601 timestamp>"
 ```
 
 Mid-flight decomposition (the executor finds a task is too big) is handled

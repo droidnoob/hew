@@ -55,8 +55,8 @@ Read 3–5 service files. Look for:
 - How are they registered/wired into routes?
 
 ```
-bd remember "CONVENTION:services — Class-based with constructor DI. One service per domain. Public methods async, keyword-only args. See app/services/user_service.py for the template."
-bd remember "CONVENTION:services — Services never raise; they return Result[T, AppError]. Routes unwrap and translate to HTTP."
+hew remember --type=convention "services — Class-based with constructor DI. One service per domain. Public methods async, keyword-only args. See app/services/user_service.py for the template."
+hew remember --type=convention "services — Services never raise; they return Result[T, AppError]. Routes unwrap and translate to HTTP."
 ```
 
 ### 2. Error handling
@@ -69,8 +69,8 @@ Read the error middleware, a route, a service. Look for:
 - Sentinel values vs exceptions vs Result types?
 
 ```
-bd remember "CONVENTION:errors — Never raise raw exceptions. Wrap in AppError(code: str, message: str, details: dict). Defined in app/exceptions.py."
-bd remember "CONVENTION:errors — AppError caught by error_middleware (app/middleware/errors.py); never call jsonify/Response directly from a route."
+hew remember --type=convention "errors — Never raise raw exceptions. Wrap in AppError(code: str, message: str, details: dict). Defined in app/exceptions.py."
+hew remember --type=convention "errors — AppError caught by error_middleware (app/middleware/errors.py); never call jsonify/Response directly from a route."
 ```
 
 ### 3. API / routing
@@ -84,9 +84,9 @@ Read 3–5 route files. Look for:
 - Response shape? (envelope, plain object, problem-detail)
 
 ```
-bd remember "CONVENTION:api — Route handlers are thin: parse + validate + delegate to service + map result to response. Never put business logic in route handlers."
-bd remember "CONVENTION:api — Validate request bodies with pydantic models declared in app/api/v1/{resource}/schemas.py. Reuse the same models for OpenAPI generation."
-bd remember "CONVENTION:api — Successful responses use the envelope {data: T} for items, {results: T[], next_cursor: str} for lists."
+hew remember --type=convention "api — Route handlers are thin: parse + validate + delegate to service + map result to response. Never put business logic in route handlers."
+hew remember --type=convention "api — Validate request bodies with pydantic models declared in app/api/v1/{resource}/schemas.py. Reuse the same models for OpenAPI generation."
+hew remember --type=convention "api — Successful responses use the envelope {data: T} for items, {results: T[], next_cursor: str} for lists."
 ```
 
 ### 4. Database / data access
@@ -100,9 +100,9 @@ Read 2–3 repository/query files. Look for:
 - Migration pattern?
 
 ```
-bd remember "CONVENTION:db — All queries go through repository classes in app/repos/. No raw SQL outside app/repos/."
-bd remember "CONVENTION:db — All DB models use UUID primary keys (BaseModel mixin in app/models/base.py adds id, created_at, updated_at)."
-bd remember "CONVENTION:db — Transactions managed via `async with db.transaction():` in service layer, never in routes."
+hew remember --type=convention "db — All queries go through repository classes in app/repos/. No raw SQL outside app/repos/."
+hew remember --type=convention "db — All DB models use UUID primary keys (BaseModel mixin in app/models/base.py adds id, created_at, updated_at)."
+hew remember --type=convention "db — Transactions managed via `async with db.transaction():` in service layer, never in routes."
 ```
 
 ### 5. Tests
@@ -116,10 +116,10 @@ Read 3–5 test files spanning route, service, and unit levels. Look for:
 - Integration / e2e test layer?
 
 ```
-bd remember "CONVENTION:tests — One test file per source module. Pattern: tests/{path}/test_{module}.py mirrors app/{path}/{module}.py."
-bd remember "CONVENTION:tests — Fixtures in tests/conftest.py and tests/factories/ (factory_boy). Never instantiate models directly in tests."
-bd remember "CONVENTION:tests — Test names: test_<what>_<expected>. Example: test_create_user_returns_id."
-bd remember "CONVENTION:tests — Real Postgres via testcontainers. No mocking of the DB layer."
+hew remember --type=convention "tests — One test file per source module. Pattern: tests/{path}/test_{module}.py mirrors app/{path}/{module}.py."
+hew remember --type=convention "tests — Fixtures in tests/conftest.py and tests/factories/ (factory_boy). Never instantiate models directly in tests."
+hew remember --type=convention "tests — Test names: test_<what>_<expected>. Example: test_create_user_returns_id."
+hew remember --type=convention "tests — Real Postgres via testcontainers. No mocking of the DB layer."
 ```
 
 ### 6. Imports + module organization
@@ -132,8 +132,8 @@ Read the top of 5–10 random source files. Look for:
 - Re-export patterns in `__init__.py` / `index.ts`?
 
 ```
-bd remember "CONVENTION:imports — Stdlib first, third-party second, local third. Blank line between groups. Enforced by ruff isort rule."
-bd remember "CONVENTION:imports — Always absolute imports from `app.*` root, never relative (no `from .foo import bar`)."
+hew remember --type=convention "imports — Stdlib first, third-party second, local third. Blank line between groups. Enforced by ruff isort rule."
+hew remember --type=convention "imports — Always absolute imports from `app.*` root, never relative (no `from .foo import bar`)."
 ```
 
 ### 7. Naming
@@ -147,7 +147,7 @@ Look across files and check for:
 - Variable conventions (Hungarian, prefixes)?
 
 ```
-bd remember "CONVENTION:naming — Functions and variables snake_case. Classes PascalCase. Constants UPPER_SNAKE_CASE. Private fields prefix with single underscore."
+hew remember --type=convention "naming — Functions and variables snake_case. Classes PascalCase. Constants UPPER_SNAKE_CASE. Private fields prefix with single underscore."
 ```
 
 ### 8. Logging + observability
@@ -160,7 +160,7 @@ Read where logging is set up + a few places it's used. Look for:
 - PII handling rule?
 
 ```
-bd remember "CONVENTION:logging — structlog. Always include request_id in context (added by app/middleware/request_context.py). Never log PII (emails, tokens, body contents)."
+hew remember --type=convention "logging — structlog. Always include request_id in context (added by app/middleware/request_context.py). Never log PII (emails, tokens, body contents)."
 ```
 
 ### 9. Type annotations / type discipline
@@ -173,7 +173,7 @@ For typed languages: read a few files of each layer.
 - Strict mode? Generics?
 
 ```
-bd remember "CONVENTION:types — All public functions annotated. Return type explicit even when None. mypy --strict in CI. No Any without an annotated reason comment."
+hew remember --type=convention "types — All public functions annotated. Return type explicit even when None. mypy --strict in CI. No Any without an annotated reason comment."
 ```
 
 ### 10. Frontend-specific (if applicable)
@@ -183,9 +183,9 @@ component structure, state management, routing, styling, accessibility,
 forms.
 
 ```
-bd remember "CONVENTION:components — Functional components only. Props typed via TypeScript interface, not type alias. Default exports only for pages; named exports for components."
-bd remember "CONVENTION:state — Zustand for global state (one store per feature). React Query for server state. Never useState for shared state."
-bd remember "CONVENTION:styling — Tailwind classes only; no CSS modules, no inline styles, no css-in-js. Shared classes via cn() from src/lib/cn.ts."
+hew remember --type=convention "components — Functional components only. Props typed via TypeScript interface, not type alias. Default exports only for pages; named exports for components."
+hew remember --type=convention "state — Zustand for global state (one store per feature). React Query for server state. Never useState for shared state."
+hew remember --type=convention "styling — Tailwind classes only; no CSS modules, no inline styles, no css-in-js. Shared classes via cn() from src/lib/cn.ts."
 ```
 
 ## Writing good conventions — prescriptive, not descriptive
@@ -225,7 +225,7 @@ pattern and services that don't. Decide:
    older files don't), call it out:
 
 ```
-bd remember "CONVENTION:errors — Use Result[T, AppError] pattern (added in PR #47). Older modules still raise AppError directly; migrating opportunistically. New code uses Result."
+hew remember --type=convention "errors — Use Result[T, AppError] pattern (added in PR #47). Older modules still raise AppError directly; migrating opportunistically. New code uses Result."
 ```
 
 ## Decompose into scan subtasks
@@ -234,13 +234,13 @@ If the codebase is large, you don't have to extract every convention in
 one session. Create scan subtasks per area:
 
 ```
-bd create --parent=<onboarding-epic> --title="Extract service-layer conventions"
-bd create --parent=<onboarding-epic> --title="Extract API conventions"
-bd create --parent=<onboarding-epic> --title="Extract test conventions"
+hew task new --parent=<onboarding-epic> --title="Extract service-layer conventions"
+hew task new --parent=<onboarding-epic> --title="Extract API conventions"
+hew task new --parent=<onboarding-epic> --title="Extract test conventions"
 ...
 ```
 
-Claim them one at a time, finish each (`bd remember "CONVENTION:..."`
+Claim them one at a time, finish each (`hew remember --type=convention "..."`
 entries), close, move on. Each subtask is ~30 min of agent work.
 
 ## When to stop
@@ -259,7 +259,7 @@ it. If you're surprised, your conventions are incomplete.
 After extraction:
 
 ```
-bd remember "STATUS:convention:complete — <ISO-8601 timestamp>"
+hew remember --type=status "convention:complete — <ISO-8601 timestamp>"
 ```
 
 This signals downstream skills that conventions are usable.

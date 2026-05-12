@@ -82,11 +82,11 @@ executor (not pre-existing).
 task waiting to be created. Either resolve inline, or:
 
 ```
-bd create --type=chore --priority=2 --title="..."
+hew task new --type=chore --priority=2 --title="..."
 ```
 
 and remove the TODO comment in favor of the issue ID in a comment if
-truly needed (`// see bd-X.5`).
+truly needed (`// see hew-X.5`).
 
 ### 4. Unused imports / dead code
 

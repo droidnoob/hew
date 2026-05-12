@@ -49,7 +49,7 @@ Include:
   If no task is claimed, state that explicitly.
 - **Files touched this session** — paths only; the diff is in git.
 - **What's done** — concrete bullets of progress not yet captured
-  in a `bd close --reason`.
+  in a `hew task close --reason`.
 - **What's in flight** — the next 1–3 moves the agent was planning.
 - **Decisions made but not yet persisted** — anything that should
   eventually become a `DECISION:` or `CONVENTION:` memory but
@@ -68,7 +68,9 @@ should be their own memories or task descriptions.
 ## How to compose — save directly, no preview
 
 Compose the checkpoint body from what's in your head right now and
-write it immediately with `bd remember --key checkpoint-<timestamp>`.
+write it immediately with `hew remember --raw "CHECKPOINT:…" --key
+checkpoint-<timestamp>`. (`CHECKPOINT:` isn't in the standard
+`--type` allowlist, so `--raw` is the correct escape hatch.)
 **Do not preview-and-confirm.** The user invoked `/hew:checkpoint`
 to capture state, not to negotiate wording — and is usually about
 to `/clear` anyway. A one-step capture beats a multi-step interaction.
@@ -79,15 +81,15 @@ write them as separate `CHECKPOINT:` memories in the same step.
 Split along the obvious seam without asking.
 
 After saving, print a one-line confirmation with the memory key(s).
-The user can revise (`bd remember --key <same-key> "..."`) or delete
-(`bd forget <key>`) after the fact if needed. The cost of a
+The user can revise (`hew remember --raw "..." --key <same-key>`) or
+delete (`hew memories --forget <key>`) after the fact if needed. The cost of a
 slightly-wrong saved checkpoint is much lower than the cost of
 losing state during context reset.
 
 ## Memory shape
 
 ```
-bd remember "CHECKPOINT:2026-05-12T14:30 — Working on bd-a3f8.2 (~60%).
+hew remember --raw "CHECKPOINT:2026-05-12T14:30 — Working on hew-a3f8.2 (~60%).
 
 Files touched: app/api/v1/auth/login.py, app/services/auth_service.py, tests/api/test_login.py.
 
@@ -101,7 +103,7 @@ Decisions not yet persisted:
 
 Don't-do warnings: tried mocking the DB layer in test_login — broke too many fixtures. Use testcontainers like the rest of the suite.
 
-Next session: finish revoked-fixture, run the full auth test slice, close bd-a3f8.2."
+Next session: finish revoked-fixture, run the full auth test slice, close hew-a3f8.2." --key checkpoint-2026-05-12t14-30
 ```
 
 The timestamp prefix is helpful for ordering when multiple
@@ -115,15 +117,14 @@ After persisting the new checkpoint:
 1. List existing `CHECKPOINT:` memories via the prime output.
 2. If there are more than three, summarise the older ones in the
    new checkpoint body (one line each) and remove them with
-   `bd forget <key>` (or whatever Beads exposes for memory deletion;
-   if Beads has no forget, leave a note for the user to prune them
-   manually). Default behavior: keep the latest 2–3, prune the rest.
+   `hew memories --forget <key>`. Default behavior: keep the latest
+   2–3, prune the rest.
 
 This prevents checkpoint sprawl over multi-week projects.
 
 ## When NOT to checkpoint
 
-- Right after `bd close` — the close reason IS the checkpoint for
+- Right after `hew task close` — the close reason IS the checkpoint for
   per-task work. Adding a checkpoint on top is duplicate state.
 - For trivial 5-minute sessions — overhead exceeds value.
 - Inside a `hew-quick` flow — quick mode finishes its own task; no

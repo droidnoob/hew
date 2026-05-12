@@ -178,7 +178,7 @@ Identical to `hew-review`:
 Filing template:
 
 ```
-bd create --type=bug --priority=<1|2|3> \
+hew task new --type=bug --priority=<1|2|3> \
   --title='[Adversarial][BLOCKER] auth/jwt.rs:42 — token compare is non-constant-time, enables timing attack' \
   --description='Found during /hew:adversarial-review scope=Epic(hew-auth).
 Originating tasks: hew-auth.3.
@@ -193,7 +193,7 @@ auth surface — file the missing convention as part of the fix.'
 ```
 
 Title prefix is `[Adversarial]`, not `[Review]`, so the two passes
-are distinguishable in `bd list`.
+are distinguishable in `hew task list` / `hew task search`.
 
 ## After filing
 
@@ -204,7 +204,7 @@ overwrites cleanly. The `tasks_since_last_review` counter resets on
 either.
 
 ```
-bd remember "STATUS:review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+hew remember --type=status "review:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ```
 
 ## Output to the user

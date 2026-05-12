@@ -36,15 +36,15 @@ skills exist to set up the graph (`hew-plan`, `hew-decompose`), verify it
 ## The loop
 
 ```
-1. bd ready                       → see unblocked tasks
+1. hew prime execute              → curated ready list
 2. pick highest-priority unblocked task
-3. bd update <id> --claim         → atomic claim (sets in_progress + assignee)
-4. bd show <id>                   → read the full description + acceptance
+3. hew task claim <id>            → atomic claim (sets in_progress + assignee)
+4. hew task show <id>             → read the full description + acceptance
 5. do the work                    → code, tests, verifying inline
 6. invoke hew-guard               → pre-close sanity gate
-7. bd close <id> --reason "…"     → mark done with one-line summary
+7. hew task close <id> --reason "…"  → mark done with one-line summary
 8. git commit                     → atomic, conventional message
-9. if discovered something non-obvious: bd remember
+9. if discovered something non-obvious: hew remember --type=<x> "…"
 10. back to 1
 ```
 
@@ -58,7 +58,7 @@ the top item. Ties on priority break by creation order — older first.
 
 If the user asked for a specific task ID, prefer that over priority order.
 Verify it's in `ready_list` first; if not, tell the user it's blocked and
-show the blockers (`bd show <id>` lists them).
+show the blockers (`hew task show <id>` lists them).
 
 If `ready_list` is empty:
 - Check `tasks.blocked` — if non-zero, the graph has unreachable work.
@@ -67,11 +67,11 @@ If `ready_list` is empty:
 
 ## Step 3 — claim atomically
 
-`bd update <id> --claim` is atomic: it sets `status=in_progress` and
+`hew task claim <id>` is atomic: it sets `status=in_progress` and
 `assignee` in one operation. This prevents two agents from racing on the
 same task in shared-graph setups.
 
-Never start work without claiming. The audit trail (`bd show <id>`) shows
+Never start work without claiming. The audit trail (`hew task show <id>`) shows
 who picked up what when — important when sessions fail and a new agent
 needs to resume.
 
@@ -113,8 +113,8 @@ committing still works on whatever branch the user is on.
 
 ## Step 4 — read the task properly
 
-Run `bd show <id>` even though some of the fields appeared in `ready_list`.
-`bd show` also surfaces:
+Run `hew task show <id>` even though some of the fields appeared in `ready_list`.
+`hew task show` also surfaces:
 
 - Full description (truncated in ready listings).
 - Acceptance criteria — this is your done contract.
@@ -128,7 +128,8 @@ drift.
 
 If the description is vague, **do not guess**. Ask the user, or — if
 mid-flight — sub-decompose: create subtasks under this one with clearer
-descriptions and bd dep add to block this one until they close.
+descriptions and `hew dep add <subtask> --on <this-task>` to block this
+one until they close.
 
 ## Step 5 — do the work
 
@@ -142,7 +143,7 @@ are implementing but you notice an obvious existing pattern, capture it
 before continuing:
 
 ```
-bd remember "CONVENTION:routing — All API routes live under app/api/v1/ and are registered via include_router in app/api/__init__.py."
+hew remember --type=convention "routing — All API routes live under app/api/v1/ and are registered via include_router in app/api/__init__.py."
 ```
 
 This is how the codebase's convention library grows.
@@ -255,8 +256,8 @@ Only auto-fix issues directly caused by the current task's changes. If you
 notice a pre-existing bug in an unrelated file, **don't fix it**. Instead:
 
 ```
-bd create --type=bug --priority=2 --title="<one-line>" \
-  --description="Discovered while working on bd-X.2: …"
+hew task new --type=bug --priority=2 --title="<one-line>" \
+  --description="Discovered while working on hew-X.2: …"
 ```
 
 Then continue your current task. The discovered work is now in the graph;
@@ -266,7 +267,7 @@ the user can prioritize it.
 
 Three auto-fix attempts on a single task is the cap. After three:
 - Stop fixing.
-- Document remaining issues in your `bd close --reason` and (optionally)
+- Document remaining issues in your `hew task close --reason` and (optionally)
   open subtasks for them.
 - Move on or report blocked.
 
@@ -274,7 +275,7 @@ Don't loop on the same problem hoping the next attempt works.
 
 ## Step 6 — hew-guard before close
 
-Never `bd close` without invoking `hew-guard` first. The guard runs the
+Never `hew task close` without invoking `hew-guard` first. The guard runs the
 pre-close sanity checks:
 
 - Leftover `console.log` / `print` debug statements
@@ -291,8 +292,10 @@ until guard is clean.
 ## Step 7 — close with a useful reason
 
 ```
-bd close <id> --reason "Implemented POST /api/v1/auth/login with JWT issuance. Tests cover 200, 401, malformed body, missing fields. Added validation per CONVENTION:errors. Followed [Rule 2 — Critical]: added rate limit (10/min/IP) on the endpoint."
+hew task close <id> --reason "Implemented POST /api/v1/auth/login with JWT issuance. Tests cover 200, 401, malformed body, missing fields. Added validation per CONVENTION:errors. Followed [Rule 2 — Critical]: added rate limit (10/min/IP) on the endpoint." --type=2
 ```
+
+`--type=<1|2|3>` tags the reason with `[Rule N]` when a deviation rule applied.
 
 A good close reason has:
 - One-sentence summary of what was actually delivered.
@@ -300,7 +303,7 @@ A good close reason has:
 - Conventions / boundaries respected.
 - Deviation rules applied (with rule number).
 
-Future-you on `bd show <closed-id>` reads this when debugging or auditing.
+Future-you on `hew task show <closed-id>` reads this when debugging or auditing.
 
 ## Step 8 — commit
 
@@ -341,9 +344,9 @@ While doing the work, if you discovered something non-obvious about the
 codebase, persist it:
 
 ```
-bd remember "GOTCHA: SQLAlchemy session is request-scoped via app/db/session.py — never instantiate Session() directly."
-bd remember "CONVENTION:logging — Use structlog, always pass request_id in context. Never log PII."
-bd remember "BOUNDARY: GET /api/v1/users/{id} returns {id,email,created_at} only — 7 frontend components consume."
+hew remember --type=gotcha "SQLAlchemy session is request-scoped via app/db/session.py — never instantiate Session() directly."
+hew remember --type=convention "logging — Use structlog, always pass request_id in context. Never log PII."
+hew remember --type=boundary "GET /api/v1/users/{id} returns {id,email,created_at} only — 7 frontend components consume."
 ```
 
 The right time to write a memory is right after you needed it and figured
@@ -354,7 +357,7 @@ it out. Future-you saves the lookup time.
 Run `hew prime execute` again. Pick the next ready task. Continue.
 
 If the user said "do this one task," stop after closing it. If "keep going"
-or `/hew:auto`, loop until `bd ready` is empty (then call `hew-verify`) or
+or `/hew:auto`, loop until `hew prime execute` shows no ready tasks (then call `hew-verify`) or
 a Rule-4 architectural decision blocks you (then surface and stop).
 
 ### Step 10a — review picker (optional, config-gated)
@@ -422,10 +425,10 @@ the work. Just stop and ask.
   next. Beads tracks `in_progress`; multiple at once corrupts that signal.
 - **Skip `hew-guard`.** Drift compounds.
 - **Close on test failure.** Tests failed = task isn't done. Either fix
-  them inside this task, or create a subtask blocker, link with `bd dep
-  add`, fix the blocker first, then re-attempt close.
+  them inside this task, or create a subtask blocker, link with `hew dep
+  add <subtask> --on <this>`, fix the blocker first, then re-attempt close.
 - **Create planning markdown files** (`TODO.md`, `NOTES.md`, `PLAN.md`).
-  Use Beads + `bd remember`.
+  Use Beads + `hew remember`.
 - **Add `console.log` / `print` "for debugging."** If you need to
   understand state, use the test or a debugger. Debug statements are a
   guard failure.
@@ -441,7 +444,8 @@ special needs to happen:
 - Commits are in git.
 - Next session: `hew prime execute` shows your in-progress task at the top
   of the ready list (Beads still considers it claimed by you). You either
-  finish it or `bd update --unclaim` to release.
+  finish it or release the claim via `bd update <id> --unclaim` (no hew
+  wrapper for unclaim yet — see the raw bd escape hatch).
 
 There is no "save state" step. The graph IS the state.
 
@@ -455,7 +459,7 @@ There is no "save state" step. The graph IS the state.
   pass by construction; they don't catch bugs they were meant to.
 - **Closing tasks with `--reason "done"`.** Useless. Write the actual
   summary.
-- **Forgetting `bd remember` for hard-won discoveries.** Future-you pays
+- **Forgetting `hew remember` for hard-won discoveries.** Future-you pays
   for every gotcha relearned.
 - **Closing while guard fails.** The whole point of guard is to prevent
   this.

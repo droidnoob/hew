@@ -83,30 +83,30 @@ gotcha with a code sample is several. No padding either way.
 Good (terse — single facts):
 
 ```
-bd remember "Backend: FastAPI 0.115 on uvicorn; entry app/main.py."
-bd remember "ORM: SQLAlchemy 2.x async; session factory in app/db/session.py."
-bd remember "Auth: JWT (jose) with refresh rotation; middleware in app/auth/middleware.py."
+hew remember --type=factual "Backend: FastAPI 0.115 on uvicorn; entry app/main.py."
+hew remember --raw "ORM:SQLAlchemy 2.x async; session factory in app/db/session.py."
+hew remember --type=factual "Auth: JWT (jose) with refresh rotation; middleware in app/auth/middleware.py."
 ```
 
 Good (detailed — the fact warrants depth):
 
 ```
-bd remember "BOUNDARY:webhook/stripe — POST /api/v1/webhooks/stripe accepts the raw body with Stripe-Signature header. Idempotency-key consumed via app/middleware/idempotency.py; replays return 200 + cached response. Verify signature BEFORE reading body. Five frontend consumers depend on the redirect-back behavior; do not change."
+hew remember --type=boundary "webhook/stripe — POST /api/v1/webhooks/stripe accepts the raw body with Stripe-Signature header. Idempotency-key consumed via app/middleware/idempotency.py; replays return 200 + cached response. Verify signature BEFORE reading body. Five frontend consumers depend on the redirect-back behavior; do not change."
 
-bd remember "GOTCHA:order.create — order_service.create() implicitly creates an Invoice via signals/post_save (app/signals/order.py:18). Not visible from the route; mocking the order service alone in tests leaves dangling Invoice rows. Use the factory in tests/factories/order_with_invoice.py instead."
+hew remember --type=gotcha "order.create — order_service.create() implicitly creates an Invoice via signals/post_save (app/signals/order.py:18). Not visible from the route; mocking the order service alone in tests leaves dangling Invoice rows. Use the factory in tests/factories/order_with_invoice.py instead."
 ```
 
 Bad:
 
 ```
 # Too vague (no information):
-bd remember "Backend uses Python."
+hew remember --type=factual "Backend uses Python."
 
 # Too compound (multiple facts in one memory — split):
-bd remember "Uses FastAPI, SQLAlchemy, Postgres, Redis, structlog, pydantic, alembic, pytest, and Docker for deployment."
+hew remember --type=factual "Uses FastAPI, SQLAlchemy, Postgres, Redis, structlog, pydantic, alembic, pytest, and Docker for deployment."
 
 # Padding without information:
-bd remember "The backend is a FastAPI application that was originally
+hew remember --type=factual "The backend is a FastAPI application that was originally
 written as a Flask service and then migrated. It has gone through
 several iterations of the ORM layer, currently using SQLAlchemy 2.x..."
 ```
@@ -125,10 +125,10 @@ For the languages and frameworks in use, record:
 - Notable dev tooling (formatter, linter, type checker, test runner).
 
 ```
-bd remember "Lang: Python 3.12 (pyproject.toml). Package manager: uv."
-bd remember "Web framework: FastAPI 0.115. Entry: app/main.py."
-bd remember "Test runner: pytest 8 with pytest-asyncio. Config: pyproject.toml [tool.pytest.ini_options]."
-bd remember "Formatter: ruff format. Linter: ruff check (rules in ruff.toml). Type: mypy --strict."
+hew remember --type=factual "Lang: Python 3.12 (pyproject.toml). Package manager: uv."
+hew remember --type=factual "Web framework: FastAPI 0.115. Entry: app/main.py."
+hew remember --type=factual "Test runner: pytest 8 with pytest-asyncio. Config: pyproject.toml [tool.pytest.ini_options]."
+hew remember --type=factual "Formatter: ruff format. Linter: ruff check (rules in ruff.toml). Type: mypy --strict."
 ```
 
 ## Step 2 — File layout
@@ -137,9 +137,9 @@ Don't enumerate every file. Record the *organizing principle* and the
 notable directories.
 
 ```
-bd remember "Layout: monorepo. backend/ (FastAPI), frontend/ (Next.js), packages/types/ (shared)."
-bd remember "Backend dirs: app/api/ (routes), app/services/ (business logic), app/db/ (ORM/session), app/auth/ (auth)."
-bd remember "Frontend dirs: src/app/ (routes, app router), src/components/ (UI), src/lib/ (utilities)."
+hew remember --type=factual "Layout: monorepo. backend/ (FastAPI), frontend/ (Next.js), packages/types/ (shared)."
+hew remember --type=factual "Backend dirs: app/api/ (routes), app/services/ (business logic), app/db/ (ORM/session), app/auth/ (auth)."
+hew remember --type=factual "Frontend dirs: src/app/ (routes, app router), src/components/ (UI), src/lib/ (utilities)."
 ```
 
 This answers "where do I put X?" — usually the most-asked question in
@@ -154,9 +154,9 @@ For the API surface:
 - Response shape conventions (envelope, error format, pagination).
 
 ```
-bd remember "API: routes under /api/v1/{resource}. Defined in app/api/v1/*.py and registered in app/api/__init__.py."
-bd remember "API errors: AppError(code, message, details) wrapped by error_middleware; routes never raise raw exceptions."
-bd remember "Pagination: cursor-based via {next_cursor, results} envelope; limit 50, max 200."
+hew remember --raw "API:routes under /api/v1/{resource}. Defined in app/api/v1/*.py and registered in app/api/__init__.py."
+hew remember --type=factual "API errors: AppError(code, message, details) wrapped by error_middleware; routes never raise raw exceptions."
+hew remember --type=factual "Pagination: cursor-based via {next_cursor, results} envelope; limit 50, max 200."
 ```
 
 For shared data shapes (DTOs, schemas), point to the canonical file.
@@ -164,9 +164,9 @@ For shared data shapes (DTOs, schemas), point to the canonical file.
 ## Step 4 — Auth + security baseline
 
 ```
-bd remember "Auth: JWT access (15min) + refresh (7d, httpOnly cookie, rotates on use). app/auth/jwt.py."
-bd remember "Authz: per-route Depends(require_role) decorator; roles in app/auth/roles.py."
-bd remember "Password hashing: argon2id via passlib. Never bcrypt in this codebase."
+hew remember --type=factual "Auth: JWT access (15min) + refresh (7d, httpOnly cookie, rotates on use). app/auth/jwt.py."
+hew remember --type=factual "Authz: per-route Depends(require_role) decorator; roles in app/auth/roles.py."
+hew remember --type=factual "Password hashing: argon2id via passlib. Never bcrypt in this codebase."
 ```
 
 If you discover security-relevant patterns (CSRF, CORS, rate limiting,
@@ -174,34 +174,34 @@ input validation), also write `SECURITY:` memories — `hew-execute` and
 `hew-guard` route on the prefix:
 
 ```
-bd remember "SECURITY: All endpoints accepting user input run through validate_input() (app/security/validate.py)."
-bd remember "SECURITY: CORS allow-list in app/main.py — never use allow_origins=['*']."
+hew remember --type=security "All endpoints accepting user input run through validate_input() (app/security/validate.py)."
+hew remember --type=security "CORS allow-list in app/main.py — never use allow_origins=['*']."
 ```
 
 ## Step 5 — Data layer
 
 ```
-bd remember "DB: Postgres 16. Connection string from DATABASE_URL env."
-bd remember "ORM: SQLAlchemy 2.x async. Session factory async_session_maker() in app/db/session.py."
-bd remember "Models: app/models/*.py, all inherit from BaseModel mixin (UUID PK, created_at, updated_at)."
-bd remember "Migrations: Alembic under alembic/versions/. Auto-generate via `alembic revision --autogenerate -m '...'`."
-bd remember "Repository pattern: data access in app/repos/*.py; routes never query directly."
+hew remember --raw "DB:Postgres 16. Connection string from DATABASE_URL env."
+hew remember --raw "ORM:SQLAlchemy 2.x async. Session factory async_session_maker() in app/db/session.py."
+hew remember --type=factual "Models: app/models/*.py, all inherit from BaseModel mixin (UUID PK, created_at, updated_at)."
+hew remember --type=factual "Migrations: Alembic under alembic/versions/. Auto-generate via `alembic revision --autogenerate -m '...'`."
+hew remember --type=factual "Repository pattern: data access in app/repos/*.py; routes never query directly."
 ```
 
 If migrations or schema-evolution discipline matters (it almost always
 does), write a `MIGRATION:` baseline memory:
 
 ```
-bd remember "MIGRATION: Every model change requires an Alembic migration. Never edit migrations after they've been applied to a shared environment."
+hew remember --raw "MIGRATION:Every model change requires an Alembic migration. Never edit migrations after they've been applied to a shared environment."
 ```
 
 ## Step 6 — Testing setup
 
 ```
-bd remember "Tests: pytest with async fixtures in tests/conftest.py."
-bd remember "Test DB: testcontainers/postgres. Fresh DB per test module via fixture."
-bd remember "Fixtures: factory_boy; one factory per model in tests/factories/."
-bd remember "Coverage: pytest-cov, threshold 80% enforced in CI (.github/workflows/test.yml)."
+hew remember --type=factual "Tests: pytest with async fixtures in tests/conftest.py."
+hew remember --type=factual "Test DB: testcontainers/postgres. Fresh DB per test module via fixture."
+hew remember --type=factual "Fixtures: factory_boy; one factory per model in tests/factories/."
+hew remember --type=factual "Coverage: pytest-cov, threshold 80% enforced in CI (.github/workflows/test.yml)."
 ```
 
 If TDD or specific testing styles are in use, note that as a convention
@@ -210,9 +210,9 @@ If TDD or specific testing styles are in use, note that as a convention
 ## Step 7 — CI/CD + deployment
 
 ```
-bd remember "CI: GitHub Actions. Workflow in .github/workflows/ci.yml. Runs lint + type + test on every PR."
-bd remember "Deploy: Docker on AWS ECS Fargate. Terraform in infra/. Deploy via GitHub Actions on push to main."
-bd remember "Env: prod, staging, dev. Config in infra/{env}/terraform.tfvars."
+hew remember --raw "CI:GitHub Actions. Workflow in .github/workflows/ci.yml. Runs lint + type + test on every PR."
+hew remember --type=factual "Deploy: Docker on AWS ECS Fargate. Terraform in infra/. Deploy via GitHub Actions on push to main."
+hew remember --type=factual "Env: prod, staging, dev. Config in infra/{env}/terraform.tfvars."
 ```
 
 If there are notable deploy gotchas (secrets management, blue/green, DB
@@ -221,9 +221,9 @@ migrations on deploy), record them.
 ## Step 8 — Environment configuration
 
 ```
-bd remember "Env config: pydantic-settings; loaded at startup in app/config.py. Required vars validated on boot."
-bd remember "Env vars list: DATABASE_URL, JWT_SECRET, STRIPE_KEY, SENDGRID_KEY. Documented in .env.example."
-bd remember "Frontend env: only NEXT_PUBLIC_* vars are inlined at build; secrets stay server-side."
+hew remember --type=factual "Env config: pydantic-settings; loaded at startup in app/config.py. Required vars validated on boot."
+hew remember --type=factual "Env vars list: DATABASE_URL, JWT_SECRET, STRIPE_KEY, SENDGRID_KEY. Documented in .env.example."
+hew remember --type=factual "Frontend env: only NEXT_PUBLIC_* vars are inlined at build; secrets stay server-side."
 ```
 
 ## Step 9 — Non-obvious coupling and gotchas
@@ -232,11 +232,11 @@ These are the most valuable scan outputs. Things that would surprise a
 new contributor or get an agent yelled at.
 
 ```
-bd remember "GOTCHA: payment webhooks require idempotency_key check before processing — handler in app/api/v1/webhooks/stripe.py."
-bd remember "GOTCHA: user deletion is SOFT-DELETE only (is_active=False). Never DELETE rows; downstream consumers break."
-bd remember "GOTCHA: frontend build requires NEXT_PUBLIC_ prefix for ALL env vars used in the bundle. Missing = silent runtime error."
-bd remember "COUPLING: order_service.create() implicitly creates an invoice via signals/post_save; not visible from the order endpoint."
-bd remember "GOTCHA: pytest must run with --forked when testing the cache layer (Redis connection state leaks otherwise)."
+hew remember --type=gotcha "payment webhooks require idempotency_key check before processing — handler in app/api/v1/webhooks/stripe.py."
+hew remember --type=gotcha "user deletion is SOFT-DELETE only (is_active=False). Never DELETE rows; downstream consumers break."
+hew remember --type=gotcha "frontend build requires NEXT_PUBLIC_ prefix for ALL env vars used in the bundle. Missing = silent runtime error."
+hew remember --raw "COUPLING:order_service.create() implicitly creates an invoice via signals/post_save; not visible from the order endpoint."
+hew remember --type=gotcha "pytest must run with --forked when testing the cache layer (Redis connection state leaks otherwise)."
 ```
 
 These come from reading the code carefully and looking for the things
@@ -247,7 +247,7 @@ that *would not be obvious from a 30-second skim*.
 After the scan finishes:
 
 ```
-bd remember "STATUS:scan:complete — <ISO-8601 timestamp>"
+hew remember --type=status "scan:complete — <ISO-8601 timestamp>"
 ```
 
 This unblocks `hew-convention`, `hew-audit`, `hew-boundary`, and

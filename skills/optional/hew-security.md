@@ -107,10 +107,10 @@ Record decisions as `SECURITY:` memories — these become constraints
 the executor must honor going forward:
 
 ```
-bd remember "SECURITY: JWT access TTL 15 min; refresh 7d httpOnly+Secure cookie; refresh rotates on use. Defined in app/auth/jwt.py."
-bd remember "SECURITY: All endpoints accepting user input run through validate_input() (app/security/validate.py). Bypassing is a hew-guard failure."
-bd remember "SECURITY: Stripe webhook /webhooks/stripe MUST verify Stripe-Signature header before reading the body."
-bd remember "SECURITY: Passwords hashed with argon2id (passlib). No bcrypt in this codebase. Cost params in app/auth/passwords.py."
+hew remember --type=security "JWT access TTL 15 min; refresh 7d httpOnly+Secure cookie; refresh rotates on use. Defined in app/auth/jwt.py."
+hew remember --type=security "All endpoints accepting user input run through validate_input() (app/security/validate.py). Bypassing is a hew-guard failure."
+hew remember --type=security "Stripe webhook /webhooks/stripe MUST verify Stripe-Signature header before reading the body."
+hew remember --type=security "Passwords hashed with argon2id (passlib). No bcrypt in this codebase. Cost params in app/auth/passwords.py."
 ```
 
 These appear in `hew prime execute` and `hew-guard` checks the new

@@ -40,9 +40,9 @@ For every route handler in the codebase:
 - **Auth requirement** — public, requires JWT, requires role.
 
 ```
-bd remember "BOUNDARY: POST /api/v1/users — body {email, password, name}, returns 201 {id, token}. Auth: public. Handler app/api/v1/users.py:create_user."
-bd remember "BOUNDARY: GET /api/v1/users/{id} — returns {id, email, created_at}. Auth: JWT. 7 frontend components consume."
-bd remember "BOUNDARY: POST /api/v1/webhooks/stripe — Stripe-Signature header required, body raw. Idempotency-key consumed. Never break the existing signature."
+hew remember --type=boundary "POST /api/v1/users — body {email, password, name}, returns 201 {id, token}. Auth: public. Handler app/api/v1/users.py:create_user."
+hew remember --type=boundary "GET /api/v1/users/{id} — returns {id, email, created_at}. Auth: JWT. 7 frontend components consume."
+hew remember --type=boundary "POST /api/v1/webhooks/stripe — Stripe-Signature header required, body raw. Idempotency-key consumed. Never break the existing signature."
 ```
 
 For REST APIs: find routes by reading the route registry / decorator
@@ -58,8 +58,8 @@ For library code (or any code that other modules import):
 - **Consumers** — quick count of internal callers (grep helps).
 
 ```
-bd remember "BOUNDARY: create_user(db, email, password, name) -> User. app/services/user_service.py. Side effects: writes users + audit_log."
-bd remember "BOUNDARY: validate_input(payload, schema) -> Result[dict, AppError]. app/security/validate.py. Called by 18 routes."
+hew remember --type=boundary "create_user(db, email, password, name) -> User. app/services/user_service.py. Side effects: writes users + audit_log."
+hew remember --type=boundary "validate_input(payload, schema) -> Result[dict, AppError]. app/security/validate.py. Called by 18 routes."
 ```
 
 For TypeScript: `index.ts` re-exports are usually the public surface.
@@ -71,8 +71,8 @@ Any type that crosses module boundaries (DTOs, response shapes, ORM
 models exposed externally):
 
 ```
-bd remember "BOUNDARY: User type — {id: UUID, email: str, name: str, created_at: datetime}. Serialized by /users/{id}. app/models/user.py."
-bd remember "BOUNDARY: AuthResponse type — {access: str, refresh: str, expires_in: int}. Returned by /auth/login + /auth/refresh."
+hew remember --type=boundary "User type — {id: UUID, email: str, name: str, created_at: datetime}. Serialized by /users/{id}. app/models/user.py."
+hew remember --type=boundary "AuthResponse type — {access: str, refresh: str, expires_in: int}. Returned by /auth/login + /auth/refresh."
 ```
 
 ### 4. CLI commands (if the project ships one)
@@ -81,7 +81,7 @@ Every documented subcommand + flags is a boundary; users script
 against them.
 
 ```
-bd remember "BOUNDARY: CLI `hew prime <skill>` — always emits JSON to stdout. Schema versioned via schema_version field."
+hew remember --type=boundary "CLI `hew prime <skill>` — always emits JSON to stdout. Schema versioned via schema_version field."
 ```
 
 ### 5. Event / message contracts
@@ -89,7 +89,7 @@ bd remember "BOUNDARY: CLI `hew prime <skill>` — always emits JSON to stdout. 
 Pub/sub, queue messages, webhook payloads:
 
 ```
-bd remember "BOUNDARY: event order.created — {order_id, user_id, items: [{sku, qty}], total_cents}. Published to SNS topic orders. Consumed by billing-service and warehouse-service."
+hew remember --type=boundary "event order.created — {order_id, user_id, items: [{sku, qty}], total_cents}. Published to SNS topic orders. Consumed by billing-service and warehouse-service."
 ```
 
 ## How to find them efficiently
@@ -115,7 +115,7 @@ for impact assessment. `grep -r "from app.auth import"` for Python,
 `rg "import.*auth-client"` for TS.
 
 ```
-bd remember "BOUNDARY: POST /api/v1/users expects {email, password, name}. 4 frontend components + 1 mobile app consume."
+hew remember --type=boundary "POST /api/v1/users expects {email, password, name}. 4 frontend components + 1 mobile app consume."
 ```
 
 When the executor considers changing this boundary, it now knows
@@ -142,7 +142,7 @@ boundary should change (deliberate API evolution):
 3. After implementation, update the `BOUNDARY:` memory:
 
 ```
-bd remember "BOUNDARY: POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline 2026-07-01. Old shape returns 400."
+hew remember --type=boundary "POST /api/v1/users now expects {email, password, name, accept_tos}. Migration deadline 2026-07-01. Old shape returns 400."
 ```
 
 The memory key (computed by Beads from the prefix) means the new
@@ -167,7 +167,7 @@ hew-boundary scan complete
 ## Step — mark phase complete + end of chain
 
 ```
-bd remember "STATUS:boundary:complete — <ISO-8601 timestamp>"
+hew remember --type=status "boundary:complete — <ISO-8601 timestamp>"
 ```
 
 `hew-boundary` is the last step of the brownfield onboarding chain.
