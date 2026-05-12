@@ -118,4 +118,7 @@ pub enum Command {
 
     /// Write a memory with an enforced type allowlist (or --raw to bypass).
     Remember(crate::commands::remember::Args),
+
+    /// Epic operations: show, tree, close, audit, summary.
+    Epic(crate::commands::epic::Args),
 }
