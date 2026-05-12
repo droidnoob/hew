@@ -20,6 +20,7 @@ pub struct Config {
     pub optional_skills: OptionalSkills,
     pub branching: BranchingConfig,
     pub research: ResearchConfig,
+    pub review: ReviewConfig,
 }
 
 impl Default for Config {
@@ -32,6 +33,7 @@ impl Default for Config {
             optional_skills: OptionalSkills::default(),
             branching: BranchingConfig::default(),
             research: ResearchConfig::default(),
+            review: ReviewConfig::default(),
         }
     }
 }
@@ -67,6 +69,26 @@ impl Default for ResearchConfig {
 }
 
 pub const RESEARCH_DEFAULTS: &[&str] = &["ask", "auto-skip", "auto-run"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ReviewConfig {
+    /// Fire the Step 10 picker after this many closed tasks since the last
+    /// review marker. `0` disables this trigger entirely. Default `0`.
+    pub after_n_tasks: u32,
+    /// Fire the Step 10 picker when an epic closes (and at least one task
+    /// has closed since the last review). Default `false`.
+    pub after_epic: bool,
+    /// Default scope size for `hew review-bundle` when `--n` is not passed.
+    /// Must be `>= 1`. Default `8`.
+    pub batch_size: u32,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self { after_n_tasks: 0, after_epic: false, batch_size: 8 }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
@@ -131,6 +153,11 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "optional-skills.security" => Some(cfg.optional_skills.security.to_string()),
         "branching.strategy" => Some(cfg.branching.strategy.clone()),
         "research.default" => Some(cfg.research.default.clone()),
+        "review.after_n_tasks" | "review.after-n-tasks" => {
+            Some(cfg.review.after_n_tasks.to_string())
+        }
+        "review.after_epic" | "review.after-epic" => Some(cfg.review.after_epic.to_string()),
+        "review.batch_size" | "review.batch-size" => Some(cfg.review.batch_size.to_string()),
         _ => None,
     }
 }
@@ -182,6 +209,24 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
             }
             cfg.research.default = value.to_string();
         }
+        "review.after_n_tasks" | "review.after-n-tasks" => {
+            let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                flag: format!("value (expected non-negative integer, got `{value}`)"),
+            })?;
+            cfg.review.after_n_tasks = n;
+        }
+        "review.after_epic" | "review.after-epic" => cfg.review.after_epic = bool_val(value)?,
+        "review.batch_size" | "review.batch-size" => {
+            let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                flag: format!("value (expected positive integer, got `{value}`)"),
+            })?;
+            if n == 0 {
+                return Err(HewError::MissingFlag {
+                    flag: "value (review.batch_size must be >= 1)".to_string(),
+                });
+            }
+            cfg.review.batch_size = n;
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -202,6 +247,9 @@ pub fn keys() -> &'static [&'static str] {
         "optional-skills.security",
         "branching.strategy",
         "research.default",
+        "review.after_n_tasks",
+        "review.after_epic",
+        "review.batch_size",
     ]
 }
 
@@ -285,6 +333,9 @@ mod tests {
                 k if k.starts_with("default-") => "x",
                 "branching.strategy" => "epic",
                 "research.default" => "auto-skip",
+                "review.after_n_tasks" => "5",
+                "review.batch_size" => "10",
+                "review.after_epic" => "true",
                 _ => "true",
             };
             set(&mut cfg, k, probe_value).expect(k);
@@ -300,6 +351,39 @@ mod tests {
         set(&mut cfg, "branching.strategy", "always").unwrap();
         assert_eq!(cfg.branching.strategy, "always");
         assert!(set(&mut cfg, "branching.strategy", "weekly").is_err());
+    }
+
+    #[test]
+    fn review_after_n_tasks_accepts_integers() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.review.after_n_tasks, 0);
+        set(&mut cfg, "review.after_n_tasks", "5").unwrap();
+        assert_eq!(cfg.review.after_n_tasks, 5);
+        set(&mut cfg, "review.after_n_tasks", "0").unwrap(); // 0 = disabled, valid
+        assert_eq!(cfg.review.after_n_tasks, 0);
+        assert!(set(&mut cfg, "review.after_n_tasks", "not-a-number").is_err());
+        assert!(set(&mut cfg, "review.after_n_tasks", "-1").is_err());
+    }
+
+    #[test]
+    fn review_after_epic_accepts_bool() {
+        let mut cfg = Config::default();
+        assert!(!cfg.review.after_epic);
+        set(&mut cfg, "review.after_epic", "true").unwrap();
+        assert!(cfg.review.after_epic);
+        set(&mut cfg, "review.after_epic", "off").unwrap();
+        assert!(!cfg.review.after_epic);
+        assert!(set(&mut cfg, "review.after_epic", "maybe").is_err());
+    }
+
+    #[test]
+    fn review_batch_size_rejects_zero() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.review.batch_size, 8);
+        set(&mut cfg, "review.batch_size", "16").unwrap();
+        assert_eq!(cfg.review.batch_size, 16);
+        assert!(set(&mut cfg, "review.batch_size", "0").is_err());
+        assert!(set(&mut cfg, "review.batch_size", "abc").is_err());
     }
 
     #[test]
