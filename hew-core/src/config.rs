@@ -21,6 +21,8 @@ pub struct Config {
     pub branching: BranchingConfig,
     pub research: ResearchConfig,
     pub review: ReviewConfig,
+    pub testing: TestingConfig,
+    pub craft: CraftConfig,
 }
 
 impl Default for Config {
@@ -34,6 +36,8 @@ impl Default for Config {
             branching: BranchingConfig::default(),
             research: ResearchConfig::default(),
             review: ReviewConfig::default(),
+            testing: TestingConfig::default(),
+            craft: CraftConfig::default(),
         }
     }
 }
@@ -87,6 +91,31 @@ pub struct ReviewConfig {
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self { after_n_tasks: 0, after_epic: false, batch_size: 8 }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct TestingConfig {
+    /// When `true`, hew-guard fails the close if a behavior-changing
+    /// task ships without a test. Default `false` — soft warn only.
+    pub require: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CraftConfig {
+    /// Soft-warn when a changed function exceeds this many lines.
+    /// `0` disables the check. Default `0`.
+    pub max_function_lines: u32,
+    /// Soft-warn when the diff adds unused imports / dead code that
+    /// language-specific lints surface. Default `true`.
+    pub warn_on_unused: bool,
+}
+
+impl Default for CraftConfig {
+    fn default() -> Self {
+        Self { max_function_lines: 0, warn_on_unused: true }
     }
 }
 
@@ -158,6 +187,13 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         }
         "review.after_epic" | "review.after-epic" => Some(cfg.review.after_epic.to_string()),
         "review.batch_size" | "review.batch-size" => Some(cfg.review.batch_size.to_string()),
+        "testing.require" => Some(cfg.testing.require.to_string()),
+        "craft.max_function_lines" | "craft.max-function-lines" => {
+            Some(cfg.craft.max_function_lines.to_string())
+        }
+        "craft.warn_on_unused" | "craft.warn-on-unused" => {
+            Some(cfg.craft.warn_on_unused.to_string())
+        }
         _ => None,
     }
 }
@@ -227,6 +263,16 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
             }
             cfg.review.batch_size = n;
         }
+        "testing.require" => cfg.testing.require = bool_val(value)?,
+        "craft.max_function_lines" | "craft.max-function-lines" => {
+            let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                flag: format!("value (expected non-negative integer, got `{value}`)"),
+            })?;
+            cfg.craft.max_function_lines = n;
+        }
+        "craft.warn_on_unused" | "craft.warn-on-unused" => {
+            cfg.craft.warn_on_unused = bool_val(value)?
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -250,6 +296,9 @@ pub fn keys() -> &'static [&'static str] {
         "review.after_n_tasks",
         "review.after_epic",
         "review.batch_size",
+        "testing.require",
+        "craft.max_function_lines",
+        "craft.warn_on_unused",
     ]
 }
 
@@ -336,6 +385,7 @@ mod tests {
                 "review.after_n_tasks" => "5",
                 "review.batch_size" => "10",
                 "review.after_epic" => "true",
+                "craft.max_function_lines" => "20",
                 _ => "true",
             };
             set(&mut cfg, k, probe_value).expect(k);
@@ -395,5 +445,75 @@ mod tests {
         set(&mut cfg, "research.default", "auto-run").unwrap();
         assert_eq!(cfg.research.default, "auto-run");
         assert!(set(&mut cfg, "research.default", "maybe").is_err());
+    }
+
+    #[test]
+    fn testing_require_defaults_to_false() {
+        let cfg = Config::default();
+        assert!(!cfg.testing.require);
+        assert_eq!(get(&cfg, "testing.require"), Some("false".into()));
+    }
+
+    #[test]
+    fn testing_require_accepts_bool() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "testing.require", "true").unwrap();
+        assert!(cfg.testing.require);
+        set(&mut cfg, "testing.require", "off").unwrap();
+        assert!(!cfg.testing.require);
+        assert!(set(&mut cfg, "testing.require", "maybe").is_err());
+    }
+
+    #[test]
+    fn craft_max_function_lines_defaults_to_zero_disabled() {
+        let cfg = Config::default();
+        assert_eq!(cfg.craft.max_function_lines, 0);
+        assert_eq!(get(&cfg, "craft.max_function_lines"), Some("0".into()));
+    }
+
+    #[test]
+    fn craft_max_function_lines_accepts_integers() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "craft.max_function_lines", "20").unwrap();
+        assert_eq!(cfg.craft.max_function_lines, 20);
+        set(&mut cfg, "craft.max_function_lines", "0").unwrap(); // 0 = disabled
+        assert_eq!(cfg.craft.max_function_lines, 0);
+        assert!(set(&mut cfg, "craft.max_function_lines", "abc").is_err());
+        assert!(set(&mut cfg, "craft.max_function_lines", "-1").is_err());
+    }
+
+    #[test]
+    fn craft_warn_on_unused_defaults_to_true() {
+        let cfg = Config::default();
+        assert!(cfg.craft.warn_on_unused);
+    }
+
+    #[test]
+    fn craft_warn_on_unused_accepts_bool() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "craft.warn_on_unused", "false").unwrap();
+        assert!(!cfg.craft.warn_on_unused);
+        set(&mut cfg, "craft.warn_on_unused", "yes").unwrap();
+        assert!(cfg.craft.warn_on_unused);
+        assert!(set(&mut cfg, "craft.warn_on_unused", "later").is_err());
+    }
+
+    #[test]
+    fn config_keys_survive_disk_roundtrip() {
+        // The new TestingConfig + CraftConfig must serialize through the
+        // serde(default) path; missing in the on-disk file means defaults.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut cfg = Config::default();
+        set(&mut cfg, "testing.require", "true").unwrap();
+        set(&mut cfg, "craft.max_function_lines", "30").unwrap();
+        set(&mut cfg, "craft.warn_on_unused", "false").unwrap();
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert!(loaded.testing.require);
+        assert_eq!(loaded.craft.max_function_lines, 30);
+        assert!(!loaded.craft.warn_on_unused);
     }
 }
