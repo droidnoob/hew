@@ -18,6 +18,8 @@ pub struct Config {
     pub default_scope: Option<String>,
     pub git_track: bool,
     pub optional_skills: OptionalSkills,
+    pub branching: BranchingConfig,
+    pub research: ResearchConfig,
 }
 
 impl Default for Config {
@@ -28,9 +30,43 @@ impl Default for Config {
             default_scope: None,
             git_track: false,
             optional_skills: OptionalSkills::default(),
+            branching: BranchingConfig::default(),
+            research: ResearchConfig::default(),
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct BranchingConfig {
+    /// `none` | `epic` | `always`. Controls when hew-execute first-claim
+    /// auto-creates a branch. Default `none` (manual via `hew branch new`).
+    pub strategy: String,
+}
+
+impl Default for BranchingConfig {
+    fn default() -> Self {
+        Self { strategy: "none".to_string() }
+    }
+}
+
+pub const BRANCHING_STRATEGIES: &[&str] = &["none", "epic", "always"];
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ResearchConfig {
+    /// `ask` | `auto-skip` | `auto-run`. Default selection at the
+    /// hew-plan research-or-decompose picker. Default `ask`.
+    pub default: String,
+}
+
+impl Default for ResearchConfig {
+    fn default() -> Self {
+        Self { default: "ask".to_string() }
+    }
+}
+
+pub const RESEARCH_DEFAULTS: &[&str] = &["ask", "auto-skip", "auto-run"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
@@ -93,6 +129,8 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "optional-skills.research" => Some(cfg.optional_skills.research.to_string()),
         "optional-skills.quick" => Some(cfg.optional_skills.quick.to_string()),
         "optional-skills.security" => Some(cfg.optional_skills.security.to_string()),
+        "branching.strategy" => Some(cfg.branching.strategy.clone()),
+        "research.default" => Some(cfg.research.default.clone()),
         _ => None,
     }
 }
@@ -122,6 +160,28 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "optional-skills.research" => cfg.optional_skills.research = bool_val(value)?,
         "optional-skills.quick" => cfg.optional_skills.quick = bool_val(value)?,
         "optional-skills.security" => cfg.optional_skills.security = bool_val(value)?,
+        "branching.strategy" => {
+            if !BRANCHING_STRATEGIES.contains(&value) {
+                return Err(HewError::MissingFlag {
+                    flag: format!(
+                        "value (expected one of {}, got `{value}`)",
+                        BRANCHING_STRATEGIES.join("|")
+                    ),
+                });
+            }
+            cfg.branching.strategy = value.to_string();
+        }
+        "research.default" => {
+            if !RESEARCH_DEFAULTS.contains(&value) {
+                return Err(HewError::MissingFlag {
+                    flag: format!(
+                        "value (expected one of {}, got `{value}`)",
+                        RESEARCH_DEFAULTS.join("|")
+                    ),
+                });
+            }
+            cfg.research.default = value.to_string();
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -140,6 +200,8 @@ pub fn keys() -> &'static [&'static str] {
         "optional-skills.research",
         "optional-skills.quick",
         "optional-skills.security",
+        "branching.strategy",
+        "research.default",
     ]
 }
 
@@ -219,8 +281,35 @@ mod tests {
         for k in ks {
             // Each key must roundtrip get/set without panic.
             let mut cfg = Config::default();
-            let probe_value = if k.starts_with("default-") { "x" } else { "true" };
+            let probe_value = match *k {
+                k if k.starts_with("default-") => "x",
+                "branching.strategy" => "epic",
+                "research.default" => "auto-skip",
+                _ => "true",
+            };
             set(&mut cfg, k, probe_value).expect(k);
         }
+    }
+
+    #[test]
+    fn branching_strategy_validates() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.branching.strategy, "none");
+        set(&mut cfg, "branching.strategy", "epic").unwrap();
+        assert_eq!(cfg.branching.strategy, "epic");
+        set(&mut cfg, "branching.strategy", "always").unwrap();
+        assert_eq!(cfg.branching.strategy, "always");
+        assert!(set(&mut cfg, "branching.strategy", "weekly").is_err());
+    }
+
+    #[test]
+    fn research_default_validates() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.research.default, "ask");
+        set(&mut cfg, "research.default", "auto-skip").unwrap();
+        assert_eq!(cfg.research.default, "auto-skip");
+        set(&mut cfg, "research.default", "auto-run").unwrap();
+        assert_eq!(cfg.research.default, "auto-run");
+        assert!(set(&mut cfg, "research.default", "maybe").is_err());
     }
 }

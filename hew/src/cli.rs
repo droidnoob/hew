@@ -103,4 +103,7 @@ pub enum Command {
     /// Reverse `hew init` — remove skills + slash commands for this project.
     /// `--purge` also deletes `.beads/` (drops the task graph + memories).
     Uninstall(crate::commands::uninstall::Args),
+
+    /// Branch operations (`hew branch new --prefix=feat --slug='Add Auth'`).
+    Branch(crate::commands::branch::Args),
 }

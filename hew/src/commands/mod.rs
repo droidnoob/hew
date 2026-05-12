@@ -2,6 +2,7 @@ use hew_core::Ctx;
 
 use crate::cli::{Cli, Command};
 
+pub mod branch;
 pub mod check;
 pub mod completions;
 pub mod config;
@@ -37,5 +38,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Commands => slashes::run(&ctx, ()),
         Command::Memories(a) => memories::run(&ctx, a),
         Command::Uninstall(a) => uninstall::run(&ctx, a),
+        Command::Branch(a) => branch::run(&ctx, a),
     }
 }
