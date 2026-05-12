@@ -24,6 +24,7 @@ If the user describes intent in plain English, route by intent:
 
 | User says | Skill |
 |-----------|-------|
+| "new project from scratch" / "bootstrap a project" | `hew-new-project` |
 | "let's build / plan X" | `hew-plan` (tail picker may route to `hew-research` first) |
 | "break this down" / "create tasks" | `hew-decompose` |
 | "start coding" / "what's next?" | `hew-execute` |
@@ -49,6 +50,7 @@ via `hew branch new --prefix=<type> --slug=<text>`.
 
 ### Core (always installed)
 
+- **hew-new-project** — bootstrap a project from a 1–3 sentence outline (Socratic + research + roadmap + first-milestone decompose). Runs once at project start.
 - **hew-plan** — strategic planning, goal-backward reasoning, tech choices
 - **hew-decompose** — translate the plan into a Beads graph (epics, tasks, gates, bonds)
 - **hew-execute** — the work loop
