@@ -13,6 +13,8 @@ pub struct Args {
 pub enum Which {
     /// Schema for `hew prime <skill>` output.
     Prime,
+    /// Schema for `hew prime resume` output (SessionStart-hook payload).
+    Resume,
     /// Schema for the persistent config TOML.
     Config,
 }
@@ -20,6 +22,7 @@ pub enum Which {
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
     let schema = match args.which {
         Which::Prime => schema_for!(hew_core::prime::PrimeOutput),
+        Which::Resume => schema_for!(hew_core::prime::ResumeOutput),
         Which::Config => schema_for!(hew_core::config::Config),
     };
     let json = serde_json::to_string_pretty(&schema)

@@ -99,3 +99,89 @@ fn prime_errors_on_unknown_skill() {
         .failure()
         .stderr(contains("definitely-not-a-skill"));
 }
+
+const RESUME_STUB: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo "bd version 1.0.3"; exit 0 ;;
+  ready) echo '[]'; exit 0 ;;
+  stats) echo '{"schema_version":1,"summary":{"total_issues":0,"open_issues":0,"closed_issues":0,"ready_issues":0,"blocked_issues":0,"in_progress_issues":0}}'; exit 0 ;;
+  memories) echo '{"ck-old":"CHECKPOINT:2026-05-10T08:00 — earlier work","ck-new":"CHECKPOINT:2026-05-12T14:30 — newer work; in flight: refresh rotation","conv":"CONVENTION:errors — wrap","status-scan":"STATUS:scan:complete — 2026-05-12T07:54:13Z"}'; exit 0 ;;
+esac
+exit 2
+"#;
+
+fn make_resume_stub_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("bd");
+    let mut f = fs::File::create(&path).unwrap();
+    f.write_all(RESUME_STUB.as_bytes()).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    tmp
+}
+
+#[test]
+fn prime_resume_emits_skill_agnostic_json() {
+    let stub_dir = make_resume_stub_dir();
+    let out = Command::cargo_bin("hew")
+        .unwrap()
+        .env("PATH", stub_dir.path())
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("HEW_NO_UPDATE_CHECK", "1")
+        .env("HEW_NON_INTERACTIVE", "1")
+        .env_remove("HEW_LOG")
+        .env_remove("CI")
+        .args(["prime", "resume"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(out).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(text.trim()).expect("resume output must be valid JSON");
+
+    assert_eq!(parsed["schema_version"], 1);
+    // No skill_instructions, no skill, no prerequisites in resume mode.
+    assert!(parsed.get("skill_instructions").is_none());
+    assert!(parsed.get("skill").is_none());
+    assert!(parsed.get("prerequisites").is_none());
+
+    // STATUS:scan still parsed out of memories.
+    assert_eq!(parsed["status"]["scan"]["complete"], true);
+
+    // Latest checkpoint is the newer one.
+    assert_eq!(parsed["latest_checkpoint"]["key"], "ck-new");
+    assert_eq!(parsed["latest_checkpoint"]["timestamp"], "2026-05-12T14:30");
+    assert!(
+        parsed["latest_checkpoint"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("refresh rotation")
+    );
+}
+
+#[test]
+fn prime_resume_pretty_flag_indents_output() {
+    let stub_dir = make_resume_stub_dir();
+    let out = Command::cargo_bin("hew")
+        .unwrap()
+        .env("PATH", stub_dir.path())
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("HEW_NO_UPDATE_CHECK", "1")
+        .env("HEW_NON_INTERACTIVE", "1")
+        .env_remove("HEW_LOG")
+        .env_remove("CI")
+        .args(["prime", "resume", "--pretty"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("\n  "), "pretty output should be indented:\n{text}");
+}

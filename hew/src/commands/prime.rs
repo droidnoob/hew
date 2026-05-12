@@ -5,7 +5,9 @@ use hew_core::prime;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// Skill name to prime context for (e.g. execute, plan, scan).
+    /// Skill name to prime context for (e.g. execute, plan, scan), or
+    /// the reserved value `resume` to emit skill-agnostic project state
+    /// for SessionStart hooks.
     pub skill: String,
 
     /// Pretty-print the JSON output. Default is compact.
@@ -15,11 +17,20 @@ pub struct Args {
 
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
     let client = RealBd::discover()?;
-    let output = prime::build(&client, &args.skill)?;
-    let s = if args.pretty {
-        serde_json::to_string_pretty(&output)
+    let s = if args.skill == "resume" {
+        let output = prime::resume(&client)?;
+        if args.pretty {
+            serde_json::to_string_pretty(&output)
+        } else {
+            serde_json::to_string(&output)
+        }
     } else {
-        serde_json::to_string(&output)
+        let output = prime::build(&client, &args.skill)?;
+        if args.pretty {
+            serde_json::to_string_pretty(&output)
+        } else {
+            serde_json::to_string(&output)
+        }
     }
     .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
     println!("{s}");
