@@ -44,7 +44,7 @@ pub struct CraftPrinciple {
     pub default_for_stacks: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum CraftCategory {
     /// SOLID, CUPID, DRY, KISS, YAGNI, SoC, Composition-over-Inheritance,
@@ -153,8 +153,82 @@ mod tests {
 
     #[test]
     fn for_stack_filters_by_default_list() {
-        // CR.2 will seed real defaults; for the placeholder we just
-        // assert the function doesn't panic and returns an iterable.
-        let _ = for_stack("py-fastapi");
+        // py-fastapi is the most heavily seeded stack — at least
+        // SOLID, DRY, KISS, SoC, CoI, Clean Arch, DDD, Idempotence,
+        // Fail Fast should preselect.
+        let picks = for_stack("py-fastapi");
+        assert!(picks.len() >= 5, "py-fastapi defaults too sparse: {}", picks.len());
+        let ids: std::collections::HashSet<&str> = picks.iter().map(|p| p.id.as_str()).collect();
+        assert!(ids.contains("solid"), "py-fastapi should default to SOLID");
+        assert!(ids.contains("dry"), "py-fastapi should default to DRY");
+    }
+
+    #[test]
+    fn catalog_v1_has_full_breadth() {
+        let table = load().unwrap();
+        // v1 ships ~20 principles across the four categories.
+        assert!(
+            table.principles.len() >= 15,
+            "v1 catalog should ship at least 15 principles, got {}",
+            table.principles.len()
+        );
+    }
+
+    #[test]
+    fn every_category_is_represented() {
+        let table = load().unwrap();
+        let cats: std::collections::HashSet<CraftCategory> =
+            table.principles.iter().map(|p| p.category).collect();
+        for required in [
+            CraftCategory::CodeLevel,
+            CraftCategory::Architecture,
+            CraftCategory::Reliability,
+            CraftCategory::RuleSet,
+        ] {
+            assert!(cats.contains(&required), "missing principles for {required:?}");
+        }
+    }
+
+    #[test]
+    fn default_for_stacks_references_seeded_stack_ids() {
+        let table = load().unwrap();
+        let valid: std::collections::HashSet<String> = crate::stacks::ids().into_iter().collect();
+        for p in &table.principles {
+            for s in &p.default_for_stacks {
+                assert!(
+                    valid.contains(s),
+                    "principle `{}` defaults for unknown stack `{}` (known: {:?})",
+                    p.id,
+                    s,
+                    valid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_principle_has_empty_required_text_fields() {
+        let table = load().unwrap();
+        for p in &table.principles {
+            for (field, value) in [
+                ("name", &p.name),
+                ("summary", &p.summary),
+                ("when_to_apply", &p.when_to_apply),
+                ("when_not_to_apply", &p.when_not_to_apply),
+                ("example", &p.example),
+            ] {
+                assert!(!value.trim().is_empty(), "principle `{}` has empty {field}", p.id);
+            }
+        }
+    }
+
+    #[test]
+    fn signature_principles_are_present() {
+        let table = load().unwrap();
+        let ids: std::collections::HashSet<&str> =
+            table.principles.iter().map(|p| p.id.as_str()).collect();
+        for expected in ["solid", "dry", "kiss", "yagni", "clean-architecture", "idempotence"] {
+            assert!(ids.contains(expected), "v1 catalog missing `{expected}`");
+        }
     }
 }

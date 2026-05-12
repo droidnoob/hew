@@ -1,17 +1,242 @@
-# Craft-principles catalog for `hew-new-project` Phase C + `hew-plan`
-# refinement + `hew-guard` soft warnings. CR.1 lands the types and
-# this placeholder; CR.2 fills the real catalog.
+# Craft-principles catalog v1 for hew-67q.
 #
-# Schema: see hew_core::craft::CraftPrinciple. Exposed via
-# `hew schema craft-principles`.
+# Each entry is a principle a project CAN pick at bootstrap (or refine
+# per-feature). hew-new-project Phase C surfaces a picker; chosen
+# principles persist as CONVENTION:craft.<id>; hew-guard soft-warns
+# when the diff violates them.
+#
+# Schema: see hew_core::craft::CraftPrinciple.
+# Categories: code-level | architecture | reliability | rule-set.
+#
+# `default_for_stacks` preselects the principle for the named
+# stack_ids in `hew-new-project` Phase C. Users can deselect or add.
+# `conflicts_with` declares siblings that fight this principle; the
+# picker warns if both are chosen.
+
+# ─── Code-level ───────────────────────────────────────────────────
 
 [[principles]]
-id = "placeholder"
-name = "Placeholder (CR.1)"
+id = "solid"
+name = "SOLID"
 category = "code-level"
-summary = "Replaced by CR.2's full catalog (SOLID, CUPID, DRY, KISS, YAGNI, SoC, CoI, Law of Demeter, Clean Architecture, Hexagonal, DDD, CQRS, Event Sourcing, Immutability, Idempotence, Fail Fast, Rule of Three, Unix Philosophy, Boy Scout Rule, Principle of Least Astonishment)."
-when_to_apply = "Never — this is a CR.1 placeholder so the embedded TOML parses."
-when_not_to_apply = "Always — CR.2 deletes this entry."
+summary = "Single-Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion. The classic OO discipline; tames coupling and makes modules swappable."
+when_to_apply = "Object-oriented or service-shaped codebases where modules / classes form the unit of change. Long-lived backend systems, agent orchestrations, plugin-friendly designs."
+when_not_to_apply = "Tiny scripts. Pure-functional codebases (Liskov + ISP are awkward without inheritance). Throwaway prototypes — YAGNI wins."
+conflicts_with = ["yagni"]
+example = "AuthService depends on a TokenStore *trait*, not a Redis client directly. Swap implementations in tests; OCP holds (extend by adding a new TokenStore, don't edit AuthService)."
+default_for_stacks = ["py-fastapi", "rust-axum", "ts-next"]
+
+[[principles]]
+id = "cupid"
+name = "CUPID"
+category = "code-level"
+summary = "Composable, Unix-philosophy, Predictable, Idiomatic, Domain-based. Dan North's modern alternative to SOLID — five 'joyful' properties to optimize for."
+when_to_apply = "Modern functional or composition-heavy codebases where SOLID feels ill-fitting. Greenfield work where 'feels good to use' matters as much as 'cleanly decoupled'."
+when_not_to_apply = "Heavy-OO codebases where SOLID is the lingua franca. Mixing both creates conflicting review feedback."
 conflicts_with = []
-example = "n/a"
+example = "An auth module exposes one tiny `verify(token) -> User` function (Unix-y, predictable). Composes with the request middleware; idiomatic Go-style returns (T, error)."
+default_for_stacks = ["go-echo", "rust-axum"]
+
+[[principles]]
+id = "dry"
+name = "Don't Repeat Yourself (DRY)"
+category = "code-level"
+summary = "Knowledge has a single source of truth. Duplicate logic decays into divergence; consolidate."
+when_to_apply = "Same business rule expressed in 3+ places. Validation rules. Wire-format definitions that drift. Constants."
+when_not_to_apply = "Coincidental duplication (two snippets that look alike but evolve differently). Premature abstraction — see `rule-of-three`."
+conflicts_with = ["rule-of-three"]
+example = "Email-format check appears in three handlers → extract to a `validate_email(s) -> Result<...>` helper. Three handlers that *also* trim whitespace differently → leave them alone."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "kiss"
+name = "Keep It Simple, Stupid (KISS)"
+category = "code-level"
+summary = "Prefer the simplest solution that meets requirements. Cleverness has a maintenance tax."
+when_to_apply = "Almost always. Especially when reviewing an abstraction that 'felt clever' at write-time."
+when_not_to_apply = "Truly performance-critical paths where a simpler solution misses the SLO. Even then: measure first."
+conflicts_with = []
+example = "A 4-line for-loop instead of a 1-line reduce-with-spread chain that only the author can read. The for-loop wins."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "yagni"
+name = "You Aren't Gonna Need It (YAGNI)"
+category = "code-level"
+summary = "Don't build features 'just in case.' Configurability, extension points, and hooks all cost; only add when needed."
+when_to_apply = "Greenfield slices. MVP / walking-skeleton work. Any time the urge to 'make it pluggable' surfaces without a concrete second caller."
+when_not_to_apply = "Hardening phases where extension is part of the spec. Public APIs where breaking changes hurt."
+conflicts_with = ["solid"]
+example = "Skip the `StrategyFactory` until the second strategy actually exists. Two strategies = consider the abstraction; one = leave it inline."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "separation-of-concerns"
+name = "Separation of Concerns"
+category = "code-level"
+summary = "Each module owns one concern. Routes parse + delegate; services orchestrate; repositories persist."
+when_to_apply = "Any backend with more than a few endpoints. Anywhere a class / function is doing 'a little of everything'."
+when_not_to_apply = "Glue scripts. Migration one-offs. Three-line utilities."
+conflicts_with = []
+example = "POST /users handler validates the body (1 line), calls user_service.create() (1 line), maps the result to a response (1 line). DB writes live in user_service, not the handler."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "composition-over-inheritance"
+name = "Composition over Inheritance"
+category = "code-level"
+summary = "Combine small components rather than building deep inheritance trees. Inheritance couples shape AND identity; composition only couples shape."
+when_to_apply = "Any time the 'is-a' relationship is fuzzy. Trait/interface-heavy languages (Rust, Go). When a base class has 'mostly applies' methods."
+when_not_to_apply = "Languages where inheritance is idiomatic for the domain (UI frameworks; some Python ORM patterns). Closed hierarchies with provably-stable shape."
+conflicts_with = []
+example = "Instead of `class AdminUser(User)` add a `roles: Set<Role>` field to User. Compose behavior; don't subclass identity."
+default_for_stacks = ["py-fastapi", "rust-axum", "go-echo", "ts-next"]
+
+[[principles]]
+id = "law-of-demeter"
+name = "Law of Demeter"
+category = "code-level"
+summary = "Talk only to your immediate friends. A method should call methods on (a) itself, (b) its parameters, (c) objects it creates — not on deeply-traversed graphs."
+when_to_apply = "Mid-size and larger systems. Anywhere chains like `a.b.c.d.e.update()` appear. Mocking pain in tests is the smell."
+when_not_to_apply = "Builder patterns / fluent APIs where chaining IS the public surface. Pure-data DTOs."
+conflicts_with = []
+example = "Replace `order.customer.address.city.zip` with `order.shipping_zip()` on Order. The Order keeps the traversal internal."
+default_for_stacks = ["py-fastapi", "rust-axum"]
+
+# ─── Architecture ─────────────────────────────────────────────────
+
+[[principles]]
+id = "clean-architecture"
+name = "Clean Architecture"
+category = "architecture"
+summary = "Domain at the center; everything else (HTTP, DB, frameworks) is an outer layer that depends *inward*. Dependency rule: source code dependencies point only toward the domain."
+when_to_apply = "Long-lived backend services. Multi-runtime designs (HTTP + queue worker + CLI sharing one domain). Teams that change frameworks mid-life."
+when_not_to_apply = "Short-lived scripts. CRUD apps where the domain IS the database schema."
+conflicts_with = []
+example = "domain/ holds pure business types + use-cases; api/ adapts HTTP to use-cases; db/ adapts use-cases to Postgres. Neither api/ nor db/ knows the other exists."
+default_for_stacks = ["py-fastapi", "rust-axum"]
+
+[[principles]]
+id = "hexagonal"
+name = "Hexagonal Architecture (Ports and Adapters)"
+category = "architecture"
+summary = "Business logic lives inside; ports (interfaces) define what it needs from the outside; adapters implement ports for specific tech (Postgres adapter, Stripe adapter, in-memory adapter for tests)."
+when_to_apply = "Backend services with a few well-defined external integrations. Heavy testing requirements (in-memory adapters replace real ones)."
+when_not_to_apply = "Apps where the framework IS the architecture (e.g., Rails-style monoliths). Tiny services where the ceremony exceeds the benefit."
+conflicts_with = []
+example = "AuthService takes a `TokenStore` port. Production wires `RedisTokenStore`; tests wire `InMemoryTokenStore`. AuthService never imports redis."
+default_for_stacks = ["py-fastapi", "rust-axum"]
+
+[[principles]]
+id = "ddd"
+name = "Domain-Driven Design (DDD)"
+category = "architecture"
+summary = "Model the software around the business domain. Bounded contexts, ubiquitous language, aggregates, domain events."
+when_to_apply = "Domains with rich, often-changing rules (insurance, payments, supply chain). Teams that include non-engineers who own the language."
+when_not_to_apply = "CRUD-y data movers. Domains that are mostly read-then-render. Tiny teams without a domain expert collaborator."
+conflicts_with = []
+example = "Don't write `update_user_balance(user_id, amount)`. Write `account.deposit(amount)` — `Account` is the aggregate; `deposit` enforces invariants the domain cares about."
+default_for_stacks = ["py-fastapi"]
+
+[[principles]]
+id = "cqrs"
+name = "Command Query Responsibility Segregation (CQRS)"
+category = "architecture"
+summary = "Separate the model that handles writes (commands) from the model that handles reads (queries). Allows independent optimization."
+when_to_apply = "Read-heavy systems where write contention or model bloat hurts. Reporting / analytics layers that need denormalized views."
+when_not_to_apply = "Simple CRUD apps — the duplication isn't worth it. Small teams unwilling to maintain two models."
+conflicts_with = []
+example = "CreateOrderCommand goes through the order-write service (Postgres). GetOrderHistoryQuery reads from a denormalized order_history view (rebuilt async)."
 default_for_stacks = []
+
+[[principles]]
+id = "event-sourcing"
+name = "Event Sourcing"
+category = "architecture"
+summary = "Store state changes as an append-only sequence of events; derive current state by replaying. Gives audit trails for free and natural CQRS pairing."
+when_to_apply = "Domains where every state change matters (finance, healthcare, regulated industries). Systems where temporal queries ('what did this look like on date X?') are common."
+when_not_to_apply = "CRUD apps with thin audit needs. Anywhere the team doesn't have event-store ops experience. Read-heavy systems without time-travel requirements."
+conflicts_with = []
+example = "Instead of `users.balance = 100`, append `MoneyDeposited(amount=100)`. Current balance = sum of all events. Snapshots cache recent state."
+default_for_stacks = []
+
+# ─── Reliability / functional ─────────────────────────────────────
+
+[[principles]]
+id = "immutability"
+name = "Immutability"
+category = "reliability"
+summary = "Prefer immutable data + pure transformations over in-place mutation. Concurrency-safe by default; easier to reason about."
+when_to_apply = "Concurrent / parallel code. Functional or functional-leaning languages (Rust, Scala, OCaml). Anywhere shared-state bugs surface."
+when_not_to_apply = "Hot inner loops where allocation cost matters. Languages without ergonomic immutable collections."
+conflicts_with = []
+example = "In Rust, `let user = User { name: 'Alice', .old_user };` over `old_user.name = 'Alice';`. In Python, prefer dataclasses(frozen=True) for value types."
+default_for_stacks = ["rust-axum"]
+
+[[principles]]
+id = "idempotence"
+name = "Idempotence"
+category = "reliability"
+summary = "Repeating an operation produces the same result as doing it once. Critical for retries, webhooks, distributed systems."
+when_to_apply = "Webhook endpoints. Payment processing. Queue consumers. Anything that can be retried by a network layer you don't fully control."
+when_not_to_apply = "Pure compute paths with no side effects. UI event handlers."
+conflicts_with = []
+example = "POST /webhooks/stripe checks Idempotency-Key + caches the response; replay returns the cached response, never double-processes."
+default_for_stacks = ["py-fastapi", "go-echo", "rust-axum"]
+
+[[principles]]
+id = "fail-fast"
+name = "Fail Fast"
+category = "reliability"
+summary = "Surface errors immediately at the boundary; don't paper over them with empty catches or null defaults. Loud failure beats silent corruption."
+when_to_apply = "Validation layers. Config loading. Anywhere a value is 'load-bearing' and absence == bug."
+when_not_to_apply = "User-input validation where soft failure modes are part of UX (form errors). Best-effort cleanup paths."
+conflicts_with = []
+example = "If DATABASE_URL is missing, panic at startup with a clear message. Don't let the app boot and fail on the first query."
+default_for_stacks = ["py-fastapi", "go-echo", "rust-axum"]
+
+# ─── Rule sets ────────────────────────────────────────────────────
+
+[[principles]]
+id = "rule-of-three"
+name = "Rule of Three"
+category = "rule-set"
+summary = "Don't abstract until you've repeated something ~3 times. Two duplications might evolve differently; three is the signal that the pattern is stable."
+when_to_apply = "Any time the urge to extract a helper surfaces on the second occurrence."
+when_not_to_apply = "Boundaries that are obviously stable (HTTP routing, DB connection setup). Code where the pattern was *named* before the first occurrence."
+conflicts_with = ["dry"]
+example = "Same date-format string in two places? Leave it. In three? Now it's a CONSTANTS entry."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "unix-philosophy"
+name = "Unix Philosophy"
+category = "rule-set"
+summary = "Do one thing well. Build small, composable tools that read stdin and write stdout."
+when_to_apply = "CLI tools. Library design. Anywhere a module risks turning into a 'kitchen sink'."
+when_not_to_apply = "Domain-rich aggregates where 'do one thing' is too coarse. UI components that are inherently multi-concern."
+conflicts_with = []
+example = "hew task show is one verb. hew dep tree is another. Neither tries to do the other's job; they pipe naturally via shell."
+default_for_stacks = ["go-echo", "rust-axum"]
+
+[[principles]]
+id = "boy-scout-rule"
+name = "Boy Scout Rule"
+category = "rule-set"
+summary = "Leave code cleaner than you found it. Small, opportunistic cleanups beat scheduled refactor weeks."
+when_to_apply = "Always. Renaming an unclear variable, deleting a dead import, fixing a misleading comment while you're already in the file."
+when_not_to_apply = "Inside a code review on someone else's PR. Mid-bug-investigation when scope creep would muddy the diff."
+conflicts_with = []
+example = "While fixing the off-by-one in pagination, you notice `getUserById` is mis-cased as `getUserByid`. Rename in the same commit; document in the close reason."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
+
+[[principles]]
+id = "least-astonishment"
+name = "Principle of Least Astonishment"
+category = "rule-set"
+summary = "Code should behave how its callers expect. Surprising side effects, magic globals, and 'works only when X is set' all violate this."
+when_to_apply = "Public APIs. Helper utilities. Anywhere a function name implies a contract."
+when_not_to_apply = "Domain-specific frameworks where the conventions ARE the API (e.g., pytest fixtures, Rails ActiveRecord)."
+conflicts_with = []
+example = "A function called `parse_date(s)` returns Option<Date> on failure — not `None` for empty string and `Date(1970-01-01)` for malformed input."
+default_for_stacks = ["py-fastapi", "ts-next", "rust-axum", "go-echo"]
