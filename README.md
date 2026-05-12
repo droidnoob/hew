@@ -76,15 +76,59 @@ Re-running is idempotent. Run it again any time to re-sync skills.
 Once `hew init` has run, open your agent (or just keep it open) and
 talk to it. The skills route on intent.
 
-### New project
+### New project from scratch
+
+> Starting a new project — &lt;1-3 sentence outline&gt;. Use `/hew:new-project`.
+
+For genuinely greenfield projects (empty Beads graph, no PROJECT:
+memories yet), route through `/hew:new-project '<outline>'` first.
+The `hew-new-project` skill runs once and produces the project
+foundation:
+
+1. **Capture + Socratic clarifying** — 4–6 questions on target
+   user, scale tier, deployment, constraints, non-goals,
+   monetization. Each answer persists as a `PROJECT:` memory.
+2. **Parallel research** — four threads in parallel
+   (idea/competitive, use-cases, tech-stack, architecture-patterns)
+   via the agent's Agent tool. Findings persist as `RESEARCH:`
+   memories with provenance tags `[VERIFIED]` / `[CITED]` /
+   `[ASSUMED]`.
+3. **Synthesis pickers** — stack family (one of `ts-next`,
+   `py-fastapi`, `rust-axum`, `go-echo`, or `custom`), database,
+   auth model, hosting. Each choice persists as a `DECISION:`
+   memory; the chosen stack seeds 6–8 `CONVENTION:` memories from
+   the embedded `skills/data/stack-conventions.toml` table.
+4. **Milestone vocabulary** — pick from four presets per the
+   locked `DECISION:milestone-vocabulary`:
+   - Foundation → MVP → Hardening → Launch (slow-roast)
+   - Foundation → MVP → Launch → Hardening (ship-fast)
+   - Discovery → Build → Stabilize → Ship (alt vocab)
+   - Custom (you name 3–5 milestones)
+5. **Roadmap construction** — one `hew task new --type=epic` per
+   milestone, sequenced via `hew dep add <next> --on <prev>`. The
+   chain persists as a `ROADMAP:` memory plus one `MILESTONE:`
+   memory per epic.
+6. **First-milestone decompose** — invokes `hew-decompose` on the
+   first milestone only. Later milestones decompose on demand as
+   prior ones close.
+
+Hand-off writes `STATUS:new-project:complete` and the user moves to
+`/hew:next` to start work. Idempotency: re-running the skill on a
+project that already has the marker refuses unless
+`--re-bootstrap` is passed.
+
+### Existing project
 
 > Plan and start building &lt;thing&gt;. Use `/hew:plan`.
+
+For projects with an existing graph (or after `/hew:new-project`
+completes), the daily loop is plan → decompose → execute.
 
 The agent walks goal-backward through `hew-plan`, decomposes into a
 Beads graph via `hew-decompose`, then enters the work loop:
 `/hew:next` claims the highest-priority unblocked task, codes it,
-runs `hew-guard`, closes it, commits. Repeat until `bd ready` is
-empty, then `/hew:verify`.
+runs `hew-guard`, closes it, commits. Repeat until `hew prime
+execute` shows no ready tasks, then `/hew:verify`.
 
 ### Existing codebase
 

@@ -177,10 +177,42 @@ The executor (and every other skill) routes on memory prefixes:
 | `SECURITY:` | check on auth/input code |
 | `MIGRATION:` | check on model changes |
 | `DEP:` | informational |
+| `PROJECT:` | project-level facts (target user, scale, deployment, constraints). Written by `hew-new-project`. |
+| `MILESTONE:` | current milestone identity + acceptance window. Written by `hew-new-project`; updated by milestone-close events. |
+| `ROADMAP:` | the milestone chain (ordered list of epics). Written by `hew-new-project`. |
+| `RESEARCH:` | investigation findings with provenance tags `[VERIFIED]` / `[CITED]` / `[ASSUMED]`. Written by `hew-research` and the Phase-B research threads of `hew-new-project`. |
 | (none) | factual codebase knowledge |
 
 `prime::categorize()` is the canonical implementation. Don't fan this
 logic out — keep additions there.
+
+### Memory-write allowlist
+
+`hew remember --type=<x>` validates `<x>` against
+`hew_core::tasks::MEMORY_PREFIXES` and rejects unknown values. The
+13-entry allowlist mirrors the bucket taxonomy above (plus `gotcha`,
+`decision`, `factual`). Non-allowlisted prefixes (e.g. `CHECKPOINT:`,
+`SPEC:`, `DEBUG:`, `NOTE:`) write through `--raw` — the escape hatch.
+
+### Stack-conventions data layer
+
+Used by `hew-new-project`'s Phase C synthesis to seed
+`CONVENTION:<key>` memories from the chosen tech stack.
+
+- Source: `skills/data/stack-conventions.toml`
+- Embedded at compile time via `include_str!` in
+  `hew_core::stacks::EMBEDDED`.
+- API: `stacks::load()` / `stacks::find(stack_id)` / `stacks::ids()`.
+- Schema: `hew schema stacks` (schemars-derived from
+  `StackTable` → `Stack` → `StackConvention`).
+- Drift: 9 unit tests assert parse, seed presence, id uniqueness,
+  convention-key uniqueness per stack, minimum-3-conventions
+  guard, non-empty bodies.
+
+Seed entries (v0.1): `ts-next`, `py-fastapi`, `rust-axum`, `go-echo`.
+Adding a stack requires only a new `[[stacks]]` table in the TOML;
+no Rust code changes. Removing a stack is a breaking change for
+projects that bootstrapped against it.
 
 ## Runtime adapters
 
