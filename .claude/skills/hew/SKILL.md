@@ -70,6 +70,7 @@ via `hew branch new --prefix=<type> --slug=<text>`.
 - **hew-research** — domain research with web search
 - **hew-spec** — ambiguity gate before planning (Socratic, scored)
 - **hew-review** — friendly second-pass review against CONVENTION/BOUNDARY/SECURITY
+- **hew-adversarial-review** — red-team / steelman pass; pairs with hew-review
 - **hew-quick** — fast mode (one task, no plan/decompose)
 - **hew-security** — lightweight checks on auth/input/secrets
 
