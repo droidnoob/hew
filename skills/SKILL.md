@@ -34,11 +34,16 @@ If the user describes intent in plain English, route by intent:
 ## Workflow
 
 ```
-plan → decompose → (ready → claim → execute → guard → close) → verify
+plan → decompose → (ready → claim → [branch?] → execute → guard → close) → verify
 ```
 
 The agent does not manage phases. It manages the dependency graph. `bd ready`
 always says what to do next. `bd close` marks it done. Nothing else is required.
+
+**Auto-branching is opt-in.** `hew config set branching.strategy epic`
+makes `hew-execute` create a `<prefix>/<epic-id>-<slug>` branch on the
+first claim under each epic. Default is `none` — branches stay manual
+via `hew branch new --prefix=<type> --slug=<text>`.
 
 ## Skills
 

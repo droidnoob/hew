@@ -75,6 +75,42 @@ Never start work without claiming. The audit trail (`bd show <id>`) shows
 who picked up what when — important when sessions fail and a new agent
 needs to resume.
 
+### Step 3a — auto-branch on first claim (optional)
+
+Right after claiming, consult `hew config get branching.strategy`:
+
+| Value | Behavior |
+|-------|----------|
+| `none` *(default)* | skip — user manages branches |
+| `epic` | create a branch the first time any task under a given epic is claimed; subsequent tasks under the same epic stay on the same branch |
+| `always` | create a branch every claim (rare; use for review-per-task workflows) |
+
+When the strategy fires:
+
+1. Read `hew config get branching.strategy`. If `none`, skip silently.
+2. If `epic`: check whether `git symbolic-ref --short HEAD` already
+   matches a hew-managed branch for this epic (e.g. `feat/<epic-id>-…`).
+   If yes, you're already on it — skip. If no, proceed.
+3. Pick the prefix once per chain — ask the user via picker (default
+   `feat` for tasks under a feature epic, `fix` for bug epics). Cache
+   the choice for the session; don't re-ask for sibling tasks.
+4. Compose the slug as `<epic-id>-<slugified-epic-title>` (e.g.
+   `vhz-agent-ergonomics`). The hew CLI slugifies on its end, so passing
+   the raw title is fine.
+5. Run `hew branch new --prefix=<picked> --slug='<epic-id> <epic-title>'`.
+
+Skip silently — never block the claim — when:
+
+- `branching.strategy=none`
+- `git` is not on PATH (`hew branch new` will return `hew::git::not_found`;
+  treat as soft-skip, not an error)
+- The user passed `--no-branch` to the loop (or said "no branch" in
+  conversation)
+- You're already on a hew-managed branch matching this epic
+
+The branch is a convenience, not a constraint. Closing the task and
+committing still works on whatever branch the user is on.
+
 ## Step 4 — read the task properly
 
 Run `bd show <id>` even though some of the fields appeared in `ready_list`.
