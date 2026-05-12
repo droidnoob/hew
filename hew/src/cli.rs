@@ -109,4 +109,7 @@ pub enum Command {
 
     /// Review utilities: bundle JSON for the review skills + Step 10 trigger check.
     Review(crate::commands::review::Args),
+
+    /// Task operations: show, list, claim, close, new, reopen, children, note, search.
+    Task(crate::commands::task::Args),
 }

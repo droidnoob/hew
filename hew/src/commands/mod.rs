@@ -16,6 +16,7 @@ pub mod schema;
 pub mod skills;
 pub mod slashes;
 pub mod status;
+pub mod task;
 pub mod uninstall;
 pub mod update;
 
@@ -41,5 +42,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Uninstall(a) => uninstall::run(&ctx, a),
         Command::Branch(a) => branch::run(&ctx, a),
         Command::Review(a) => review::run(&ctx, a),
+        Command::Task(a) => task::run(&ctx, a),
     }
 }

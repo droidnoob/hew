@@ -33,6 +33,10 @@ pub struct TaskSummary {
     pub title: String,
     pub issue_type: String,
     pub priority: u8,
+    /// `open` / `in_progress` / `blocked` / `closed` / `deferred` —
+    /// populated from `bd show --json` `status` field.
+    #[serde(default)]
+    pub status: String,
     pub closed_at: String,
     pub close_reason: Option<String>,
     pub parent: Option<String>,
@@ -181,6 +185,7 @@ impl BdIssueRaw {
             title: self.title,
             issue_type: self.issue_type,
             priority: self.priority,
+            status: self.status,
             closed_at: self.closed_at,
             close_reason: self.close_reason,
             parent: self.parent,
