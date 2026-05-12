@@ -414,6 +414,25 @@ pub fn dep_tree(bd: &dyn BdClient, id: &str) -> Result<serde_json::Value> {
 // Memories
 // ────────────────────────────────────────────────────────────────────────────
 
+/// `bd remember <body>` (optionally `--key <k>`). For the no-key case the
+/// trait's [`BdClient::remember`] would also work, but routing through
+/// `run_raw` keeps the with-key and without-key paths uniform in tests.
+pub fn remember(bd: &dyn BdClient, body: &str, key: Option<&str>) -> Result<()> {
+    let body_os = OsString::from(body);
+    if let Some(k) = key {
+        let key_os = OsString::from(k);
+        bd.run_raw(&[
+            OsStr::new("remember"),
+            body_os.as_os_str(),
+            OsStr::new("--key"),
+            key_os.as_os_str(),
+        ])?;
+    } else {
+        bd.run_raw(&[OsStr::new("remember"), body_os.as_os_str()])?;
+    }
+    Ok(())
+}
+
 /// `bd recall <key>`. Returns `Ok(None)` when bd reports `No memory with
 /// key "<key>"` (exit 1) — every other bd failure propagates.
 pub fn recall(bd: &dyn BdClient, key: &str) -> Result<Option<String>> {

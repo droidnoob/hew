@@ -1,5 +1,6 @@
 use clap::Args as ClapArgs;
 use hew_core::bd::{BdClient, RealBd};
+use hew_core::tasks;
 use hew_core::{Ctx, OutputMode};
 
 #[derive(Debug, ClapArgs)]
@@ -7,20 +8,36 @@ pub struct Args {
     /// Filter to memories whose value starts with this prefix (e.g.
     /// CONVENTION, BOUNDARY, AUDIT, SECURITY, MIGRATION, DEP,
     /// STATUS, CHECKPOINT).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["recall", "forget"])]
     pub prefix: Option<String>,
 
     /// Filter to memories whose value contains this substring (case-insensitive).
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["recall", "forget"])]
     pub grep: Option<String>,
 
     /// Sugar for `--prefix=RESEARCH --grep=<topic>`. Conflicts with --prefix.
-    #[arg(long, value_name = "TOPIC", conflicts_with = "prefix")]
+    #[arg(long, value_name = "TOPIC", conflicts_with_all = ["prefix", "recall", "forget"])]
     pub research: Option<String>,
+
+    /// Print a single memory by key.
+    #[arg(long, value_name = "KEY", conflicts_with = "forget")]
+    pub recall: Option<String>,
+
+    /// Remove a single memory by key.
+    #[arg(long, value_name = "KEY")]
+    pub forget: Option<String>,
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let client = RealBd::discover()?;
+
+    if let Some(key) = args.recall.as_deref() {
+        return run_recall(ctx, &client, key);
+    }
+    if let Some(key) = args.forget.as_deref() {
+        return run_forget(ctx, &client, key);
+    }
+
     let memories = client.memories()?;
 
     // Resolve --research sugar into the underlying prefix/grep filters.
@@ -57,6 +74,29 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         }
         println!();
         println!("{} memories", hits.len());
+    }
+    Ok(())
+}
+
+fn run_recall(ctx: &Ctx, bd: &dyn BdClient, key: &str) -> miette::Result<()> {
+    match tasks::recall(bd, key)? {
+        Some(body) => {
+            println!("{body}");
+            Ok(())
+        }
+        None => {
+            if !ctx.quiet {
+                eprintln!("no memory with key `{key}`");
+            }
+            Err(miette::miette!("no memory with key `{key}`"))
+        }
+    }
+}
+
+fn run_forget(ctx: &Ctx, bd: &dyn BdClient, key: &str) -> miette::Result<()> {
+    tasks::forget(bd, key)?;
+    if !ctx.quiet {
+        println!("forgot {key}");
     }
     Ok(())
 }

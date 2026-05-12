@@ -12,6 +12,7 @@ pub mod init;
 pub mod manpage;
 pub mod memories;
 pub mod prime;
+pub mod remember;
 pub mod review;
 pub mod schema;
 pub mod skills;
@@ -45,5 +46,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Review(a) => review::run(&ctx, a),
         Command::Task(a) => task::run(&ctx, a),
         Command::Dep(a) => dep::run(&ctx, a),
+        Command::Remember(a) => remember::run(&ctx, a),
     }
 }

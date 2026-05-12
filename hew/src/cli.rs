@@ -115,4 +115,7 @@ pub enum Command {
 
     /// Dependency operations: add, remove, tree, blocked.
     Dep(crate::commands::dep::Args),
+
+    /// Write a memory with an enforced type allowlist (or --raw to bypass).
+    Remember(crate::commands::remember::Args),
 }
