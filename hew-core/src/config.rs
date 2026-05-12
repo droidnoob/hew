@@ -23,6 +23,7 @@ pub struct Config {
     pub review: ReviewConfig,
     pub testing: TestingConfig,
     pub craft: CraftConfig,
+    pub compact: CompactConfig,
 }
 
 impl Default for Config {
@@ -38,6 +39,7 @@ impl Default for Config {
             review: ReviewConfig::default(),
             testing: TestingConfig::default(),
             craft: CraftConfig::default(),
+            compact: CompactConfig::default(),
         }
     }
 }
@@ -117,6 +119,18 @@ impl Default for CraftConfig {
     fn default() -> Self {
         Self { max_function_lines: 0, warn_on_unused: true }
     }
+}
+
+/// Memory-compaction config. MC.1 ships the minimum-viable struct
+/// referenced by `hew_core::compact::apply`; MC.3 wires the full
+/// get/set/keys/validation surface and the disk round-trip.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CompactConfig {
+    /// Literal memory keys that `compact::apply` refuses to forget,
+    /// regardless of plan. Hardcoded exemptions (STATUS:scan etc.)
+    /// always apply in addition to this list. Default `[]`.
+    pub exempt: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]

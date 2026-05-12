@@ -5,6 +5,7 @@
 
 pub mod bd;
 pub mod branch;
+pub mod compact;
 pub mod config;
 pub mod craft;
 pub mod ctx;
