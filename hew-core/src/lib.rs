@@ -12,6 +12,7 @@ pub mod error;
 pub mod git;
 pub mod install;
 pub mod notify;
+pub mod os;
 pub mod prime;
 pub mod skills;
 pub mod slash;
