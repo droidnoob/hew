@@ -116,45 +116,45 @@ fn blocked(ctx: &Ctx, bd: &dyn BdClient, args: BlockedArgs) -> miette::Result<()
 
 // ────────────────────────────────────────────────────────────────────────────
 // Tree rendering
+//
+// `bd dep tree --json` returns a flat DFS-ordered array of nodes, each
+// carrying its own `depth` integer (and `parent_id`). We render with
+// `depth * "  "` indentation; `--depth N` keeps nodes where `depth < N`
+// (`N == 0` means unlimited). Nested-tree variants are not used.
 // ────────────────────────────────────────────────────────────────────────────
 
 fn truncate_tree(value: &serde_json::Value, max_depth: u32) -> serde_json::Value {
-    fn walk(v: &serde_json::Value, depth: u32, max: u32) -> serde_json::Value {
-        match v {
-            serde_json::Value::Object(map) => {
-                let mut out = serde_json::Map::new();
-                for (k, child) in map {
-                    if k == "children" || k == "dependencies" || k == "dependents" {
-                        if max != 0 && depth >= max.saturating_sub(1) {
-                            out.insert(k.clone(), serde_json::Value::Array(Vec::new()));
-                        } else if let Some(arr) = child.as_array() {
-                            let mapped: Vec<_> =
-                                arr.iter().map(|c| walk(c, depth + 1, max)).collect();
-                            out.insert(k.clone(), serde_json::Value::Array(mapped));
-                        } else {
-                            out.insert(k.clone(), child.clone());
-                        }
-                    } else {
-                        out.insert(k.clone(), child.clone());
-                    }
-                }
-                serde_json::Value::Object(out)
-            }
-            serde_json::Value::Array(arr) => {
-                let mapped: Vec<_> = arr.iter().map(|c| walk(c, depth, max)).collect();
-                serde_json::Value::Array(mapped)
-            }
-            other => other.clone(),
-        }
-    }
-    walk(value, 0, max_depth)
+    let Some(arr) = value.as_array() else {
+        return value.clone();
+    };
+    let kept: Vec<serde_json::Value> = arr
+        .iter()
+        .filter(|node| {
+            let depth = node.get("depth").and_then(|d| d.as_u64()).unwrap_or(0) as u32;
+            max_depth == 0 || depth < max_depth
+        })
+        .cloned()
+        .collect();
+    serde_json::Value::Array(kept)
 }
 
 fn render_tree_text(value: &serde_json::Value, max_depth: u32) {
-    fn walk(v: &serde_json::Value, depth: u32, max: u32, prefix: &str) {
-        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("?");
-        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("");
-        let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    let Some(arr) = value.as_array() else {
+        println!("(no tree)");
+        return;
+    };
+    if arr.is_empty() {
+        println!("(no tree)");
+        return;
+    }
+    for node in arr {
+        let depth = node.get("depth").and_then(|d| d.as_u64()).unwrap_or(0) as u32;
+        if max_depth != 0 && depth >= max_depth {
+            continue;
+        }
+        let id = node.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+        let title = node.get("title").and_then(|x| x.as_str()).unwrap_or("");
+        let status = node.get("status").and_then(|x| x.as_str()).unwrap_or("");
         let marker = match status {
             "closed" => "✓",
             "in_progress" => "◐",
@@ -163,24 +163,9 @@ fn render_tree_text(value: &serde_json::Value, max_depth: u32) {
             "" => "·",
             _ => "○",
         };
-        println!("{prefix}{marker} {id}  {title}");
-        if max != 0 && depth >= max.saturating_sub(1) {
-            return;
-        }
-        for key in ["children", "dependencies", "dependents"] {
-            if let Some(arr) = v.get(key).and_then(|x| x.as_array()) {
-                let next_prefix = format!("{prefix}  ");
-                for child in arr {
-                    walk(child, depth + 1, max, &next_prefix);
-                }
-            }
-        }
+        let indent = "  ".repeat(depth as usize);
+        println!("{indent}{marker} {id}  {title}");
     }
-    if value.is_null() {
-        println!("(no tree)");
-        return;
-    }
-    walk(value, 0, max_depth, "");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -211,31 +196,30 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn flat_tree() -> serde_json::Value {
+        // Matches bd dep tree --json: DFS flat array, each node carries depth.
+        json!([
+            {"id": "a", "title": "root", "depth": 0, "status": "open"},
+            {"id": "b", "title": "kid",  "depth": 1, "status": "open"},
+            {"id": "c", "title": "grand","depth": 2, "status": "open"},
+        ])
+    }
+
     #[test]
-    fn truncate_tree_caps_children_at_depth() {
-        let tree = json!({
-            "id": "a",
-            "children": [
-                {"id": "b", "children": [
-                    {"id": "c", "children": [{"id": "d", "children": []}]}
-                ]}
-            ]
-        });
-        let cut = truncate_tree(&tree, 2);
-        // depth 0 = a, depth 1 = b (kept), but b's children must be empty.
-        let b = &cut["children"][0];
-        assert_eq!(b["id"], "b");
-        assert!(b["children"].as_array().unwrap().is_empty());
+    fn truncate_tree_filters_by_depth() {
+        let cut = truncate_tree(&flat_tree(), 2);
+        let arr = cut.as_array().unwrap();
+        // depth=0 (a) + depth=1 (b) kept; depth=2 (c) dropped.
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "a");
+        assert_eq!(arr[1]["id"], "b");
     }
 
     #[test]
     fn truncate_tree_depth_zero_is_unlimited() {
-        let tree = json!({
-            "id": "a",
-            "children": [{"id": "b", "children": [{"id": "c", "children": []}]}]
-        });
-        let cut = truncate_tree(&tree, 0);
-        let c = &cut["children"][0]["children"][0];
-        assert_eq!(c["id"], "c");
+        let cut = truncate_tree(&flat_tree(), 0);
+        let arr = cut.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[2]["id"], "c");
     }
 }

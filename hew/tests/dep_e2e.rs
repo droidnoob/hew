@@ -92,9 +92,11 @@ fn remove_sends_dep_remove_argv() {
 fn tree_text_renders_indented_nodes() {
     let tmp = tempfile::tempdir().unwrap();
     write_bd_stub(tmp.path());
-    let body = r#"{"id":"hew-1","title":"root","status":"in_progress","children":[
-        {"id":"hew-2","title":"child","status":"open","children":[]}
-    ]}"#;
+    // bd dep tree --json: flat DFS array with depth integers.
+    let body = r#"[
+        {"id":"hew-1","title":"root","status":"in_progress","depth":0},
+        {"id":"hew-2","title":"child","status":"open","depth":1}
+    ]"#;
 
     hew_in(tmp.path())
         .env("BD_STUB_TREE_BODY", body)
@@ -111,11 +113,11 @@ fn tree_text_renders_indented_nodes() {
 fn tree_depth_truncates_children_in_json_mode() {
     let tmp = tempfile::tempdir().unwrap();
     write_bd_stub(tmp.path());
-    let body = r#"{"id":"a","children":[
-        {"id":"b","children":[
-            {"id":"c","children":[]}
-        ]}
-    ]}"#;
+    let body = r#"[
+        {"id":"a","depth":0},
+        {"id":"b","depth":1},
+        {"id":"c","depth":2}
+    ]"#;
 
     let out = hew_in(tmp.path())
         .env("BD_STUB_TREE_BODY", body)
@@ -124,9 +126,10 @@ fn tree_depth_truncates_children_in_json_mode() {
         .unwrap();
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let b = &parsed["children"][0];
-    assert_eq!(b["id"], "b");
-    assert!(b["children"].as_array().unwrap().is_empty(), "{}", parsed);
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "{parsed}");
+    assert_eq!(arr[0]["id"], "a");
+    assert_eq!(arr[1]["id"], "b");
 }
 
 #[test]

@@ -11,8 +11,9 @@ use hew_core::tasks::{self, MEMORY_PREFIXES, validate_memory_type};
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Memory type — one of: convention, boundary, security, audit,
-    /// decision, status, gotcha, project, research, dep, factual. The
-    /// canonical UPPER prefix is prepended to the body before write.
+    /// decision, status, gotcha, project, milestone, roadmap,
+    /// research, dep, factual. The canonical UPPER prefix is prepended
+    /// to the body before write.
     #[arg(long = "type", conflicts_with = "raw")]
     pub kind: Option<String>,
 
