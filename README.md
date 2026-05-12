@@ -166,13 +166,13 @@ the hew section is removed.
     - `hew memories [--prefix|--grep|--research|--recall|--forget]`
 
   Every command supports `--json` and `--non-interactive`.
-- **18 skills + 1 index** under [`skills/`](./skills) — installed
+- **19 skills + 1 index** under [`skills/`](./skills) — installed
   verbatim into the agent runtime. Skill bodies invoke the
   curated `hew` wrappers above, not raw `bd`.
-- **26 slash commands** under [`commands/`](./commands) — `/hew:plan`,
-  `/hew:next`, `/hew:auto`, `/hew:quick`, `/hew:verify`, `/hew:ship`,
-  `/hew:checkpoint`, `/hew:review`, `/hew:adversarial-review`,
-  `/hew:doctor`, …
+- **27 slash commands** under [`commands/`](./commands) — `/hew:plan`,
+  `/hew:next`, `/hew:auto`, `/hew:new-project`, `/hew:quick`,
+  `/hew:verify`, `/hew:ship`, `/hew:checkpoint`, `/hew:review`,
+  `/hew:adversarial-review`, `/hew:doctor`, …
 - **Schemas** — `hew schema {prime,resume,config,review-bundle,
   task,epic,task-list-filter,new-task}` emits JSON-Schema for every
   agent-facing output and arg shape.

@@ -703,8 +703,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Claude, tmp.path()).expect("install");
         assert_eq!(plan.runtime, Runtime::Claude);
-        // 1 SKILL.md + 19 skills + 26 slash commands + 1 settings.json = 47 files.
-        assert_eq!(plan.written.len(), 47);
+        // 1 SKILL.md + 19 skills + 27 slash commands + 1 settings.json = 48 files.
+        assert_eq!(plan.written.len(), 48);
 
         let hew_root = tmp.path().join(".claude").join("skills").join("hew");
         assert!(hew_root.join("SKILL.md").exists());
