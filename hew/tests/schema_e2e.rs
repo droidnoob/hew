@@ -32,3 +32,39 @@ fn schema_config_emits_valid_jsonschema() {
 fn schema_rejects_unknown_target() {
     hew().args(["schema", "bogus"]).assert().failure().code(2);
 }
+
+#[test]
+fn schema_task_emits_task_summary() {
+    let out = hew().args(["schema", "task"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "TaskSummary");
+    assert!(parsed["properties"]["id"].is_object());
+    assert!(parsed["properties"]["status"].is_object());
+    assert!(parsed["properties"]["close_reason"].is_object());
+}
+
+#[test]
+fn schema_epic_emits_epic_summary() {
+    let out = hew().args(["schema", "epic"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "EpicSummary");
+    assert!(parsed["properties"]["child_count"].is_object());
+    assert!(parsed["properties"]["children"].is_object());
+}
+
+#[test]
+fn schema_task_list_filter_emits_filter_args() {
+    let out =
+        hew().args(["schema", "task-list-filter"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "TaskListFilter");
+    assert!(parsed["properties"]["status"].is_object());
+}
+
+#[test]
+fn schema_new_task_emits_args() {
+    let out = hew().args(["schema", "new-task"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "NewTaskArgs");
+    assert!(parsed["properties"]["title"].is_object());
+}

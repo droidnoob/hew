@@ -152,14 +152,30 @@ the hew section is removed.
 
 ## What ships
 
-- **`hew` CLI** — `init`, `prime`, `status`, `doctor`, `config`,
-  `schema`, `update`, `completions`, `manpage`. Every command supports
-  `--json` and `--non-interactive`.
-- **15 skills + 1 index** under [`skills/`](./skills) — installed
-  verbatim into the agent runtime.
-- **24 slash commands** under [`commands/`](./commands) — `/hew:plan`,
+- **`hew` CLI** — top-level commands fall into two families:
+  - **Workspace + agent contract:** `init`, `prime`, `status`,
+    `doctor`, `config`, `schema`, `update`, `completions`, `manpage`,
+    `check`, `skills`, `commands`, `uninstall`, `branch`, `review`.
+  - **Curated `bd` wrappers** (agent-facing; stable JSON via
+    `--json`, schemas exposed via `hew schema <name>`):
+    - `hew task {show,list,claim,close,new,reopen,children,note,search}`
+    - `hew dep {add,remove,tree,blocked}`
+    - `hew epic {show,tree,close,audit,summary}`
+    - `hew remember --type=<allowlist> "<body>"` (or `--raw` to
+      bypass)
+    - `hew memories [--prefix|--grep|--research|--recall|--forget]`
+
+  Every command supports `--json` and `--non-interactive`.
+- **18 skills + 1 index** under [`skills/`](./skills) — installed
+  verbatim into the agent runtime. Skill bodies invoke the
+  curated `hew` wrappers above, not raw `bd`.
+- **26 slash commands** under [`commands/`](./commands) — `/hew:plan`,
   `/hew:next`, `/hew:auto`, `/hew:quick`, `/hew:verify`, `/hew:ship`,
-  `/hew:checkpoint`, `/hew:doctor`, …
+  `/hew:checkpoint`, `/hew:review`, `/hew:adversarial-review`,
+  `/hew:doctor`, …
+- **Schemas** — `hew schema {prime,resume,config,review-bundle,
+  task,epic,task-list-filter,new-task}` emits JSON-Schema for every
+  agent-facing output and arg shape.
 
 ## Where to go next
 
