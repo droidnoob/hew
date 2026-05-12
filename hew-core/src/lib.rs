@@ -18,6 +18,7 @@ pub mod review;
 pub mod skills;
 pub mod slash;
 pub mod status;
+pub mod tasks;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};

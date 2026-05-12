@@ -28,6 +28,12 @@ use serde::{Deserialize, Serialize};
 use crate::bd::{BdClient, hew_temp_path};
 use crate::error::{HewError, Result};
 use crate::git::GitClient;
+use crate::tasks::{self, BdIssueRaw};
+
+// Re-export so prior callers (RV.5/RV.6 skills, schema tooling) keep their
+// `hew_core::review::TaskSummary` path. The canonical home is now
+// [`crate::tasks::TaskSummary`].
+pub use crate::tasks::TaskSummary;
 
 const REVIEW_MARKER_PREFIX: &str = "STATUS:review:";
 
@@ -64,18 +70,6 @@ impl From<&ReviewScope> for ReviewScopeRepr {
             ReviewScope::GitRef(rev) => Self::GitRef { rev: rev.clone() },
         }
     }
-}
-
-/// One task summary, agent-friendly.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
-pub struct TaskSummary {
-    pub id: String,
-    pub title: String,
-    pub issue_type: String,
-    pub priority: u8,
-    pub closed_at: String,
-    pub close_reason: Option<String>,
-    pub parent: Option<String>,
 }
 
 /// Constraint-bearing memories the reviewer needs.
@@ -115,47 +109,6 @@ pub struct ReviewBundle {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Raw bd JSON shapes (permissive: serde(default) on every field).
-// ────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct BdIssueRaw {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    #[allow(dead_code)] // surfaced in raw JSON but not propagated to TaskSummary
-    status: String,
-    #[serde(default)]
-    priority: u8,
-    #[serde(default, rename = "issue_type")]
-    issue_type: String,
-    #[serde(default)]
-    closed_at: String,
-    #[serde(default)]
-    close_reason: Option<String>,
-    #[serde(default)]
-    parent: Option<String>,
-}
-
-impl BdIssueRaw {
-    fn into_summary(self) -> TaskSummary {
-        TaskSummary {
-            id: self.id,
-            title: self.title,
-            issue_type: self.issue_type,
-            priority: self.priority,
-            closed_at: self.closed_at,
-            close_reason: self.close_reason,
-            parent: self.parent,
-        }
-    }
-}
-
-// ────────────────────────────────────────────────────────────────────────────
 // Public API
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -172,7 +125,7 @@ pub fn bundle(bd: &dyn BdClient, git: &dyn GitClient, scope: ReviewScope) -> Res
     let (closed_tasks, anchor, epic_meta) = match &scope {
         ReviewScope::GitRef(_) => (Vec::new(), None, None),
         other => {
-            let all_closed = list_closed_tasks(bd)?; // newest-first
+            let all_closed = tasks::list_closed_tasks(bd)?; // newest-first
             resolve_scope(bd, other, &all_closed)?
         }
     };
@@ -218,7 +171,7 @@ pub fn write_review_marker(bd: &dyn BdClient, iso_ts: &str) -> Result<()> {
 /// tasks when no marker has ever been written.
 pub fn tasks_since_last_review(bd: &dyn BdClient) -> Result<u32> {
     let marker = last_review_marker(bd)?;
-    let closed = list_closed_tasks(bd)?;
+    let closed = tasks::list_closed_tasks(bd)?;
     let count = match marker {
         Some(ts) => closed.iter().filter(|t| t.closed_at.as_str() > ts.as_str()).count(),
         None => closed.len(),
@@ -229,42 +182,6 @@ pub fn tasks_since_last_review(bd: &dyn BdClient) -> Result<u32> {
 // ────────────────────────────────────────────────────────────────────────────
 // Internals
 // ────────────────────────────────────────────────────────────────────────────
-
-/// Fetch every closed bd issue. Returns newest-first by `closed_at`.
-///
-/// Output goes via a temp file (not a pipe) so large datasets — `bd list
-/// --json --limit=0` can exceed 100KB on long-running projects — don't
-/// deadlock the OS pipe buffer.
-fn list_closed_tasks(bd: &dyn BdClient) -> Result<Vec<BdIssueRaw>> {
-    let tmp_path = hew_temp_path("bd-list-closed", "json");
-    bd.run_to_file(
-        &[
-            OsStr::new("list"),
-            OsStr::new("--status=closed"),
-            OsStr::new("--sort=closed"),
-            OsStr::new("--limit"),
-            OsStr::new("0"),
-            OsStr::new("--json"),
-        ],
-        &tmp_path,
-    )?;
-    let body = std::fs::read_to_string(&tmp_path)?;
-    // Best-effort cleanup; not fatal if removal fails.
-    let _ = std::fs::remove_file(&tmp_path);
-    let issues: Vec<BdIssueRaw> = serde_json::from_str(body.trim())?;
-    Ok(issues)
-}
-
-fn fetch_issue(bd: &dyn BdClient, id: &str) -> Result<BdIssueRaw> {
-    let id_os = OsString::from(id);
-    let out = bd.run_raw(&[OsStr::new("show"), id_os.as_os_str(), OsStr::new("--json")])?;
-    // bd show --json returns an array: [issue, ...dependents]. Take the first.
-    let arr: Vec<BdIssueRaw> = serde_json::from_str(out.stdout.trim())?;
-    arr.into_iter().next().ok_or_else(|| HewError::BdNonZero {
-        code: 0,
-        stderr: format!("`bd show {id} --json` returned empty array"),
-    })
-}
 
 /// Return `(closed_tasks_in_scope_oldest_first, anchor_timestamp, epic_meta)`.
 fn resolve_scope(
@@ -283,7 +200,7 @@ fn resolve_scope(
             Ok((tasks, anchor, None))
         }
         ReviewScope::Epic(epic_id) => {
-            let epic_raw = fetch_issue(bd, epic_id)?;
+            let epic_raw = tasks::fetch_issue(bd, epic_id)?;
             // Build a parent->children id map across ALL closed issues so we
             // capture descendants at any depth (epic → task → subtask).
             let mut by_parent: std::collections::HashMap<&str, Vec<&BdIssueRaw>> =
@@ -318,7 +235,7 @@ fn resolve_scope(
             Ok((tasks, anchor, Some(epic_meta)))
         }
         ReviewScope::Task(task_id) => {
-            let anchor_issue = fetch_issue(bd, task_id)?;
+            let anchor_issue = tasks::fetch_issue(bd, task_id)?;
             if anchor_issue.closed_at.is_empty() {
                 return Err(HewError::MissingFlag {
                     flag: format!("task (`{task_id}` has no closed_at; not closed yet?)"),
