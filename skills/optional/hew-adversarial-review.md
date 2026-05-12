@@ -2,7 +2,7 @@
 ---
 name: hew-adversarial-review
 category: optional
-init: hew review-bundle
+init: hew review bundle
 ---
 
 # hew-adversarial-review — Red-Team / Steelman Pass
@@ -35,7 +35,7 @@ hew config set optional-skills.review true   # same flag as hew-review
 - After `/hew:review` filed minor findings but you suspect there's
   something deeper.
 
-## Inputs from `hew review-bundle`
+## Inputs from `hew review bundle`
 
 Same JSON bundle as `hew-review`: `scope`, `closed_tasks`, `diff`,
 `diff_base`, `memories`, `epic`, `last_review_at`. The shape is

@@ -357,6 +357,50 @@ If the user said "do this one task," stop after closing it. If "keep going"
 or `/hew:auto`, loop until `bd ready` is empty (then call `hew-verify`) or
 a Rule-4 architectural decision blocks you (then surface and stop).
 
+### Step 10a — review picker (optional, config-gated)
+
+Before continuing to the next task, run `hew review check --json`.
+The output:
+
+```json
+{
+  "tasks_since_last_review": 5,
+  "config": { "after_n_tasks": 8, "after_epic": true, "batch_size": 8 },
+  "epic_just_closed": false,
+  "picker_should_fire": false,
+  "reason": "..."
+}
+```
+
+If `picker_should_fire` is `true`, surface this picker to the user:
+
+```
+The batch is ready for review. <reason>.
+  Review batch         — friendly second-pass against conventions
+  Adversarial review   — red-team / steelman pass
+  Both                 — friendly first, then adversarial
+  Skip                 — continue without reviewing (counter does NOT reset)
+```
+
+On selection:
+- "Review batch" → invoke `/hew:review`.
+- "Adversarial review" → invoke `/hew:adversarial-review`.
+- "Both" → invoke `/hew:review`, then `/hew:adversarial-review`.
+- "Skip" → continue to next task without writing a marker. The counter
+  stays as-is so the next loop tick re-asks.
+
+The review skills write `STATUS:review:<ts>` on success, which resets
+the counter automatically.
+
+When `picker_should_fire` is `false`, skip 10a silently and continue.
+Don't run it for every task close — only consult when the loop tick
+crosses a threshold, which `hew review check` reports.
+
+Defaults: `review.after_n_tasks = 0` and `review.after_epic = false`,
+so this step is invisible until the user opts in via
+`hew config set review.after_n_tasks <n>` and/or
+`hew config set review.after_epic true`.
+
 ## Auth gates and external blockers
 
 If a tool/service returns an auth error mid-task ("Not authenticated,"

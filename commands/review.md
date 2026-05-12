@@ -2,7 +2,7 @@
 description: Friendly second-pass code review against CONVENTION/BOUNDARY/SECURITY memories. Files findings as bd bugs.
 ---
 
-Invoke the hew-review skill. Runs `hew review-bundle` to assemble the
+Invoke the hew-review skill. Runs `hew review bundle` to assemble the
 input (closed tasks in scope, diff, applicable memories, epic body if
 any) then scores the diff across six pillars: CONVENTION compliance,
 BOUNDARY contracts, SECURITY patterns, test coverage of acceptance

@@ -3,7 +3,7 @@ description: Red-team / steelman pass — attacks undocumented gaps the friendly
 ---
 
 Invoke the hew-adversarial-review skill. Same JSON input as
-`/hew:review` (via `hew review-bundle`), opposite stance: assume the
+`/hew:review` (via `hew review bundle`), opposite stance: assume the
 code is wrong until proven right, steelman the alternative that wasn't
 taken, find the worst input the code accepts.
 

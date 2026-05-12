@@ -40,6 +40,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Memories(a) => memories::run(&ctx, a),
         Command::Uninstall(a) => uninstall::run(&ctx, a),
         Command::Branch(a) => branch::run(&ctx, a),
-        Command::ReviewBundle(a) => review::run(&ctx, a),
+        Command::Review(a) => review::run(&ctx, a),
     }
 }

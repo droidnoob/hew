@@ -2,7 +2,7 @@
 ---
 name: hew-review
 category: optional
-init: hew review-bundle
+init: hew review bundle
 ---
 
 # hew-review — Friendly Second-Pass Code Review
@@ -41,9 +41,9 @@ config.
   chooses "Review batch."
 - After a `hew-verify` flags drift the user wants double-checked.
 
-## Inputs from `hew review-bundle`
+## Inputs from `hew review bundle`
 
-`hew review-bundle [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
+`hew review bundle [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
 emits a JSON `ReviewBundle` with:
 
 - `scope` — what the caller asked for (LastN / Epic / Task / GitRef).
