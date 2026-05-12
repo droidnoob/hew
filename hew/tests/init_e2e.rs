@@ -6,6 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 const BD_STUB_OK: &str = r#"#!/bin/sh
@@ -165,4 +166,42 @@ fn init_unknown_runtime_value_rejected_by_clap() {
         .assert()
         .failure()
         .code(2);
+}
+
+#[test]
+fn init_warns_when_git_missing_in_non_interactive() {
+    // PATH points only at the bd stub — no git, no anything else.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stderr(contains("`git` not on PATH"))
+        .stderr(contains("auto-branching will be skipped"));
+}
+
+#[test]
+fn init_does_not_warn_when_git_present() {
+    // PATH includes both bd and git stubs.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    // Drop a git stub that exits 0 on --version so RealGit::is_available() finds it.
+    let git_path = stub_dir.path().join("git");
+    fs::write(&git_path, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = fs::metadata(&git_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&git_path, perms).unwrap();
+
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("`git` not on PATH").not());
 }

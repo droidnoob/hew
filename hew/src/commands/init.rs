@@ -5,7 +5,9 @@ use clap::Args as ClapArgs;
 use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::error::HewError;
+use hew_core::git::RealGit;
 use hew_core::install::{self, Runtime};
+use hew_core::os::{self, OsKind};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -65,6 +67,8 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     let bd = ensure_bd(ctx)?;
     run_bd_init(&bd, &project_root, args.prefix.as_deref())?;
+
+    ensure_git(ctx);
 
     if !args.git_track {
         let _ = install::ensure_beads_gitignored(&project_root)
@@ -218,6 +222,71 @@ fn run_streaming(cmd: &mut std::process::Command) -> std::io::Result<()> {
         return Err(std::io::Error::other(format!("exit {:?}", status.code())));
     }
     Ok(())
+}
+
+/// Git is *optional* for hew. Detect, then per DECISION:git-install-policy:
+///
+/// - Present → no-op.
+/// - Missing + non-interactive → warn that auto-branching will be skipped.
+/// - Missing + interactive → ask. On yes, try the sudo-free path (brew on
+///   macOS); on no sudo-free path, print the distro install hint and let
+///   the user run it themselves. Never invoke sudo. Never fail init.
+fn ensure_git(ctx: &Ctx) {
+    if RealGit::is_available() {
+        return;
+    }
+
+    if !ctx.interactive {
+        if !ctx.quiet {
+            eprintln!(
+                "hew init: `git` not on PATH — auto-branching will be skipped. \
+                 Install git and re-run if you want hew-execute to manage branches."
+            );
+        }
+        return;
+    }
+
+    let os = os::detect_os();
+    let hint = os::git_install_hint(&os);
+
+    use inquire::Confirm;
+    let prompt = match Confirm::new("`git` is not on PATH. Try to install it?")
+        .with_default(true)
+        .with_help_message(&format!("Suggested: {hint}"))
+        .prompt()
+    {
+        Ok(v) => v,
+        Err(_) => {
+            // User aborted (ESC/Ctrl-C). Treat as "no" and continue.
+            eprintln!("hew init: continuing without git.");
+            return;
+        }
+    };
+    if !prompt {
+        eprintln!("hew init: skipping git install. Run `{hint}` yourself if you change your mind.");
+        return;
+    }
+
+    match os::try_install_git_sudo_free(&os) {
+        Ok(true) => {
+            if !ctx.quiet {
+                eprintln!("hew init: git installed.");
+            }
+        }
+        Ok(false) => {
+            // No sudo-free path on this OS — print the hint, don't run sudo.
+            eprintln!(
+                "hew init: this OS needs sudo to install git. Run the following yourself, then re-run hew if you want auto-branching:\n  {hint}"
+            );
+            // Special-case the macOS-without-brew message for clarity.
+            if matches!(os, OsKind::MacOs) {
+                eprintln!("  (or install Homebrew first: https://brew.sh)");
+            }
+        }
+        Err(e) => {
+            eprintln!("hew init: git install attempt failed: {e}. Continuing without git.");
+        }
+    }
 }
 
 fn run_bd_init(
