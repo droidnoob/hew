@@ -355,8 +355,23 @@ const SECTION_START: &str =
     "<!-- HEW:BEGIN — do not edit between the markers; managed by `hew install` -->";
 const SECTION_END: &str = "<!-- HEW:END -->";
 
+/// Top-of-bundle directive for runtimes without a SessionStart hook
+/// equivalent (Cursor, Windsurf, Codex, Generic). Tells the agent to
+/// run `hew prime resume` as its first action in every new session so
+/// it inherits project state + the latest CHECKPOINT.
+const RESUME_DIRECTIVE: &str = "\
+# On every new session\n\
+\n\
+Run `hew prime resume` as your first action. It emits a JSON document with\n\
+project state, STATUS flags, categorized memories, and the most recent\n\
+CHECKPOINT. Read that before doing anything else — otherwise you are\n\
+flying blind after `/clear`, session compaction, or a fresh shell.\n\
+\n\
+---\n\n";
+
 fn bundle_all_skills() -> String {
     let mut buf = String::new();
+    buf.push_str(RESUME_DIRECTIVE);
     buf.push_str(skills::INDEX.body);
     buf.push_str("\n\n---\n\n");
     for s in skills::all() {

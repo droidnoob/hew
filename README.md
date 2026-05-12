@@ -108,6 +108,32 @@ Routes to `/hew:quick` — one task, one commit, no plan/decompose
 overhead. Escalates back to `/hew:plan` if the fix turns out to be
 bigger than expected.
 
+## Session resume
+
+Agent context dies on `/clear`, on session compaction, or when you
+start a new shell. Hew restores it automatically so you don't have
+to brief the agent twice.
+
+**Claude Code.** `hew init --runtime=claude` writes a `SessionStart`
+hook into `.claude/settings.json`. On every session entry (startup,
+resume, clear) the hook runs `hew prime resume`, which emits a JSON
+document with project state, `STATUS:` flags, categorized memories,
+and the most recent `CHECKPOINT:`. The agent reads that on first
+turn — no manual `/hew:prime` step needed. The hook entry carries a
+`hew_managed: true` flag so re-running `hew init` replaces it in
+place rather than duplicating.
+
+**Cursor, Codex, Windsurf, Generic.** No `SessionStart` equivalent
+yet. The adapter file (`.cursorrules`, `.windsurfrules`, `AGENTS.md`,
+`CLAUDE.md`) carries a top-of-section instruction telling the agent
+to run `hew prime resume` as its first action in any new session.
+Same effect, one extra read.
+
+**Saving state before `/clear`.** Use `/hew:checkpoint` to dump
+in-flight session state (current task, files touched, open
+hypotheses, next moves) into a `CHECKPOINT:` memory. The next
+session's `hew prime resume` surfaces it under `latest_checkpoint`.
+
 ## Removing hew
 
 Easy to walk away from. `hew uninstall` reverses everything `hew init`

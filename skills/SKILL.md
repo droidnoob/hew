@@ -14,6 +14,12 @@ On every session, run `hew prime <skill>` before invoking that skill. `hew prime
 returns one JSON blob with: project state, `STATUS:` flags, prerequisites,
 unblocked tasks (`bd ready`), categorized memories, and the embedded skill body.
 
+**Session resume.** In Claude Code, `hew init` installs a `SessionStart` hook
+that runs `hew prime resume` automatically on every session entry (startup,
+resume, clear). The first turn you take already has project state, the latest
+`CHECKPOINT:`, and all memories in context — no manual prime needed. Use
+`/hew:checkpoint` before `/clear` to save in-flight state for the next session.
+
 If the user describes intent in plain English, route by intent:
 
 | User says | Skill |
