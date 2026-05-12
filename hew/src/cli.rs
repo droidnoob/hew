@@ -121,4 +121,8 @@ pub enum Command {
 
     /// Epic operations: show, tree, close, audit, summary.
     Epic(crate::commands::epic::Args),
+
+    /// Memory compaction: apply a CompactPlan from stdin, or survey
+    /// per-prefix memory counts. See skills/optional/hew-compact.md.
+    Compact(crate::commands::compact::Args),
 }
