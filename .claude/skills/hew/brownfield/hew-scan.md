@@ -35,6 +35,26 @@ entirely.
   discoveries. Don't duplicate; extend.
 - The current working directory is the project root.
 
+## Ask once: how detailed should the memories be?
+
+Before starting the scan, ask the user — using the host's choice
+picker (`AskUserQuestion` in Claude Code; equivalent elsewhere) —
+which depth applies to this codebase:
+
+- **Terse** — one-line facts only. Best for small projects, quick
+  onboarding, or projects where the user already knows the
+  architecture and just wants the agent to inherit it.
+- **Balanced** (default) — short for simple facts (tech stack,
+  layout) and detailed where the fact warrants it (gotchas,
+  boundaries, complex coupling).
+- **Detailed** — multi-paragraph for non-trivial facts, code-sample
+  inclusion welcome. Best for projects the agent will work in
+  heavily over multiple sessions.
+
+The choice applies to the *whole brownfield chain* (this scan plus
+the convention / audit / boundary skills that follow). Do not ask
+again per-step.
+
 ## The scan loop
 
 ```
@@ -54,32 +74,45 @@ Each step produces zero or more `bd remember` calls. Each memory is a
 short, self-contained fact. **One fact per memory.** "FastAPI" is one
 fact; "FastAPI + SQLAlchemy + Postgres" is three.
 
-## Memory shape — short, scannable, self-contained
+## Memory shape — one fact per memory, as long as the fact demands
 
-Good memories:
+Each memory is one self-contained fact. **Length is whatever that
+fact needs.** A tech-stack line is one sentence; a non-obvious
+gotcha with a code sample is several. No padding either way.
+
+Good (terse — single facts):
 
 ```
-bd remember "Backend: FastAPI 0.115 on uvicorn; entry point app/main.py."
+bd remember "Backend: FastAPI 0.115 on uvicorn; entry app/main.py."
 bd remember "ORM: SQLAlchemy 2.x async; session factory in app/db/session.py."
-bd remember "DB: Postgres 16, Alembic for migrations under alembic/versions/."
 bd remember "Auth: JWT (jose) with refresh rotation; middleware in app/auth/middleware.py."
-bd remember "Frontend: Next.js 14 app router; Tailwind + shadcn/ui; pnpm."
 ```
 
-Bad memories:
+Good (detailed — the fact warrants depth):
 
 ```
-# Too vague:
+bd remember "BOUNDARY:webhook/stripe — POST /api/v1/webhooks/stripe accepts the raw body with Stripe-Signature header. Idempotency-key consumed via app/middleware/idempotency.py; replays return 200 + cached response. Verify signature BEFORE reading body. Five frontend consumers depend on the redirect-back behavior; do not change."
+
+bd remember "GOTCHA:order.create — order_service.create() implicitly creates an Invoice via signals/post_save (app/signals/order.py:18). Not visible from the route; mocking the order service alone in tests leaves dangling Invoice rows. Use the factory in tests/factories/order_with_invoice.py instead."
+```
+
+Bad:
+
+```
+# Too vague (no information):
 bd remember "Backend uses Python."
 
-# Too compound (should be 4 memories):
+# Too compound (multiple facts in one memory — split):
 bd remember "Uses FastAPI, SQLAlchemy, Postgres, Redis, structlog, pydantic, alembic, pytest, and Docker for deployment."
 
-# Too narrative:
-bd remember "The backend is a FastAPI application that was originally written as a Flask service and then migrated. It has gone through several iterations of the ORM layer, currently using SQLAlchemy 2.x..."
+# Padding without information:
+bd remember "The backend is a FastAPI application that was originally
+written as a Flask service and then migrated. It has gone through
+several iterations of the ORM layer, currently using SQLAlchemy 2.x..."
 ```
 
-Length target: 1–3 sentences, plus optional file path in backticks.
+Rule of thumb: one fact per memory; trim everything that doesn't add
+information; otherwise use the length you need.
 
 ## Step 1 — Tech stack
 
@@ -270,14 +303,22 @@ auth?" — add more memories targeting those gaps.
 
 ## Hand-off
 
+The brownfield onboarding chain is `hew-scan → hew-convention →
+hew-audit → hew-boundary`. Run it through without pausing between
+skills. Stopping after each step to ask the user "continue?" defeats
+the chain — they already invoked the chain.
+
 When the scan is complete:
 
-1. Print the count of memories created, grouped by content step.
-2. Tell the user: "Scan complete. Run `hew-convention` next to extract
-   `CONVENTION:` rules from existing code."
-3. Write `STATUS:scan:complete`.
-4. Stop. Don't continue into `hew-convention` automatically — it's a
-   distinct skill the user invokes explicitly.
+1. Write `STATUS:scan:complete`.
+2. Print a one-line summary: "Scan complete: N memories across X
+   content steps."
+3. **Continue directly into `hew-convention`.** Do not stop unless
+   the user explicitly asked for "scan only" or you hit a Rule-4
+   architectural surprise that needs human input.
+
+Standalone `/hew:scan` invocations (when that command exists) are
+the only case where scan stops here.
 
 ## Anti-patterns
 

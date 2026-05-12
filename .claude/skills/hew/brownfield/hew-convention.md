@@ -281,11 +281,12 @@ This signals downstream skills that conventions are usable.
 
 When extraction is complete:
 
-1. Print the count of `CONVENTION:` memories created, grouped by area.
-2. Tell the user: "Convention extraction complete. The executor will
-   now treat these as mandatory constraints. Run `hew-audit` and
-   `hew-boundary` to finish brownfield onboarding."
-3. Write `STATUS:convention:complete`.
+1. Write `STATUS:convention:complete`.
+2. Print a one-line summary: "Conventions extracted: N rules across
+   X areas."
+3. **Continue directly into `hew-audit`.** The brownfield onboarding
+   chain is `scan → convention → audit → boundary`; stop only at the
+   end of the chain or on a Rule-4 surprise.
 
 ## Anti-patterns
 

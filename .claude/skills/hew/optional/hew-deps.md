@@ -7,14 +7,17 @@ init: hew prime deps
 
 # hew-deps — Inspect a Candidate New Dependency
 
-You vet a library *before* the executor adds it to the project. This
-exists because the most predictable AI agent failure is picking a
-library version from training data that's been deprecated, vulnerable,
-or replaced for two years.
+You vet a library *before* the executor adds it. You — the agent —
+do the inspection: look up the package on its registry, check
+maintenance signals, look for CVEs, read the license. Tools are
+optional. The verdict is yours.
 
-You run on a specific package name + version (or "latest"). You return
-a recommendation: **adopt**, **adopt with caveats**, or **reject** —
-plus a `DEP:` memory persisting the verdict.
+This exists because the most predictable AI agent failure is picking
+a library version from training data that has been deprecated,
+vulnerable, or replaced for two years.
+
+You return a recommendation — **adopt**, **adopt with caveats**, or
+**reject** — and persist a `DEP:` memory.
 
 ## When this skill runs
 
@@ -26,21 +29,28 @@ plus a `DEP:` memory persisting the verdict.
 
 ## Inputs from `hew prime deps`
 
-- `memories.dep` — prior verdicts on this package. If already evaluated
-  and the version is the same, return the cached verdict.
+- `memories.dep` — prior verdicts on this package. If already
+  evaluated and the requested version is the same, return the
+  cached verdict.
 - `memories.audit` — if this package already appears as an `AUDIT:`
-  finding, treat as a rejection signal.
+  finding (deprecated / CVE / etc.), treat as a strong reject
+  signal.
 
 You also get the **package name** and an **optional version**.
 
-## The check
+## What to do
 
-For each candidate, look at:
+For each candidate, the agent investigates seven dimensions:
 
 ### 1. Existence and authenticity
 
-- Resolve the package on its registry. **Never assume a name exists.**
-  Hallucinated package names are how supply-chain attacks land.
+- **Resolve the package on its registry**:
+  - `crates.io/crates/<name>`
+  - `npmjs.com/package/<name>`
+  - `pypi.org/project/<name>`
+  - `pkg.go.dev/<module>`
+- **Never assume a name exists.** Hallucinated package names are how
+  supply-chain attacks land.
 - If the name doesn't resolve, **STOP** and tell the user. Do not
   suggest "did you mean ..." substitutions — that's exactly the
   attack vector typo-squatters rely on.
@@ -48,29 +58,24 @@ For each candidate, look at:
 ### 2. Latest stable
 
 - Identify the latest stable version (not pre-release, not RC).
-- If the user requested an old version, note the drift and the reason
-  to use latest (usually: yes).
+- If the user requested an old version, note the drift and the
+  reason latest is preferred (usually: yes).
 
 ### 3. Maintenance signal
 
-- Last publish date — > 24 months = concerning.
+- Last publish date — > 24 months without releases is concerning
+  unless the lib is genuinely "done" (e.g., small, focused, no
+  ecosystem churn).
 - Open issues count + age of oldest unresponded.
-- Recent commit activity in the repo (if linked).
+- Recent commit activity in the linked repo.
 - Number of maintainers.
-
-A library with 50M downloads/month and one publish 3 years ago is
-still probably fine (it's "done"). A library with 200 downloads and no
-publishes in 18 months is dead.
 
 ### 4. Vulnerabilities
 
-- Query the language's advisory database:
-  - npm: `npm audit <package>@<version>` or registry advisories page
-  - Python: `pip-audit` / Safety DB
-  - Rust: `cargo audit` / RustSec
-  - Go: `govulncheck`
-- Any CVE ≥ Medium that affects the requested version = reject (or
-  bump to a patched version).
+- Check the language's advisory channel (registry advisories tab,
+  RustSec, npm advisories, PyPI advisories, govulncheck data).
+- Any CVE ≥ Medium against the requested version = reject (or bump
+  to a patched version).
 
 ### 5. License
 
@@ -83,14 +88,53 @@ publishes in 18 months is dead.
 ### 6. Breaking-change history
 
 If migrating from an older major to the latest stable, skim the
-changelog for the breaking changes. Surface the relevant ones; the
+changelog for the relevant breaking changes. Surface them; the
 executor will adapt the code.
 
-### 7. Bundle size / install weight
+### 7. Bundle size / install weight (frontend only)
 
-Optional but useful for frontend deps. If the lib adds > 100KB
-gzipped and is only used in one place, suggest a lighter alternative
-or vendor the small piece you need.
+If the lib adds > 100KB gzipped and is only used in one place,
+suggest a lighter alternative or vendor the small piece you need.
+
+## How to gather this information — web first, always
+
+Your training data is stale by months to years. For dependency
+evaluation that's not acceptable; versions move and advisories
+accumulate. The canonical mechanism is **web search**, every time.
+
+The agent's order of operations:
+
+1. **Fetch the registry page** for the package:
+   - `crates.io/crates/<name>` (Rust)
+   - `npmjs.com/package/<name>` (Node)
+   - `pypi.org/project/<name>` (Python)
+   - `pkg.go.dev/<module>` (Go)
+   - `rubygems.org/gems/<name>` (Ruby)
+
+   Read: latest stable version, last publish date, license,
+   deprecation banner (if any), download counts.
+
+2. **Open the linked source repo** (usually GitHub). Read:
+   - README header — explicit "use X instead" / "deprecated"
+     pointers
+   - Pinned issues — security notices, sponsorship status
+   - Recent commit activity — is the repo alive?
+   - Number of contributors / maintainers
+
+3. **Search the advisory database** for known CVEs against the
+   requested version (RustSec, GHSA, PyPI advisories, npm
+   advisories).
+
+4. **Search the web** for "<package> deprecated", "<package>
+   alternative", "<package> CVE" to catch anything the registry
+   buries.
+
+Only after that synthesis do you commit to a verdict. Anything
+shorter is guessing.
+
+Don't install scanner tools just to evaluate one dep. If the project
+already has `cargo-deny`, `snyk`, or `npm audit` configured, their
+output is corroboration; the agent's web-driven analysis is primary.
 
 ## Memory shape
 
@@ -141,14 +185,16 @@ hew-deps: fancy-utils@9.99.0 — DOES NOT EXIST
   one doesn't exist. The risk of installing malware is too high.
 - **Trust training-data version numbers** without checking the
   registry. Versions move; advisories accumulate.
+- **Install audit tooling** just to evaluate a single dep. The
+  agent has direct registry access; use it.
 - **Approve "for now, we'll switch later."** If you adopt with
   caveats, the caveats become tasks.
 
 ## Anti-patterns
 
-- **Approving a dep with a 3-year-old last publish** without checking
-  whether it's a finished library or an abandoned one.
+- **Approving a dep with a 3-year-old last publish** without
+  checking whether it's a finished library or an abandoned one.
 - **Skipping the license check** because "it's open source." GPL on
   a commercial codebase is a real problem.
-- **Recommending alternatives without verifying them too.** Run the
-  full check on the suggested replacement.
+- **Recommending alternatives without verifying them.** Run the
+  full check on the suggested replacement too.
