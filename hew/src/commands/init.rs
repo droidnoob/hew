@@ -25,8 +25,9 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Scope::Local)]
     pub scope: Scope,
 
-    /// How to install `bd` if missing. Only `skip` is honored automatically;
-    /// `brew`/`curl` print instructions and exit non-zero.
+    /// How to install `bd` if missing. `brew` runs `brew install beads`,
+    /// `curl` pipes the beads.sh installer through sh, `skip` errors out
+    /// asking the user to install Beads themselves.
     #[arg(long, value_enum, default_value_t = InstallBd::Skip)]
     pub install_bd: InstallBd,
 
@@ -161,21 +162,85 @@ fn resolve_install_root(scope: Scope, project_root: &std::path::Path) -> miette:
 }
 
 fn ensure_bd(ctx: &Ctx, mode: InstallBd) -> miette::Result<RealBd> {
-    match RealBd::discover() {
-        Ok(bd) => Ok(bd),
-        Err(HewError::BdNotFound) => {
-            let hint = match mode {
-                InstallBd::Brew => "run `brew install beads` and re-run hew init",
-                InstallBd::Curl => "run `curl -sSL https://beads.sh/install | sh` and re-run",
-                InstallBd::Skip => "install `bd` (https://gastownhall.github.io/beads/) and re-run",
-            };
-            if !ctx.quiet {
-                eprintln!("hew init needs `bd` on PATH — {hint}");
-            }
-            Err(HewError::BdNotFound.into())
-        }
-        Err(e) => Err(e.into()),
+    if let Ok(bd) = RealBd::discover() {
+        return Ok(bd);
     }
+
+    // bd is missing. Honor --install-bd by actually installing.
+    if !ctx.quiet {
+        eprintln!("hew init: `bd` not on PATH.");
+    }
+    match mode {
+        InstallBd::Brew => install_via_brew(ctx)?,
+        InstallBd::Curl => install_via_curl(ctx)?,
+        InstallBd::Skip => {
+            if !ctx.quiet {
+                eprintln!(
+                    "  -> skipping auto-install. Install Beads and re-run, or pass --install-bd=brew|curl."
+                );
+                eprintln!("     docs: https://gastownhall.github.io/beads/");
+            }
+            return Err(HewError::BdNotFound.into());
+        }
+    }
+
+    RealBd::discover().map_err(|_| {
+        miette::miette!(
+            "auto-install ran but `bd` still isn't on PATH. Try opening a new shell so PATH refreshes, then re-run `hew init`."
+        )
+    })
+}
+
+fn install_via_brew(ctx: &Ctx) -> miette::Result<()> {
+    if which::which("brew").is_err() {
+        return Err(miette::miette!(
+            "--install-bd=brew but `brew` isn't on PATH. Install Homebrew first (https://brew.sh) or pass --install-bd=curl."
+        ));
+    }
+    if !ctx.quiet {
+        eprintln!("  -> brew install beads");
+    }
+    run_streaming(std::process::Command::new("brew").args(["install", "beads"]))
+        .map_err(|e| miette::miette!("brew install beads failed: {e}"))
+}
+
+fn install_via_curl(ctx: &Ctx) -> miette::Result<()> {
+    if which::which("curl").is_err() {
+        return Err(miette::miette!("--install-bd=curl but `curl` isn't on PATH."));
+    }
+    if which::which("sh").is_err() {
+        return Err(miette::miette!("--install-bd=curl but `sh` isn't on PATH."));
+    }
+    if !ctx.quiet {
+        eprintln!("  -> curl -sSL https://beads.sh/install | sh");
+    }
+    // Pipe curl into sh. Manual two-stage so we can stream both stdouts.
+    let mut curl = std::process::Command::new("curl")
+        .args(["-sSL", "https://beads.sh/install"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| miette::miette!("spawn curl: {e}"))?;
+    let curl_stdout = curl.stdout.take().expect("piped");
+    let sh_status = std::process::Command::new("sh")
+        .stdin(curl_stdout)
+        .status()
+        .map_err(|e| miette::miette!("spawn sh: {e}"))?;
+    let curl_status = curl.wait().map_err(|e| miette::miette!("wait curl: {e}"))?;
+    if !curl_status.success() {
+        return Err(miette::miette!("curl exited {:?}", curl_status.code()));
+    }
+    if !sh_status.success() {
+        return Err(miette::miette!("beads install script exited {:?}", sh_status.code()));
+    }
+    Ok(())
+}
+
+fn run_streaming(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!("exit {:?}", status.code())));
+    }
+    Ok(())
 }
 
 fn run_bd_init(
