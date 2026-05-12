@@ -112,4 +112,7 @@ pub enum Command {
 
     /// Task operations: show, list, claim, close, new, reopen, children, note, search.
     Task(crate::commands::task::Args),
+
+    /// Dependency operations: add, remove, tree, blocked.
+    Dep(crate::commands::dep::Args),
 }

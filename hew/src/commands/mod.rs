@@ -6,6 +6,7 @@ pub mod branch;
 pub mod check;
 pub mod completions;
 pub mod config;
+pub mod dep;
 pub mod doctor;
 pub mod init;
 pub mod manpage;
@@ -43,5 +44,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Branch(a) => branch::run(&ctx, a),
         Command::Review(a) => review::run(&ctx, a),
         Command::Task(a) => task::run(&ctx, a),
+        Command::Dep(a) => dep::run(&ctx, a),
     }
 }
