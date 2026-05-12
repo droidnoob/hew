@@ -96,6 +96,22 @@ pub struct MemoryBuckets {
     pub security: Vec<String>,
     pub migration: Vec<String>,
     pub dep: Vec<String>,
+    /// `PROJECT:` — high-level project facts (what we're building, for
+    /// whom, hard constraints). Written by hew-new-project.
+    #[serde(default)]
+    pub project: Vec<String>,
+    /// `MILESTONE:` — current milestone identity + acceptance window.
+    /// Written by hew-new-project and updated as milestones progress.
+    #[serde(default)]
+    pub milestone: Vec<String>,
+    /// `ROADMAP:` — the milestone chain (ordered list of epics).
+    /// Written by hew-new-project.
+    #[serde(default)]
+    pub roadmap: Vec<String>,
+    /// `RESEARCH:` — investigation findings with provenance tags
+    /// (`[VERIFIED]` / `[CITED]` / `[ASSUMED]`). Written by hew-research.
+    #[serde(default)]
+    pub research: Vec<String>,
     pub factual: Vec<String>,
 }
 
@@ -127,6 +143,14 @@ pub fn categorize(memories: &BTreeMap<String, String>) -> (MemoryBuckets, Status
             buckets.migration.push(value.clone());
         } else if trimmed.starts_with("DEP:") {
             buckets.dep.push(value.clone());
+        } else if trimmed.starts_with("PROJECT:") {
+            buckets.project.push(value.clone());
+        } else if trimmed.starts_with("MILESTONE:") {
+            buckets.milestone.push(value.clone());
+        } else if trimmed.starts_with("ROADMAP:") {
+            buckets.roadmap.push(value.clone());
+        } else if trimmed.starts_with("RESEARCH:") {
+            buckets.research.push(value.clone());
         } else {
             buckets.factual.push(value.clone());
         }
@@ -295,6 +319,24 @@ mod tests {
         assert_eq!(b.security.len(), 1);
         assert_eq!(b.migration.len(), 1);
         assert_eq!(b.dep.len(), 1);
+        assert_eq!(b.factual.len(), 1);
+    }
+
+    #[test]
+    fn categorize_routes_project_milestone_roadmap_research() {
+        let m = map(&[
+            ("p", "PROJECT: building a CRM for solo founders. Stack: TS+Next.js."),
+            ("m", "MILESTONE:foundation — walking skeleton + auth slice."),
+            ("r", "ROADMAP: foundation -> MVP -> hardening -> launch."),
+            ("s", "RESEARCH:auth [VERIFIED] passwordless TTL 15m. Source: NIST."),
+            ("u", "DECISION:db — Postgres. (not routed; stays factual)"),
+        ]);
+        let (b, _) = categorize(&m);
+        assert_eq!(b.project.len(), 1);
+        assert_eq!(b.milestone.len(), 1);
+        assert_eq!(b.roadmap.len(), 1);
+        assert_eq!(b.research.len(), 1);
+        // DECISION: stays in factual until/unless given its own bucket.
         assert_eq!(b.factual.len(), 1);
     }
 
