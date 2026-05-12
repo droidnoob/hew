@@ -68,6 +68,7 @@ via `hew branch new --prefix=<type> --slug=<text>`.
 
 - **hew-deps** — inspect a candidate new library
 - **hew-research** — domain research with web search
+- **hew-spec** — ambiguity gate before planning (Socratic, scored)
 - **hew-quick** — fast mode (one task, no plan/decompose)
 - **hew-security** — lightweight checks on auth/input/secrets
 

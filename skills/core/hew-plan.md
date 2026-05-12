@@ -90,6 +90,23 @@ These are factual decision memories (no special prefix beyond `DECISION:`),
 not `CONVENTION:` rules. They explain *why* the codebase looks the way it
 does. Future work can revisit them; current work treats them as settled.
 
+## Vague-ask gate (optional)
+
+If the user's request lacks an observable outcome or a verifiable
+acceptance signal — "build a thing," "make it better," "add some
+logging" — AND `STATUS:spec:complete` is missing, surface
+`/hew:spec` first via a non-blocking picker:
+
+```
+Your ask looks underspecified. Run /hew:spec first?
+> Yes — score and Socratic-clarify (max 4 rounds)
+  No — proceed; I'll plan against best-effort assumptions
+```
+
+`/hew:spec` writes `SPEC:<topic>` + `STATUS:spec:complete` on pass; on
+4-round-without-pass, it writes `[ASSUMED]` `DECISION:` memories that
+flow into this plan automatically. Either way, planning resumes here.
+
 ## Research-or-decompose — tail picker
 
 Before handing off, ask once: should we research first, or go straight to
