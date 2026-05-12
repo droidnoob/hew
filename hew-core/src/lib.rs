@@ -6,6 +6,7 @@
 pub mod bd;
 pub mod branch;
 pub mod config;
+pub mod craft;
 pub mod ctx;
 pub mod doctor;
 pub mod error;

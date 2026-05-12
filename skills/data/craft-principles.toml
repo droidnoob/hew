@@ -1,0 +1,17 @@
+# Craft-principles catalog for `hew-new-project` Phase C + `hew-plan`
+# refinement + `hew-guard` soft warnings. CR.1 lands the types and
+# this placeholder; CR.2 fills the real catalog.
+#
+# Schema: see hew_core::craft::CraftPrinciple. Exposed via
+# `hew schema craft-principles`.
+
+[[principles]]
+id = "placeholder"
+name = "Placeholder (CR.1)"
+category = "code-level"
+summary = "Replaced by CR.2's full catalog (SOLID, CUPID, DRY, KISS, YAGNI, SoC, CoI, Law of Demeter, Clean Architecture, Hexagonal, DDD, CQRS, Event Sourcing, Immutability, Idempotence, Fail Fast, Rule of Three, Unix Philosophy, Boy Scout Rule, Principle of Least Astonishment)."
+when_to_apply = "Never — this is a CR.1 placeholder so the embedded TOML parses."
+when_not_to_apply = "Always — CR.2 deletes this entry."
+conflicts_with = []
+example = "n/a"
+default_for_stacks = []

@@ -76,3 +76,12 @@ fn schema_stacks_emits_stack_table() {
     assert_eq!(parsed["title"], "StackTable");
     assert!(parsed["properties"]["stacks"].is_object());
 }
+
+#[test]
+fn schema_craft_principles_emits_craft_table() {
+    let out =
+        hew().args(["schema", "craft-principles"]).assert().success().get_output().stdout.clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(parsed["title"], "CraftTable");
+    assert!(parsed["properties"]["principles"].is_object());
+}

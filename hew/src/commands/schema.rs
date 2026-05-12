@@ -29,6 +29,8 @@ pub enum Which {
     NewTask,
     /// Schema for the embedded stack-conventions table (StackTable).
     Stacks,
+    /// Schema for the embedded craft-principles table (CraftTable).
+    CraftPrinciples,
 }
 
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
@@ -42,6 +44,7 @@ pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
         Which::TaskListFilter => schema_for!(hew_core::tasks::TaskListFilter),
         Which::NewTask => schema_for!(hew_core::tasks::NewTaskArgs),
         Which::Stacks => schema_for!(hew_core::stacks::StackTable),
+        Which::CraftPrinciples => schema_for!(hew_core::craft::CraftTable),
     };
     let json = serde_json::to_string_pretty(&schema)
         .map_err(|e| miette::miette!("serialize schema: {e}"))?;
