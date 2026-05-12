@@ -59,6 +59,118 @@ pub struct InstallPlan {
     pub written: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct UninstallPlan {
+    pub runtime: Runtime,
+    pub root: PathBuf,
+    pub removed: Vec<PathBuf>,
+}
+
+/// Reverse what `install` wrote. Idempotent: missing paths are no-ops.
+/// Never touches `.beads/`, `.gitignore`, or any file not owned by hew.
+pub fn uninstall(runtime: Runtime, root: &Path) -> Result<UninstallPlan> {
+    let removed = match runtime {
+        Runtime::Claude => uninstall_claude(root)?,
+        Runtime::Cursor => uninstall_single_file(root, ".cursorrules")?,
+        Runtime::Windsurf => uninstall_single_file(root, ".windsurfrules")?,
+        Runtime::Codex => uninstall_codex(root)?,
+        Runtime::Generic => uninstall_generic(root)?,
+    };
+    Ok(UninstallPlan { runtime, root: root.to_path_buf(), removed })
+}
+
+fn uninstall_claude(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let skills_dir = root.join(".claude").join("skills").join("hew");
+    if skills_dir.exists() {
+        fs::remove_dir_all(&skills_dir)?;
+        removed.push(skills_dir);
+    }
+    let commands_dir = root.join(".claude").join("commands").join("hew");
+    if commands_dir.exists() {
+        fs::remove_dir_all(&commands_dir)?;
+        removed.push(commands_dir);
+    }
+    Ok(removed)
+}
+
+fn uninstall_single_file(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
+    let path = root.join(name);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let stripped = remove_marked_section(&fs::read_to_string(&path)?);
+    if stripped.trim().is_empty() {
+        // File only contained our section — remove the file entirely.
+        fs::remove_file(&path)?;
+    } else {
+        fs::write(&path, stripped)?;
+    }
+    Ok(vec![path])
+}
+
+fn uninstall_codex(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    let agents_dir = root.join(".codex").join("agents");
+    if agents_dir.exists() {
+        for entry in fs::read_dir(&agents_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("hew-") && name.ends_with(".toml") {
+                fs::remove_file(entry.path())?;
+                removed.push(entry.path());
+            }
+        }
+        // Tidy: remove agents_dir if now empty.
+        if fs::read_dir(&agents_dir)?.next().is_none() {
+            let _ = fs::remove_dir(&agents_dir);
+        }
+    }
+    // Strip section from AGENTS.md (or delete if only hew owned it).
+    removed.extend(uninstall_single_file(root, "AGENTS.md")?);
+    Ok(removed)
+}
+
+fn uninstall_generic(root: &Path) -> Result<Vec<PathBuf>> {
+    // Generic install overwrites CLAUDE.md wholesale (no marker section).
+    // Only safe action is to delete if the body matches what we'd write.
+    // Otherwise leave it for the user — never clobber unknown content.
+    let path = root.join("CLAUDE.md");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(&path)?;
+    if body == bundle_all_skills() {
+        fs::remove_file(&path)?;
+        return Ok(vec![path]);
+    }
+    // User modified it — leave alone.
+    Ok(Vec::new())
+}
+
+/// Strip the HEW:BEGIN/END marker section from a file's contents.
+/// Returns the remaining content (caller decides whether to write or delete).
+fn remove_marked_section(existing: &str) -> String {
+    let Some(start) = existing.find(SECTION_START) else {
+        return existing.to_string();
+    };
+    let Some(end) = existing.find(SECTION_END) else {
+        return existing.to_string();
+    };
+    let end_with_marker = end + SECTION_END.len();
+    let mut next = String::with_capacity(existing.len());
+    next.push_str(&existing[..start]);
+    // Skip the section + a single trailing newline.
+    let remainder = &existing[end_with_marker..];
+    let remainder = remainder.strip_prefix('\n').unwrap_or(remainder);
+    next.push_str(remainder);
+    // Trim two-or-more trailing newlines that the removal may leave behind.
+    while next.ends_with("\n\n") {
+        next.pop();
+    }
+    next
+}
+
 /// Write every shipped skill into the runtime's directory.
 pub fn install(runtime: Runtime, root: &Path) -> Result<InstallPlan> {
     let written = match runtime {
@@ -266,8 +378,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Claude, tmp.path()).expect("install");
         assert_eq!(plan.runtime, Runtime::Claude);
-        // 1 SKILL.md + 14 skills + 23 slash commands = 38 files.
-        assert_eq!(plan.written.len(), 38);
+        // 1 SKILL.md + 15 skills + 24 slash commands = 40 files.
+        assert_eq!(plan.written.len(), 40);
 
         let hew_root = tmp.path().join(".claude").join("skills").join("hew");
         assert!(hew_root.join("SKILL.md").exists());
@@ -344,8 +456,8 @@ mod tests {
     fn install_codex_writes_per_skill_toml_and_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Codex, tmp.path()).expect("install");
-        // 14 skills + AGENTS.md
-        assert_eq!(plan.written.len(), 15);
+        // 15 skills + AGENTS.md
+        assert_eq!(plan.written.len(), 16);
         let agents = tmp.path().join(".codex").join("agents");
         assert!(agents.join("hew-execute.toml").exists());
         assert!(agents.join("hew-scan.toml").exists());

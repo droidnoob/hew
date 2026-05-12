@@ -67,6 +67,7 @@ pub const CORE: &[Skill] = &[
     skill!("hew-execute", Category::Core, "core/hew-execute.md"),
     skill!("hew-verify", Category::Core, "core/hew-verify.md"),
     skill!("hew-guard", Category::Core, "core/hew-guard.md"),
+    skill!("hew-checkpoint", Category::Core, "core/hew-checkpoint.md"),
 ];
 
 pub const BROWNFIELD: &[Skill] = &[
@@ -104,14 +105,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ship_one_index_plus_fourteen_skills() {
+    fn ship_one_index_plus_fifteen_skills() {
         let all = all();
-        assert_eq!(all.len(), 1 + 14, "expected SKILL.md + 14 skills, got {}", all.len());
+        assert_eq!(all.len(), 1 + 15, "expected SKILL.md + 15 skills, got {}", all.len());
     }
 
     #[test]
     fn category_counts_match_spec() {
-        assert_eq!(CORE.len(), 5);
+        assert_eq!(CORE.len(), 6);
         assert_eq!(BROWNFIELD.len(), 5);
         assert_eq!(OPTIONAL.len(), 4);
     }

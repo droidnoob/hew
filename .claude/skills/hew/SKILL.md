@@ -43,7 +43,6 @@ always says what to do next. `bd close` marks it done. Nothing else is required.
 - **hew-execute** — the work loop
 - **hew-verify** — end-to-end verification after a batch closes
 - **hew-guard** — pre-close sanity gate (lint, secrets, conventions)
-- **hew-checkpoint** — save in-flight session state before context reset
 
 ### Brownfield (for existing codebases)
 

@@ -26,7 +26,7 @@ Hew inverts that. Beads is the graph. The agent queries it.
   `hew-convention`, `hew-audit`, `hew-boundary`) maps an existing
   codebase into discrete `bd remember` facts before any planning
   starts.
-- **One binary, no runtime in your repo.** 14 skill markdown files
+- **One binary, no runtime in your repo.** 15 skill markdown files
   installed into your agent runtime's skill directory. No 41-file
   workflow system, no 22 specialised sub-agents.
 
@@ -65,7 +65,7 @@ hew init
 ```
 
 `hew init` detects your agent runtime (Claude Code, Cursor, Codex,
-Windsurf), runs `bd init`, installs the 14 skills + 23 slash commands,
+Windsurf), runs `bd init`, installs the 15 skills + 24 slash commands,
 and gitignores `.beads/`. It's non-interactive by default — override
 with `--runtime=...`, `--scope=...`, `--git-track`, `--prefix=...`.
 
@@ -108,16 +108,32 @@ Routes to `/hew:quick` — one task, one commit, no plan/decompose
 overhead. Escalates back to `/hew:plan` if the fix turns out to be
 bigger than expected.
 
+## Removing hew
+
+Easy to walk away from. `hew uninstall` reverses everything `hew init`
+wrote, runtime-by-runtime, while leaving your Beads graph and
+`.gitignore` intact:
+
+```sh
+hew uninstall                  # remove skills + slash commands
+hew uninstall --runtime=claude # specific runtime
+hew uninstall --purge --yes    # also drop .beads/ (destructive)
+```
+
+Single-file adapters (`.cursorrules`, `.windsurfrules`, `AGENTS.md`)
+keep any user content outside the `HEW:BEGIN/HEW:END` markers — only
+the hew section is removed.
+
 ## What ships
 
 - **`hew` CLI** — `init`, `prime`, `status`, `doctor`, `config`,
   `schema`, `update`, `completions`, `manpage`. Every command supports
   `--json` and `--non-interactive`.
-- **14 skills + 1 index** under [`skills/`](./skills) — installed
+- **15 skills + 1 index** under [`skills/`](./skills) — installed
   verbatim into the agent runtime.
-- **23 slash commands** under [`commands/`](./commands) — `/hew:plan`,
+- **24 slash commands** under [`commands/`](./commands) — `/hew:plan`,
   `/hew:next`, `/hew:auto`, `/hew:quick`, `/hew:verify`, `/hew:ship`,
-  `/hew:doctor`, …
+  `/hew:checkpoint`, `/hew:doctor`, …
 
 ## Where to go next
 

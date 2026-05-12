@@ -1,0 +1,135 @@
+<!-- hew:version=0.1.0 -->
+---
+name: hew-plan
+category: core
+init: hew prime plan
+---
+
+# hew-plan — Strategic Planning
+
+You are turning a user's request into an executable plan. The plan is the
+*thinking*, not the *graph*. `hew-decompose` turns this thinking into Beads
+tasks. Your job ends at "here is the architecture, the order, and what good
+looks like."
+
+## When this skill runs
+
+- User describes a goal in plain English ("build me X", "add Y to this repo").
+- `STATUS:plan` is not `complete`, or the user explicitly asks to re-plan.
+- The Beads graph for this work does not yet exist (no epic, no tasks). If one
+  exists, you are probably looking for `hew-decompose` (to extend it) or
+  `hew-execute` (to start working).
+
+## Inputs you get from `hew prime plan`
+
+- `project.bd_version` and `beads_initialized` — confirms `bd` is wired up.
+- `memories.factual` — what the codebase already is (only meaningful on brownfield).
+- `memories.conventions` — `CONVENTION:` rules to respect in your choices.
+- `memories.boundaries` — public interfaces that must not break.
+- `tasks.total` / `tasks.done` — context on what has already been built.
+- `prerequisites` — `met: true` always for `hew-plan` (it is the entry point).
+
+If `factual` and `conventions` are empty and this is a brownfield project, stop
+and tell the user: run `hew-scan` and `hew-convention` first. Planning without
+knowing the codebase produces fiction.
+
+## How to plan — goal-backward, never goal-forward
+
+1. **Restate the goal in one sentence.** If you cannot, ask the user. Do not
+   plan against ambiguity.
+2. **Ask "what must be TRUE when this is done?"** — three to seven verifiable
+   acceptance criteria. These become the verification contract for `hew-verify`
+   and feed into task acceptance criteria.
+3. **Work backwards from each criterion to the slices that produce it.**
+   Resist the urge to start at the bottom (file structure, dependencies). Start
+   at the user-observable outcome and decompose only as far as needed to make
+   the next slice obvious.
+4. **Pick the architecture.** State the major components, their boundaries, and
+   the data that flows between them. One paragraph or one diagram — not more.
+   If you are reaching for a framework, name the version (and check
+   `memories.dep` / `AUDIT:` entries before committing).
+5. **Order the work.** Identify the critical path: what blocks what? Pull
+   parallelizable slices to the side; mark them as such for `hew-decompose`.
+6. **Sketch the graph shape.** You are not creating tasks yet, but you are
+   telling `hew-decompose` what shape to build:
+   - Single feature / small fix → flat task list, no epic wrapper.
+   - One coherent feature → one epic + child tasks.
+   - Multi-feature build → multiple epics, with bonding for sequencing.
+   - Brownfield onboarding work first? → a separate epic that the feature
+     epics depend on.
+
+## Output (what you give back to the user, before invoking `hew-decompose`)
+
+Hold the plan in conversation context — do **not** write a `PLAN.md` file.
+The user sees a short summary; the next skill consumes the details directly
+from the conversation. The summary contains:
+
+- **Goal** (one sentence).
+- **Acceptance criteria** (3–7 bullets, each independently verifiable).
+- **Architecture** (one paragraph, naming components and key choices).
+- **Order of work** (numbered list of slices, critical path called out).
+- **Graph shape** (one of: flat / single epic / multi-epic + bonds).
+- **Open questions** (anything you need from the user before decomposition).
+
+Ask the user to confirm the plan, or to push back on any of it, before handing
+off to `hew-decompose`. Cheap to revise here; expensive to revise once tasks
+are in the graph.
+
+## Decisions you make here, captured as memories
+
+When you commit to non-obvious choices, persist them so future sessions inherit
+the reasoning:
+
+```
+bd remember "DECISION:auth — JWT with 15min access + 7d refresh in httpOnly cookies. Reason: SPA + mobile share the API."
+bd remember "DECISION:db — Postgres over SQLite because we need RLS for the multi-tenant story."
+bd remember "DECISION:framework — FastAPI over Flask. Async-first, OpenAPI generation, pydantic models reused for DB."
+```
+
+These are factual decision memories (no special prefix beyond `DECISION:`),
+not `CONVENTION:` rules. They explain *why* the codebase looks the way it
+does. Future work can revisit them; current work treats them as settled.
+
+## When to flag a research detour
+
+If a major decision needs investigation (unfamiliar framework, novel domain,
+unknown library landscape), stop planning and surface a research need. The
+user can spawn `hew-research` if they want; otherwise you make a best-effort
+choice and record the uncertainty in a `DECISION:` memory so it can be
+revisited.
+
+## What you don't do
+
+- **No tasks.** That is `hew-decompose`. Do not run `bd create` here.
+- **No code.** Planning produces words and decisions, not files.
+- **No markdown plan files.** State lives in conversation + `bd remember`.
+- **No premature decomposition into 50 tiny steps.** Plans should fit on one
+  screen. If yours is sprawling, your acceptance criteria are too vague.
+- **No assumption-loading without confirmation.** If the user said "build a
+  thing," do not silently assume tech stack, hosting, auth model. Ask.
+
+## Anti-patterns to flag
+
+If the user asks you to plan something where you notice:
+
+- They are reinventing something the codebase already has — point at it
+  (`BOUNDARY:` or factual memories) and propose extending instead.
+- They are about to break a `CONVENTION:` rule — call it out and ask whether
+  the rule should change first.
+- They are working on a brownfield project with empty memories — refuse, run
+  `hew-scan` first. Don't pretend to know the code.
+
+## Hand-off
+
+When the plan is confirmed: "Plan is approved. Calling `hew-decompose` to
+build the Beads graph." Then invoke `hew-decompose` with the plan in context.
+`hew-decompose` will read the same memories, plus the conversation it inherits
+from you, and produce `bd create` / `bd dep add` / `bd mol bond` calls.
+
+After `hew-decompose` finishes, write the phase marker:
+
+```
+bd remember "STATUS:plan:complete — <ISO-8601 timestamp>"
+```
+
+This unblocks every downstream skill's prerequisite check.

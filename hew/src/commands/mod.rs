@@ -2,14 +2,19 @@ use hew_core::Ctx;
 
 use crate::cli::{Cli, Command};
 
+pub mod check;
 pub mod completions;
 pub mod config;
 pub mod doctor;
 pub mod init;
 pub mod manpage;
+pub mod memories;
 pub mod prime;
 pub mod schema;
+pub mod skills;
+pub mod slashes;
 pub mod status;
+pub mod uninstall;
 pub mod update;
 
 pub fn dispatch(cli: Cli) -> miette::Result<()> {
@@ -27,5 +32,10 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Update(a) => update::run(&ctx, a),
         Command::Completions(a) => completions::run(&ctx, a),
         Command::Manpage => manpage::run(&ctx, ()),
+        Command::Check(a) => check::run(&ctx, a),
+        Command::Skills(a) => skills::run(&ctx, a),
+        Command::Commands => slashes::run(&ctx, ()),
+        Command::Memories(a) => memories::run(&ctx, a),
+        Command::Uninstall(a) => uninstall::run(&ctx, a),
     }
 }

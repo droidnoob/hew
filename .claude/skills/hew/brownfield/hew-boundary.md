@@ -164,17 +164,11 @@ hew-boundary scan complete
   43 boundaries recorded
 ```
 
-## Step — mark phase complete + end of chain
+## Step — mark phase complete
 
 ```
 bd remember "STATUS:boundary:complete — <ISO-8601 timestamp>"
 ```
-
-`hew-boundary` is the last step of the brownfield onboarding chain.
-Stop here and hand back to the user (or to whatever skill invoked
-the chain — usually `hew-plan` for "scan and plan a feature"
-intents). Print a one-line chain summary listing the four
-`STATUS:` markers now complete.
 
 ## What you don't do
 

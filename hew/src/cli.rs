@@ -87,4 +87,20 @@ pub enum Command {
 
     /// Print a man page (roff) to stdout.
     Manpage,
+
+    /// Check whether a skill's prerequisites are met. Exit 0 if met, 1 if not.
+    Check(crate::commands::check::Args),
+
+    /// List installed skills (with --category to filter).
+    Skills(crate::commands::skills::Args),
+
+    /// List installed slash commands.
+    Commands,
+
+    /// List bd memories, optionally filtered by prefix or grep substring.
+    Memories(crate::commands::memories::Args),
+
+    /// Reverse `hew init` — remove skills + slash commands for this project.
+    /// `--purge` also deletes `.beads/` (drops the task graph + memories).
+    Uninstall(crate::commands::uninstall::Args),
 }
