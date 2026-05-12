@@ -25,7 +25,7 @@ use std::ffi::{OsStr, OsString};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bd::BdClient;
+use crate::bd::{BdClient, hew_temp_path};
 use crate::error::{HewError, Result};
 use crate::git::GitClient;
 
@@ -231,16 +231,27 @@ pub fn tasks_since_last_review(bd: &dyn BdClient) -> Result<u32> {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Fetch every closed bd issue. Returns newest-first by `closed_at`.
+///
+/// Output goes via a temp file (not a pipe) so large datasets — `bd list
+/// --json --limit=0` can exceed 100KB on long-running projects — don't
+/// deadlock the OS pipe buffer.
 fn list_closed_tasks(bd: &dyn BdClient) -> Result<Vec<BdIssueRaw>> {
-    let out = bd.run_raw(&[
-        OsStr::new("list"),
-        OsStr::new("--status=closed"),
-        OsStr::new("--sort=closed"),
-        OsStr::new("--limit"),
-        OsStr::new("0"),
-        OsStr::new("--json"),
-    ])?;
-    let issues: Vec<BdIssueRaw> = serde_json::from_str(out.stdout.trim())?;
+    let tmp_path = hew_temp_path("bd-list-closed", "json");
+    bd.run_to_file(
+        &[
+            OsStr::new("list"),
+            OsStr::new("--status=closed"),
+            OsStr::new("--sort=closed"),
+            OsStr::new("--limit"),
+            OsStr::new("0"),
+            OsStr::new("--json"),
+        ],
+        &tmp_path,
+    )?;
+    let body = std::fs::read_to_string(&tmp_path)?;
+    // Best-effort cleanup; not fatal if removal fails.
+    let _ = std::fs::remove_file(&tmp_path);
+    let issues: Vec<BdIssueRaw> = serde_json::from_str(body.trim())?;
     Ok(issues)
 }
 
@@ -365,9 +376,14 @@ fn rev_at_or_before(git: &dyn GitClient, ts: &str) -> Result<Option<String>> {
 }
 
 fn git_diff(git: &dyn GitClient, base: &str) -> Result<String> {
+    // git diff output can be huge (whole-branch reviews). Write to a temp
+    // file to avoid the same pipe-buffer deadlock that bites bd list.
     let range = OsString::from(format!("{base}..HEAD"));
-    let out = git.run_raw(&[OsStr::new("diff"), range.as_os_str()])?;
-    Ok(out.stdout)
+    let tmp_path = hew_temp_path("git-diff", "patch");
+    git.run_to_file(&[OsStr::new("diff"), range.as_os_str()], &tmp_path)?;
+    let body = std::fs::read_to_string(&tmp_path)?;
+    let _ = std::fs::remove_file(&tmp_path);
+    Ok(body)
 }
 
 fn collect_memories(bd: &dyn BdClient) -> Result<ReviewMemories> {

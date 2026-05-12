@@ -106,4 +106,8 @@ pub enum Command {
 
     /// Branch operations (`hew branch new --prefix=feat --slug='Add Auth'`).
     Branch(crate::commands::branch::Args),
+
+    /// Emit a JSON review bundle for /hew:review and /hew:adversarial-review.
+    #[command(name = "review-bundle")]
+    ReviewBundle(crate::commands::review::Args),
 }

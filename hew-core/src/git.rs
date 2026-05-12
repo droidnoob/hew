@@ -26,6 +26,18 @@ pub trait GitClient: std::fmt::Debug {
     fn current_branch(&self) -> Result<Option<String>>;
     fn checkout_new_branch(&self, name: &str, from: Option<&str>) -> Result<()>;
     fn run_raw(&self, args: &[&OsStr]) -> Result<GitOutput>;
+
+    /// Run `git <args>` with stdout written directly to `out_path`. Use for
+    /// large queries (`git diff`). Default impl falls back to `run_raw` +
+    /// file write for mocks; [`RealGit`] overrides to skip the pipe.
+    fn run_to_file(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        let out = self.run_raw(args)?;
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(out_path, out.stdout.as_bytes())?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +92,9 @@ impl RealGit {
             }
         };
 
+        // GOTCHA: read-after-wait deadlocks on large output. Small commands
+        // (rev-parse, symbolic-ref, checkout) stay safe; `git diff` and other
+        // potentially-large queries must go through `run_to_file` instead.
         let mut stdout = String::new();
         let mut stderr = String::new();
         if let Some(mut s) = child.stdout.take() {
@@ -98,6 +113,52 @@ impl RealGit {
             });
         }
         Ok(GitOutput { stdout, stderr })
+    }
+
+    /// Run `git <args>` with stdout redirected to `out_path`. Use for queries
+    /// whose stdout can exceed the OS pipe buffer (`git diff` in particular).
+    fn run_to_file_inner(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        debug!(git = %self.path.display(), ?args, out = %out_path.display(), "running git (file)");
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(out_path)?;
+
+        let mut cmd = Command::new(&self.path);
+        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+
+        let status = match child.wait_timeout(self.timeout)? {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HewError::GitNonZero {
+                    code: -1,
+                    stderr: format!("`git` timed out after {:?}", self.timeout),
+                });
+            }
+        };
+
+        let mut stderr = String::new();
+        if let Some(mut s) = child.stderr.take() {
+            use std::io::Read;
+            s.read_to_string(&mut stderr)?;
+        }
+
+        if !status.success() {
+            return Err(HewError::GitNonZero {
+                code: status.code().unwrap_or(-1),
+                stderr: if stderr.is_empty() {
+                    "`git` failed (stdout redirected to file)".into()
+                } else {
+                    stderr
+                },
+            });
+        }
+        Ok(())
     }
 }
 
@@ -136,6 +197,10 @@ impl GitClient for RealGit {
 
     fn run_raw(&self, args: &[&OsStr]) -> Result<GitOutput> {
         self.run(args)
+    }
+
+    fn run_to_file(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        self.run_to_file_inner(args, out_path)
     }
 }
 

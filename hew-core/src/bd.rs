@@ -83,6 +83,20 @@ pub trait BdClient: std::fmt::Debug {
     fn memories(&self) -> Result<std::collections::BTreeMap<String, String>>;
     fn remember(&self, text: &str) -> Result<()>;
     fn run_raw(&self, args: &[&OsStr]) -> Result<BdOutput>;
+
+    /// Run `bd <args>` and write stdout directly to `out_path`. Use this for
+    /// queries whose stdout can exceed the OS pipe buffer (`bd list --json
+    /// --limit=0`, `bd prime`). The default impl falls back to `run_raw` for
+    /// mocks; production [`RealBd`] overrides with file-descriptor redirection
+    /// to dodge the pipe entirely.
+    fn run_to_file(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        let out = self.run_raw(args)?;
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(out_path, out.stdout.as_bytes())?;
+        Ok(())
+    }
 }
 
 /// Default implementation that shells out to the real `bd` binary.
@@ -135,6 +149,11 @@ impl RealBd {
         };
 
         // After wait_timeout we still need stdio.
+        // GOTCHA: this read-after-wait pattern deadlocks when stdout exceeds
+        // the OS pipe buffer (~16KB macOS, ~64KB Linux). Small commands like
+        // `bd remember`, `bd show <id>`, `bd version` are safe; queries that
+        // can return large JSON (`bd list`, `bd prime`) must go through
+        // `run_to_file` instead.
         let mut stdout = String::new();
         let mut stderr = String::new();
         if let Some(mut s) = child.stdout.take() {
@@ -154,6 +173,82 @@ impl RealBd {
         }
         Ok(BdOutput { stdout, stderr })
     }
+
+    /// Run `bd <args>`, capture stdout via a `<sys-tmp>/.hew/<label>-…<ext>`
+    /// file, read it back, and clean up. Use for queries whose output can
+    /// exceed the OS pipe buffer (~16KB macOS / ~64KB Linux).
+    fn read_via_temp(&self, args: &[&OsStr], label: &str, ext: &str) -> Result<String> {
+        let path = hew_temp_path(label, ext);
+        self.run_to_file_inner(args, &path)?;
+        let body = std::fs::read_to_string(&path)?;
+        // Best-effort cleanup. A leftover file under .hew/ is harmless.
+        let _ = std::fs::remove_file(&path);
+        Ok(body)
+    }
+
+    /// Run `bd <args>` with stdout redirected to `out_path` (created/truncated).
+    /// No pipes are involved on stdout, so this is safe for arbitrarily large
+    /// outputs (`bd list --json --limit=0`, `bd prime`, etc.).
+    fn run_to_file_inner(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        debug!(bd = %self.path.display(), ?args, out = %out_path.display(), "running bd (file)");
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(out_path)?;
+
+        let mut cmd = Command::new(&self.path);
+        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+
+        let status = match child.wait_timeout(self.timeout)? {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(HewError::BdNonZero {
+                    code: -1,
+                    stderr: format!("`bd` timed out after {:?}", self.timeout),
+                });
+            }
+        };
+
+        let mut stderr = String::new();
+        if let Some(mut s) = child.stderr.take() {
+            use std::io::Read;
+            s.read_to_string(&mut stderr)?;
+        }
+
+        if !status.success() {
+            return Err(HewError::BdNonZero {
+                code: status.code().unwrap_or(-1),
+                stderr: if stderr.is_empty() {
+                    format!("`bd {}` failed", args_to_display(args))
+                } else {
+                    stderr
+                },
+            });
+        }
+        Ok(())
+    }
+}
+
+/// `<system tmpdir>/.hew/<label>-<pid>-<nanos>.<ext>` — unique per process
+/// and call site. The parent dir is auto-created on first use. Files persist
+/// under `.hew/` to aid debugging when a query goes sideways; they are
+/// cheap to ignore.
+pub(crate) fn hew_temp_path(label: &str, ext: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    std::env::temp_dir().join(".hew").join(format!("{label}-{pid}-{nanos}.{ext}"))
+}
+
+fn args_to_display(args: &[&OsStr]) -> String {
+    args.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ")
 }
 
 // `wait_timeout::ChildExt` extends `std::process::Child::wait_timeout`.
@@ -166,8 +261,11 @@ impl BdClient for RealBd {
     }
 
     fn ready(&self) -> Result<Vec<ReadyTask>> {
-        let out = self.run(&[OsStr::new("ready"), OsStr::new("--json")])?;
-        let parsed: Vec<ReadyTask> = serde_json::from_str(out.stdout.trim())?;
+        // ready output grows with the unblocked-task count; route through
+        // a temp file to avoid pipe-buffer deadlocks on big graphs.
+        let body =
+            self.read_via_temp(&[OsStr::new("ready"), OsStr::new("--json")], "bd-ready", "json")?;
+        let parsed: Vec<ReadyTask> = serde_json::from_str(body.trim())?;
         Ok(parsed)
     }
 
@@ -178,16 +276,21 @@ impl BdClient for RealBd {
     }
 
     fn prime_raw(&self) -> Result<String> {
-        let out = self.run(&[OsStr::new("prime")])?;
-        Ok(out.stdout)
+        // prime output can be tens of KB on mature projects.
+        self.read_via_temp(&[OsStr::new("prime")], "bd-prime", "json")
     }
 
     fn memories(&self) -> Result<std::collections::BTreeMap<String, String>> {
-        let out = self.run(&[OsStr::new("memories"), OsStr::new("--json")])?;
+        // Memory store grows over a project's lifetime; route via temp file.
+        let body = self.read_via_temp(
+            &[OsStr::new("memories"), OsStr::new("--json")],
+            "bd-memories",
+            "json",
+        )?;
         // bd interleaves metadata like `schema_version: 1` with string entries.
         // Decode permissively then keep only string-valued keys.
         let raw: std::collections::BTreeMap<String, serde_json::Value> =
-            serde_json::from_str(out.stdout.trim())?;
+            serde_json::from_str(body.trim())?;
         Ok(raw.into_iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string()))).collect())
     }
 
@@ -199,6 +302,10 @@ impl BdClient for RealBd {
 
     fn run_raw(&self, args: &[&OsStr]) -> Result<BdOutput> {
         self.run(args)
+    }
+
+    fn run_to_file(&self, args: &[&OsStr], out_path: &std::path::Path) -> Result<()> {
+        self.run_to_file_inner(args, out_path)
     }
 }
 
