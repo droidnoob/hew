@@ -140,16 +140,51 @@ present all at once.
    These are *starting points*. Users tighten them after the walking
    skeleton lands.
 
-2. **Database** — Postgres / SQLite / NoSQL / managed (Supabase, Neon)?
+2. **Craft principles** — pick the SOLID/DRY/KISS/Clean-Arch/etc.
+   subset this project commits to. Principles are picked per project,
+   not universal (see `DECISION:craft-adaptive`).
+
+   Pre-select the stack's defaults. The full catalog lives in
+   `skills/data/craft-principles.toml`; each principle's
+   `default_for_stacks` list drives the preselection. Read the catalog
+   schema with `hew schema craft-principles` and filter the
+   `default_for_stacks` field for the chosen stack id.
+
+   For `py-fastapi`, the preselection typically includes SOLID, DRY,
+   KISS, SoC, Composition-over-Inheritance, Clean Architecture, DDD,
+   Idempotence, Fail Fast, and `consistency-with-existing-code` (the
+   universal brownfield-deference principle). Other stacks vary; trust
+   the catalog over this list.
+
+   Surface as a multi-select picker — the user can deselect a default
+   or add others. Don't argue with their choices; record what they
+   pick.
+
+   For each chosen principle, write a `CONVENTION:craft.<id>` memory:
+
+   ```
+   hew remember --type=convention "craft.solid — single-responsibility, open/closed, Liskov, interface-segregation, dependency-inversion. Apply at module/class boundaries; don't over-engineer one-call helpers."
+   hew remember --type=convention "craft.dry — extract on the third occurrence; resist premature abstraction."
+   hew remember --type=convention "craft.consistency-with-existing-code — when a chosen principle conflicts with an existing CONVENTION:* memory, the existing convention wins."
+   # ... one per chosen principle. Summary text comes from the catalog's
+   # `summary` field.
+   ```
+
+   `hew-guard` reads these memories to drive its craft soft-warnings
+   (see `hew-guard.md` "Craft soft-warnings"). Don't write
+   `CONVENTION:craft.<id>` for principles the user didn't pick —
+   warnings stay silent unless the project committed to the rule.
+
+3. **Database** — Postgres / SQLite / NoSQL / managed (Supabase, Neon)?
    Record as `DECISION:db`.
 
-3. **Auth model** — JWT / session / passwordless / OAuth?  Record as
+4. **Auth model** — JWT / session / passwordless / OAuth?  Record as
    `DECISION:auth`.
 
-4. **Hosting / deployment** — Vercel + Neon? AWS ECS + RDS? Fly.io?
+5. **Hosting / deployment** — Vercel + Neon? AWS ECS + RDS? Fly.io?
    Record as `DECISION:hosting`.
 
-5. **Anything else** the research surfaced as load-bearing — payments
+6. **Anything else** the research surfaced as load-bearing — payments
    provider, email delivery, analytics. Record as `DECISION:<topic>`.
 
 Don't bikeshed minor choices. The goal is enough decisions to seed
@@ -248,6 +283,7 @@ Project bootstrapped.
   Hosting:     Vercel + Neon
 
   Memories:    8 PROJECT, 6 DECISION, 8 CONVENTION (seeded from ts-next),
+               9 CONVENTION:craft (picked principles),
                12 RESEARCH (4 [VERIFIED], 5 [CITED], 3 [ASSUMED])
 
   Roadmap:     Foundation -> MVP -> Launch -> Hardening
@@ -315,6 +351,8 @@ After this skill completes:
 - ≥ 4 `RESEARCH:` memories (one per thread)
 - 4–8 `DECISION:` memories (stack, db, auth, hosting, etc.)
 - N `CONVENTION:` memories (one per seeded entry from the stack)
+- ≥ 1 `CONVENTION:craft.<id>` memory (per principle the user picked;
+  `consistency-with-existing-code` should always be present)
 - First milestone epic + ≥ 3 child tasks
 - The user knows the next move: `/hew:next`
 
