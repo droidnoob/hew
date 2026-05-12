@@ -91,6 +91,9 @@ fn uninstall_claude(root: &Path) -> Result<Vec<PathBuf>> {
         fs::remove_dir_all(&commands_dir)?;
         removed.push(commands_dir);
     }
+    if let Some(settings) = remove_claude_session_hook(&root.join(".claude"))? {
+        removed.push(settings);
+    }
     Ok(removed)
 }
 
@@ -218,7 +221,133 @@ fn write_claude_layout(root: &Path) -> Result<Vec<PathBuf>> {
         written.push(dest);
     }
 
+    // SessionStart hook so the agent auto-restores hew context on every
+    // new session (post-/clear, post-compact, fresh shell).
+    let settings = upsert_claude_session_hook(&root.join(".claude"))?;
+    written.push(settings);
+
     Ok(written)
+}
+
+/// Matcher that fires on every session-entry source Claude Code emits:
+/// startup, resume, and clear. (`compact` is handled by its own hook event,
+/// not SessionStart.)
+const SESSION_HOOK_MATCHER: &str = "startup|resume|clear";
+const SESSION_HOOK_COMMAND: &str = "hew prime resume";
+/// Discriminator key on the matcher-level entry. On re-install we drop any
+/// SessionStart entry carrying this flag, then push a fresh one — so the
+/// hook is exactly-once even after repeated `hew init` runs.
+const HEW_MANAGED_FLAG: &str = "hew_managed";
+
+/// Inject (or replace) the hew SessionStart hook in `<claude_dir>/settings.json`.
+/// Preserves every other top-level key, every non-hew hook entry, and every
+/// other hook event. Refuses to clobber malformed JSON.
+fn upsert_claude_session_hook(claude_dir: &Path) -> Result<PathBuf> {
+    let settings_path = claude_dir.join("settings.json");
+    let mut value: serde_json::Value = if settings_path.exists() {
+        let body = fs::read_to_string(&settings_path)?;
+        if body.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(&body).map_err(|e| crate::error::HewError::SettingsMalformed {
+                path: settings_path.display().to_string(),
+                reason: e.to_string(),
+            })?
+        }
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    let root = value.as_object_mut().ok_or_else(|| crate::error::HewError::SettingsMalformed {
+        path: settings_path.display().to_string(),
+        reason: "top-level value must be a JSON object".to_string(),
+    })?;
+
+    let hooks_entry = root
+        .entry("hooks".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let hooks = hooks_entry.as_object_mut().ok_or_else(|| {
+        crate::error::HewError::SettingsMalformed {
+            path: settings_path.display().to_string(),
+            reason: "`hooks` must be a JSON object".to_string(),
+        }
+    })?;
+
+    let session_entry = hooks
+        .entry("SessionStart".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let arr = session_entry.as_array_mut().ok_or_else(|| {
+        crate::error::HewError::SettingsMalformed {
+            path: settings_path.display().to_string(),
+            reason: "`hooks.SessionStart` must be an array".to_string(),
+        }
+    })?;
+
+    arr.retain(|v| !v.get(HEW_MANAGED_FLAG).and_then(|f| f.as_bool()).unwrap_or(false));
+    arr.push(serde_json::json!({
+        "matcher": SESSION_HOOK_MATCHER,
+        HEW_MANAGED_FLAG: true,
+        "hooks": [
+            { "type": "command", "command": SESSION_HOOK_COMMAND }
+        ]
+    }));
+
+    fs::create_dir_all(claude_dir)?;
+    let mut body = serde_json::to_string_pretty(&value)?;
+    body.push('\n');
+    fs::write(&settings_path, body)?;
+    Ok(settings_path)
+}
+
+/// Reverse `upsert_claude_session_hook`. Returns `Some(path)` if anything
+/// changed on disk; `None` otherwise. Tidies empty containers but never
+/// touches non-hew entries.
+fn remove_claude_session_hook(claude_dir: &Path) -> Result<Option<PathBuf>> {
+    let settings_path = claude_dir.join("settings.json");
+    if !settings_path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(&settings_path)?;
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| crate::error::HewError::SettingsMalformed {
+            path: settings_path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+
+    let Some(root) = value.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(hooks) = root.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
+        return Ok(None);
+    };
+    let Some(arr) = hooks.get_mut("SessionStart").and_then(|s| s.as_array_mut()) else {
+        return Ok(None);
+    };
+
+    let before = arr.len();
+    arr.retain(|v| !v.get(HEW_MANAGED_FLAG).and_then(|f| f.as_bool()).unwrap_or(false));
+    if arr.len() == before {
+        return Ok(None);
+    }
+    if arr.is_empty() {
+        hooks.remove("SessionStart");
+    }
+    if hooks.is_empty() {
+        root.remove("hooks");
+    }
+
+    if root.is_empty() {
+        fs::remove_file(&settings_path)?;
+        return Ok(Some(settings_path));
+    }
+
+    let mut new_body = serde_json::to_string_pretty(&value)?;
+    new_body.push('\n');
+    fs::write(&settings_path, new_body)?;
+    Ok(Some(settings_path))
 }
 
 /// Marker lines surrounding the hew section in single-file runtime configs.
@@ -378,8 +507,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Claude, tmp.path()).expect("install");
         assert_eq!(plan.runtime, Runtime::Claude);
-        // 1 SKILL.md + 15 skills + 24 slash commands = 40 files.
-        assert_eq!(plan.written.len(), 40);
+        // 1 SKILL.md + 15 skills + 24 slash commands + 1 settings.json = 41 files.
+        assert_eq!(plan.written.len(), 41);
 
         let hew_root = tmp.path().join(".claude").join("skills").join("hew");
         assert!(hew_root.join("SKILL.md").exists());
@@ -483,6 +612,133 @@ mod tests {
         fs::write(tmp.path().join(".gitignore"), "foo\n.beads/\nbar\n").unwrap();
         let changed = ensure_beads_gitignored(tmp.path()).unwrap();
         assert!(!changed);
+    }
+
+    fn parse_settings(path: &Path) -> serde_json::Value {
+        let body = fs::read_to_string(path).unwrap();
+        serde_json::from_str(&body).expect("settings.json is valid JSON")
+    }
+
+    #[test]
+    fn install_claude_writes_session_start_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).expect("install");
+
+        let settings = tmp.path().join(".claude").join("settings.json");
+        assert!(settings.exists(), "settings.json must be written");
+        let v = parse_settings(&settings);
+        let arr = v["hooks"]["SessionStart"].as_array().expect("SessionStart array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "startup|resume|clear");
+        assert_eq!(arr[0]["hew_managed"], true);
+        assert_eq!(arr[0]["hooks"][0]["type"], "command");
+        assert_eq!(arr[0]["hooks"][0]["command"], "hew prime resume");
+    }
+
+    #[test]
+    fn install_claude_session_hook_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        let first = fs::read_to_string(&settings).unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let second = fs::read_to_string(&settings).unwrap();
+        assert_eq!(first, second, "second install must be byte-identical");
+        let v = parse_settings(&settings);
+        assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn install_claude_preserves_user_settings_and_foreign_hooks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "echo pre" }] }],
+                "SessionStart": [
+                    { "matcher": "startup", "hooks": [{ "type": "command", "command": "echo user-hook" }] }
+                ]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let v = parse_settings(&claude.join("settings.json"));
+
+        assert_eq!(v["theme"], "dark", "top-level user keys preserved");
+        assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Bash", "other hook events preserved");
+        let arr = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "user SessionStart entry + hew entry");
+        let hew_entries: Vec<_> =
+            arr.iter().filter(|e| e["hew_managed"].as_bool().unwrap_or(false)).collect();
+        assert_eq!(hew_entries.len(), 1);
+        let user_entries: Vec<_> =
+            arr.iter().filter(|e| !e["hew_managed"].as_bool().unwrap_or(false)).collect();
+        assert_eq!(user_entries.len(), 1);
+        assert_eq!(user_entries[0]["hooks"][0]["command"], "echo user-hook");
+    }
+
+    #[test]
+    fn install_claude_fails_on_malformed_settings_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let bad = "{ not json";
+        fs::write(claude.join("settings.json"), bad).unwrap();
+
+        let err = install(Runtime::Claude, tmp.path()).expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("malformed") || msg.contains("settings"), "diagnostic: {msg}");
+        // File untouched.
+        let after = fs::read_to_string(claude.join("settings.json")).unwrap();
+        assert_eq!(after, bad);
+    }
+
+    #[test]
+    fn uninstall_claude_removes_session_hook_and_preserves_others() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [
+                    { "matcher": "startup", "hooks": [{ "type": "command", "command": "echo user" }] }
+                ]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        install(Runtime::Claude, tmp.path()).unwrap();
+        uninstall(Runtime::Claude, tmp.path()).unwrap();
+
+        let v = parse_settings(&claude.join("settings.json"));
+        assert_eq!(v["theme"], "dark");
+        let arr = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "user hook survives");
+        assert_eq!(arr[0]["hooks"][0]["command"], "echo user");
+    }
+
+    #[test]
+    fn uninstall_claude_removes_settings_file_when_only_hew_owned_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        assert!(settings.exists());
+
+        uninstall(Runtime::Claude, tmp.path()).unwrap();
+        assert!(!settings.exists(), "settings.json removed when fully emptied by uninstall");
+    }
+
+    #[test]
+    fn uninstall_claude_is_idempotent_with_no_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No install first — just uninstall.
+        uninstall(Runtime::Claude, tmp.path()).expect("uninstall on empty tree is a no-op");
     }
 
     #[test]

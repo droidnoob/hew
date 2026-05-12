@@ -28,6 +28,13 @@ pub enum HewError {
     #[error("json error: {0}")]
     #[diagnostic(code(hew::json))]
     Json(#[from] serde_json::Error),
+
+    #[error("settings file {path} is malformed: {reason}")]
+    #[diagnostic(
+        code(hew::install::settings_malformed),
+        help("fix or remove the file and re-run `hew init`")
+    )]
+    SettingsMalformed { path: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, HewError>;
