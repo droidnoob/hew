@@ -92,6 +92,13 @@ fn uninstall_claude(root: &Path) -> Result<Vec<PathBuf>> {
         removed.push(commands_dir);
     }
     if let Some(settings) = remove_claude_session_hook(&root.join(".claude"))? {
+        removed.push(settings.clone());
+        // Same file — `remove_claude_allowlist` will rewrite it in place
+        // (or remove it if both helpers ended up emptying it).
+    }
+    if let Some(settings) = remove_claude_allowlist(&root.join(".claude"))?
+        && !removed.contains(&settings)
+    {
         removed.push(settings);
     }
     Ok(removed)
@@ -224,7 +231,15 @@ fn write_claude_layout(root: &Path) -> Result<Vec<PathBuf>> {
     // SessionStart hook so the agent auto-restores hew context on every
     // new session (post-/clear, post-compact, fresh shell).
     let settings = upsert_claude_session_hook(&root.join(".claude"))?;
-    written.push(settings);
+    written.push(settings.clone());
+
+    // Permissions allowlist so Claude Code doesn't prompt on every bd /
+    // hew / safe-git invocation. Same settings.json file — but record it
+    // only once in the `written` list.
+    let allow_settings = upsert_claude_allowlist(&root.join(".claude"))?;
+    if !written.contains(&allow_settings) {
+        written.push(allow_settings);
+    }
 
     Ok(written)
 }
@@ -347,6 +362,175 @@ fn remove_claude_session_hook(claude_dir: &Path) -> Result<Option<PathBuf>> {
     let mut new_body = serde_json::to_string_pretty(&value)?;
     new_body.push('\n');
     fs::write(&settings_path, new_body)?;
+    Ok(Some(settings_path))
+}
+
+/// Permission entries injected into `.claude/settings.json` so Claude Code
+/// doesn't prompt on every routine `bd` / `hew` / safe-git invocation. See
+/// `DECISION:claude-allowlist-scope` memory.
+///
+/// Excluded by design: `git push`, `git reset --hard`, `git clean -f`,
+/// `git rebase`, any force-flagged operation. Those keep their user prompt.
+const HEW_ALLOWLIST_ENTRIES: &[&str] = &[
+    "Bash(bd:*)",
+    "Bash(hew:*)",
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git branch:*)",
+    "Bash(git add:*)",
+    "Bash(git commit:*)",
+    "Bash(git checkout:*)",
+];
+
+/// Sibling key under `permissions` that records which entries hew owns
+/// in `allow`. Re-install drops only entries listed here, then re-adds
+/// the current `HEW_ALLOWLIST_ENTRIES`. Foreign entries the user added
+/// to `allow` are never touched.
+const HEW_MANAGED_ALLOWLIST_KEY: &str = "allow_hew_managed";
+
+/// Load (or initialize) the settings.json JSON value. Returns the parsed
+/// value + a flag indicating whether the file existed on disk.
+fn load_settings_json(path: &Path) -> Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let body = fs::read_to_string(path)?;
+    if body.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str(&body).map_err(|e| crate::error::HewError::SettingsMalformed {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })
+}
+
+fn write_settings_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut body = serde_json::to_string_pretty(value)?;
+    body.push('\n');
+    fs::write(path, body)?;
+    Ok(())
+}
+
+/// Insert (or replace) the hew-managed allowlist entries in
+/// `<claude_dir>/settings.json`. Preserves all other `permissions` keys,
+/// every other allow entry, and every other top-level setting. Idempotent.
+fn upsert_claude_allowlist(claude_dir: &Path) -> Result<PathBuf> {
+    let settings_path = claude_dir.join("settings.json");
+    let mut value = load_settings_json(&settings_path)?;
+
+    let root = value.as_object_mut().ok_or_else(|| crate::error::HewError::SettingsMalformed {
+        path: settings_path.display().to_string(),
+        reason: "top-level value must be a JSON object".to_string(),
+    })?;
+
+    let permissions_entry = root
+        .entry("permissions".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let permissions = permissions_entry.as_object_mut().ok_or_else(|| {
+        crate::error::HewError::SettingsMalformed {
+            path: settings_path.display().to_string(),
+            reason: "`permissions` must be a JSON object".to_string(),
+        }
+    })?;
+
+    // Read the prior hew-managed set so we know which entries to drop
+    // from `allow` before adding the current set.
+    let prior: Vec<String> = permissions
+        .get(HEW_MANAGED_ALLOWLIST_KEY)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let allow_entry = permissions
+        .entry("allow".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let allow = allow_entry.as_array_mut().ok_or_else(|| {
+        crate::error::HewError::SettingsMalformed {
+            path: settings_path.display().to_string(),
+            reason: "`permissions.allow` must be an array".to_string(),
+        }
+    })?;
+
+    // Drop prior-hew entries; preserve everything else.
+    allow.retain(|v| match v.as_str() {
+        Some(s) => !prior.iter().any(|p| p == s),
+        None => true,
+    });
+    // Add current hew entries that aren't already present (defensive — a
+    // user may have manually added one of ours).
+    for entry in HEW_ALLOWLIST_ENTRIES {
+        let s = (*entry).to_string();
+        if !allow.iter().any(|v| v.as_str() == Some(entry)) {
+            allow.push(serde_json::Value::String(s));
+        }
+    }
+
+    permissions.insert(
+        HEW_MANAGED_ALLOWLIST_KEY.to_string(),
+        serde_json::Value::Array(
+            HEW_ALLOWLIST_ENTRIES
+                .iter()
+                .map(|e| serde_json::Value::String((*e).to_string()))
+                .collect(),
+        ),
+    );
+
+    write_settings_json(&settings_path, &value)?;
+    Ok(settings_path)
+}
+
+/// Reverse `upsert_claude_allowlist`. Removes only entries listed in the
+/// `permissions.allow_hew_managed` sibling key; foreign entries survive.
+/// Tidies empty containers; deletes the file if it becomes fully empty.
+fn remove_claude_allowlist(claude_dir: &Path) -> Result<Option<PathBuf>> {
+    let settings_path = claude_dir.join("settings.json");
+    if !settings_path.exists() {
+        return Ok(None);
+    }
+    let mut value = load_settings_json(&settings_path)?;
+    let Some(root) = value.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(permissions) = root.get_mut("permissions").and_then(|p| p.as_object_mut()) else {
+        return Ok(None);
+    };
+
+    let prior: Vec<String> = permissions
+        .get(HEW_MANAGED_ALLOWLIST_KEY)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if prior.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(allow) = permissions.get_mut("allow").and_then(|a| a.as_array_mut()) {
+        allow.retain(|v| match v.as_str() {
+            Some(s) => !prior.iter().any(|p| p == s),
+            None => true,
+        });
+        if allow.is_empty() {
+            permissions.remove("allow");
+        }
+    }
+    permissions.remove(HEW_MANAGED_ALLOWLIST_KEY);
+
+    if permissions.is_empty() {
+        root.remove("permissions");
+    }
+
+    if root.is_empty() {
+        fs::remove_file(&settings_path)?;
+        return Ok(Some(settings_path));
+    }
+
+    write_settings_json(&settings_path, &value)?;
     Ok(Some(settings_path))
 }
 
@@ -754,6 +938,134 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // No install first — just uninstall.
         uninstall(Runtime::Claude, tmp.path()).expect("uninstall on empty tree is a no-op");
+    }
+
+    #[test]
+    fn install_claude_writes_allowlist_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).expect("install");
+
+        let settings = tmp.path().join(".claude").join("settings.json");
+        let v = parse_settings(&settings);
+        let allow = v["permissions"]["allow"].as_array().expect("allow array");
+        for entry in HEW_ALLOWLIST_ENTRIES {
+            assert!(
+                allow.iter().any(|e| e.as_str() == Some(entry)),
+                "missing allow entry: {entry}"
+            );
+        }
+        // No git push / reset --hard / clean -f leaked in.
+        let allow_strs: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+        assert!(!allow_strs.iter().any(|s| s.contains("git push")), "push must stay user-approved");
+        assert!(
+            !allow_strs.iter().any(|s| s.contains("reset --hard")),
+            "reset --hard must stay user-approved"
+        );
+        // The tracker sibling key has the same entries.
+        let tracked = v["permissions"][HEW_MANAGED_ALLOWLIST_KEY].as_array().expect("tracker");
+        assert_eq!(tracked.len(), HEW_ALLOWLIST_ENTRIES.len());
+    }
+
+    #[test]
+    fn install_claude_allowlist_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        let first = fs::read_to_string(&settings).unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let second = fs::read_to_string(&settings).unwrap();
+        assert_eq!(first, second, "second install must be byte-identical");
+        let v = parse_settings(&settings);
+        // Every entry appears exactly once.
+        let allow = v["permissions"]["allow"].as_array().unwrap();
+        for entry in HEW_ALLOWLIST_ENTRIES {
+            let count = allow.iter().filter(|e| e.as_str() == Some(entry)).count();
+            assert_eq!(count, 1, "duplicate entry: {entry}");
+        }
+    }
+
+    #[test]
+    fn install_claude_preserves_foreign_allow_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(npm:*)", "Bash(make:*)"],
+                "deny": ["Bash(rm -rf /:*)"]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let v = parse_settings(&claude.join("settings.json"));
+        let allow_strs: Vec<&str> =
+            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        assert!(allow_strs.contains(&"Bash(npm:*)"), "user entry preserved");
+        assert!(allow_strs.contains(&"Bash(make:*)"), "user entry preserved");
+        assert!(allow_strs.contains(&"Bash(bd:*)"), "hew entry added");
+        // The deny sibling key is untouched.
+        let deny = v["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(deny[0], "Bash(rm -rf /:*)");
+    }
+
+    #[test]
+    fn install_claude_handles_user_who_added_one_of_our_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(bd:*)"]  // user added one of ours
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let v = parse_settings(&claude.join("settings.json"));
+        let allow_strs: Vec<&str> =
+            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        let bd_count = allow_strs.iter().filter(|s| **s == "Bash(bd:*)").count();
+        assert_eq!(bd_count, 1, "no duplicate of Bash(bd:*) even when user pre-added it");
+    }
+
+    #[test]
+    fn uninstall_claude_removes_only_hew_managed_allow_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(npm:*)", "Bash(make:*)"],
+                "deny": ["Bash(rm -rf /:*)"]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        install(Runtime::Claude, tmp.path()).unwrap();
+        uninstall(Runtime::Claude, tmp.path()).unwrap();
+
+        let v = parse_settings(&claude.join("settings.json"));
+        let allow_strs: Vec<&str> =
+            v["permissions"]["allow"].as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+        assert_eq!(allow_strs, vec!["Bash(npm:*)", "Bash(make:*)"], "only hew entries removed");
+        assert!(v["permissions"].get(HEW_MANAGED_ALLOWLIST_KEY).is_none(), "tracker cleared");
+        assert_eq!(v["permissions"]["deny"][0], "Bash(rm -rf /:*)", "deny preserved");
+    }
+
+    #[test]
+    fn install_claude_allowlist_rejects_malformed_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        fs::write(claude.join("settings.json"), "{ not json").unwrap();
+
+        let err = install(Runtime::Claude, tmp.path()).expect_err("must fail on malformed json");
+        let msg = format!("{err}");
+        assert!(msg.contains("malformed") || msg.contains("settings"), "diagnostic: {msg}");
     }
 
     #[test]
