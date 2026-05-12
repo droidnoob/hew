@@ -24,7 +24,7 @@ If the user describes intent in plain English, route by intent:
 
 | User says | Skill |
 |-----------|-------|
-| "let's build / plan X" | `hew-plan` |
+| "let's build / plan X" | `hew-plan` (tail picker may route to `hew-research` first) |
 | "break this down" / "create tasks" | `hew-decompose` |
 | "start coding" / "what's next?" | `hew-execute` |
 | "fix this one bug" / "tiny tweak" | `hew-quick` |

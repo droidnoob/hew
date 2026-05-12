@@ -90,13 +90,36 @@ These are factual decision memories (no special prefix beyond `DECISION:`),
 not `CONVENTION:` rules. They explain *why* the codebase looks the way it
 does. Future work can revisit them; current work treats them as settled.
 
-## When to flag a research detour
+## Research-or-decompose — tail picker
 
-If a major decision needs investigation (unfamiliar framework, novel domain,
-unknown library landscape), stop planning and surface a research need. The
-user can spawn `hew-research` if they want; otherwise you make a best-effort
-choice and record the uncertainty in a `DECISION:` memory so it can be
-revisited.
+Before handing off, ask once: should we research first, or go straight to
+decompose? Don't score this with a heuristic — the user owns the call.
+
+The default selection comes from `hew config get research.default`:
+
+| Value | Default selection | Meaning |
+|-------|-------------------|---------|
+| `ask` *(default)* | no preselect | always prompt the user |
+| `auto-skip` | "Skip — go to decompose" | for projects in well-understood territory |
+| `auto-run` | "Research first" | for greenfield / unfamiliar domains |
+
+Picker:
+
+```
+Research first?
+> Yes — run /hew:research, then come back to decompose
+  Skip — hand off to /hew:decompose now
+```
+
+When `auto-skip` or `auto-run`, the picker still shows but with the
+recommended choice preselected — the user can override. Honor
+`--non-interactive` / CI by using the configured default without
+prompting.
+
+If a major decision genuinely needs investigation (unfamiliar framework,
+novel domain, unknown library landscape) and the user picked "Skip,"
+record the uncertainty in a `DECISION:` memory tagged `[ASSUMED]` so it
+can be revisited.
 
 ## What you don't do
 
@@ -121,8 +144,10 @@ If the user asks you to plan something where you notice:
 
 ## Hand-off
 
-When the plan is confirmed: "Plan is approved. Calling `hew-decompose` to
-build the Beads graph." Then invoke `hew-decompose` with the plan in context.
+When the plan is confirmed, run the research-or-decompose picker above.
+On "Skip" or after `/hew:research` completes:
+"Plan is approved. Calling `hew-decompose` to build the Beads graph."
+Then invoke `hew-decompose` with the plan in context.
 `hew-decompose` will read the same memories, plus the conversation it inherits
 from you, and produce `bd create` / `bd dep add` / `bd mol bond` calls.
 
