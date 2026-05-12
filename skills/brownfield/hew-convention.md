@@ -188,6 +188,122 @@ hew remember --type=convention "state — Zustand for global state (one store pe
 hew remember --type=convention "styling — Tailwind classes only; no CSS modules, no inline styles, no css-in-js. Shared classes via cn() from src/lib/cn.ts."
 ```
 
+### 11. Craft principles already in force
+
+After the ten descriptive areas above, surface the *craft principles*
+the codebase is implicitly following. Brownfield projects almost
+always follow some subset of SOLID/DRY/Clean-Arch/etc. — the goal is
+to make it explicit so `hew-guard`'s craft soft-warnings and
+`hew-review`'s craft pillar bind to the project's actual character,
+not a generic checklist.
+
+This step matters because `CONVENTION:craft.consistency-with-existing-code`
+(the meta-principle that defaults on every seeded stack) says
+*existing conventions beat picked principles*. To honor it, the
+existing principles have to be persisted.
+
+Three heuristics on the live code:
+
+**A. Function-length distribution → `craft.max_function_lines`.**
+
+Sample function lengths across `src/` (or your project root). A quick
+shell pass:
+
+```
+# Python
+grep -nE '^[[:space:]]*(async )?def ' src/**/*.py | wc -l
+# then sample 20 random functions and eyeball the p95 length
+```
+
+If most functions sit under ~20 lines and outliers are rare, the
+project follows `craft.small-functions`. Persist the practical
+threshold:
+
+```
+hew remember --type=convention "craft.small-functions — Functions stay under 25 lines (p95 observed). Set craft.max_function_lines=25 so hew-guard warns on outliers."
+```
+
+If lengths are wild (50+ line handlers common, no clear pattern),
+*don't* fabricate a principle — the project hasn't committed to it.
+
+**B. Layering style → architecture principle.**
+
+Walk the top-level directory layout:
+
+| What you see                                       | Suggested principle                    |
+|----------------------------------------------------|----------------------------------------|
+| `domain/` + `application/` + `infrastructure/` + `interfaces/` | `craft.clean-architecture` |
+| `core/` + `adapters/` + `ports/`                   | `craft.hexagonal-architecture`         |
+| `api/` + `services/` + `repos/` + `models/`        | `craft.layered-monolith` (or `clean-architecture` if dependency direction is enforced) |
+| Single `src/` flat layout                          | `craft.kiss` / no architectural principle — don't impose one |
+| Per-feature `features/<x>/{api,service,db}.py`     | `craft.feature-folder` / `craft.cohesion` |
+
+```
+hew remember --type=convention "craft.clean-architecture — domain depends on nothing; application depends on domain; infrastructure depends on application via interfaces. Verified by the existing src/{domain,application,infrastructure,interfaces} split."
+```
+
+If the layering is inconsistent, skip — don't legislate retroactively.
+
+**C. Testing density → `testing.require`.**
+
+Count the test-to-source ratio:
+
+```
+# Python
+test_files=$(find tests/ -name '*.py' | wc -l)
+src_files=$(find src/ -name '*.py' ! -path '*/tests/*' | wc -l)
+echo "ratio: $test_files / $src_files"
+```
+
+Plus: does each behavior-bearing module have a sibling test?
+
+- **High density** (ratio ≥ 0.6, most modules tested): the project
+  treats tests as load-bearing. Suggest `testing.require=true` so
+  hew-guard escalates missing-tests from warn to fail.
+
+  ```
+  hew remember --type=convention "craft.test-first — Every behavior-bearing module has tests. Run `hew config set testing.require true` so hew-guard enforces this on close."
+  ```
+
+- **Medium density** (0.2 ≤ ratio < 0.6): tests exist but aren't
+  universal. Leave `testing.require=false`; persist as a soft norm.
+
+- **Low density** (< 0.2): the project hasn't picked test-first.
+  Don't fabricate a principle — surface to the user instead.
+
+**D. Style fingerprints — opportunistic.**
+
+While walking the code, watch for these signals and persist matching
+craft principles when they're clearly in force:
+
+- Result/Either return type prevalent → `craft.errors-as-values` /
+  `craft.fail-fast` (depending on shape).
+- Most domain calls go through interfaces / protocols, not concrete
+  classes → `craft.dependency-inversion` (part of SOLID).
+- Pure functions for transformations, side effects ringfenced →
+  `craft.pure-functions`.
+- Idempotency keys on POSTs, retries everywhere → `craft.idempotence`.
+- Heavy use of dataclasses / immutable record types →
+  `craft.immutability`.
+
+For each clear signal, persist a `CONVENTION:craft.<id>` memory
+sourced from the catalog (`hew schema craft-principles`) so the id and
+summary stay consistent with new-project picks.
+
+**Acceptance for this step:** on a typical Python+FastAPI repo you
+should leave with ≥ 3 `CONVENTION:craft.<id>` memories (e.g.
+`small-functions`, `clean-architecture`/`layered-monolith`, plus one
+style fingerprint). Less than 3 means the codebase genuinely doesn't
+commit to much — surface that to the user; don't pad.
+
+Brownfield deference is non-negotiable: always also persist the meta
+principle, so any later `hew-new-project --re-bootstrap` or craft
+picker honors it:
+
+```
+hew remember --type=convention "craft.consistency-with-existing-code — When a craft principle conflicts with an existing CONVENTION:* memory, the existing convention wins. Brownfield deference is the default."
+```
+
 ## Writing good conventions — prescriptive, not descriptive
 
 A `CONVENTION:` is a rule the executor must follow. Phrase it as a rule.

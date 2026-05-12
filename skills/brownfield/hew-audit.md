@@ -89,6 +89,9 @@ Record an `AUDIT:` memory when **any** of these apply:
 5. **Duplicate incompatible versions** in the dep tree (bloats
    bundle, diverges behavior).
 6. **License conflict** with the project's stated license.
+7. **Craft drift** — code regions that contradict a
+   `CONVENTION:craft.<id>` memory the project has committed to
+   (see "Craft drift checks" below).
 
 For everything else (mildly outdated, no security implication, still
 maintained): don't open a finding. Audit is for action items, not
@@ -126,6 +129,55 @@ For lower-severity findings (slight version drift, unmaintained but
 not vulnerable): leave them as memories. Surface them when relevant;
 the user prioritizes.
 
+## Craft drift checks
+
+After the dependency pass, walk the project's `CONVENTION:craft.<id>`
+memories (extracted by `hew-convention` Step 11) and grep the
+codebase for obvious contradictions. This is a *brownfield-only*
+audit dimension — it surfaces places where the codebase has *already*
+diverged from a principle it claims to follow.
+
+For each persisted `CONVENTION:craft.<id>`, run a cheap structural
+check. The goal is **at least one** concrete drift finding per audit
+on a typical mid-size project. Common probes:
+
+| Memory present                          | What to grep / look for                                                                                         |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `craft.errors-as-values` / Result type  | `raise ` in service-layer files when most of the project uses `Result[T, AppError]`.                            |
+| `craft.fail-fast`                       | Endpoints that write to DB / send messages before validating their inputs.                                      |
+| `craft.dry`                             | Two files containing the same 5+ line block (the cheap version of the duplication check `hew-guard` runs on diffs). |
+| `craft.small-functions`                 | Functions exceeding the persisted threshold by 2x or more.                                                      |
+| `craft.clean-architecture`              | Import edges from `domain/` into `infrastructure/` (forbidden direction).                                       |
+| `craft.idempotence`                     | POST handlers that mutate state without an idempotency key, in a project that committed to idempotent writes.   |
+| `craft.pure-functions`                  | Modules named like "utils" / "compute" that nonetheless import `os`, `time`, `random`, DB clients.              |
+| `craft.test-first`                      | Behavior-bearing modules with no sibling test in `tests/`.                                                      |
+
+Persist each finding as an `AUDIT:` memory with the principle id, the
+location, and the suggested fix:
+
+```
+hew remember --type=audit "craft.errors-as-values drift — app/services/billing.py:42 raises raw BillingError; project convention is Result[T, BillingError] (per CONVENTION:craft.errors-as-values). Wrap or refactor."
+hew remember --type=audit "craft.clean-architecture drift — app/domain/user.py imports app/infrastructure/db.py at line 8. Forbidden direction (domain must not depend on infrastructure). Inject the repo via interface in app/domain/ports.py."
+hew remember --type=audit "craft.small-functions drift — app/api/checkout.py:checkout_handler is 142 lines (threshold 25). Split per single-level-of-abstraction; payment, fulfillment, notification are three reasons-to-change."
+```
+
+Skip principles **not** in the project's set — universal SOLID
+enforcement is not what this audit is for. The signal is "the
+codebase claims X and contradicts itself" — drift between word and
+deed.
+
+Open a `bug` task for each drift finding whose fix is clear-cut and
+local; leave the rest as `AUDIT:` memories for the user to triage.
+
+Add a `craft drift` section to the audit output:
+
+```
+craft drift (3):
+  errors-as-values  → app/services/billing.py:42  opens bd-X.10
+  clean-architecture → app/domain/user.py:8       opens bd-X.11
+  small-functions   → checkout_handler (142 LOC)  surfaced for triage
+```
+
 ## When to auto-open vs surface
 
 Auto-open tasks for:
@@ -157,7 +209,12 @@ warnings (5):
   uuid 8.3.2 + 9.0.0     duplicate
   …
 
-Tasks opened: 3. Memories written: 8. Run `hew status` to confirm.
+craft drift (3):
+  errors-as-values   app/services/billing.py:42  → opens bd-X.10
+  clean-architecture app/domain/user.py:8        → opens bd-X.11
+  small-functions    checkout_handler (142 LOC)  surfaced for triage
+
+Tasks opened: 5. Memories written: 11. Run `hew status` to confirm.
 ```
 
 ## Step — mark phase complete + continue the chain
