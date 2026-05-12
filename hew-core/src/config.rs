@@ -121,17 +121,46 @@ impl Default for CraftConfig {
     }
 }
 
-/// Memory-compaction config. MC.1 ships the minimum-viable struct
-/// referenced by `hew_core::compact::apply`; MC.3 wires the full
-/// get/set/keys/validation surface and the disk round-trip.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+/// Memory-compaction config. Knobs the `/hew:compact` skill + CLI
+/// reads when drafting and applying a [`crate::compact::CompactPlan`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct CompactConfig {
+    /// `/hew:compact` starts in dry-run mode unless the user passes
+    /// `--apply`. Default `true` (per `DECISION:compact-safety`).
+    pub dry_run_default: bool,
+    /// `broad` (strict prompt → fewer, broader clusters) or `fine`
+    /// (relaxed prompt → finer-grained). Default `"broad"` per
+    /// `DECISION:compact-granularity-default`.
+    pub granularity_default: String,
+    /// Upper bound on the cluster count `default_k(n)` returns. The
+    /// formula is `ceil(sqrt(n)).clamp(1, cap)`. Default `6`. Must be
+    /// `>= 1`.
+    pub target_clusters_cap: u32,
+    /// `--allow-recompact` default. Setting this to `true` would let
+    /// the skill silently re-compact already-compacted memories;
+    /// strongly discouraged. Default `false` per
+    /// `DECISION:compact-drift-guard`.
+    pub allow_recompact_default: bool,
     /// Literal memory keys that `compact::apply` refuses to forget,
     /// regardless of plan. Hardcoded exemptions (STATUS:scan etc.)
     /// always apply in addition to this list. Default `[]`.
     pub exempt: Vec<String>,
 }
+
+impl Default for CompactConfig {
+    fn default() -> Self {
+        Self {
+            dry_run_default: true,
+            granularity_default: "broad".to_string(),
+            target_clusters_cap: 6,
+            allow_recompact_default: false,
+            exempt: Vec::new(),
+        }
+    }
+}
+
+pub const COMPACT_GRANULARITIES: &[&str] = &["broad", "fine"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
@@ -208,6 +237,19 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "craft.warn_on_unused" | "craft.warn-on-unused" => {
             Some(cfg.craft.warn_on_unused.to_string())
         }
+        "compact.dry_run_default" | "compact.dry-run-default" => {
+            Some(cfg.compact.dry_run_default.to_string())
+        }
+        "compact.granularity_default" | "compact.granularity-default" => {
+            Some(cfg.compact.granularity_default.clone())
+        }
+        "compact.target_clusters_cap" | "compact.target-clusters-cap" => {
+            Some(cfg.compact.target_clusters_cap.to_string())
+        }
+        "compact.allow_recompact_default" | "compact.allow-recompact-default" => {
+            Some(cfg.compact.allow_recompact_default.to_string())
+        }
+        "compact.exempt" => Some(cfg.compact.exempt.join(",")),
         _ => None,
     }
 }
@@ -287,6 +329,41 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "craft.warn_on_unused" | "craft.warn-on-unused" => {
             cfg.craft.warn_on_unused = bool_val(value)?
         }
+        "compact.dry_run_default" | "compact.dry-run-default" => {
+            cfg.compact.dry_run_default = bool_val(value)?
+        }
+        "compact.granularity_default" | "compact.granularity-default" => {
+            if !COMPACT_GRANULARITIES.contains(&value) {
+                return Err(HewError::MissingFlag {
+                    flag: format!(
+                        "value (expected one of {}, got `{value}`)",
+                        COMPACT_GRANULARITIES.join("|")
+                    ),
+                });
+            }
+            cfg.compact.granularity_default = value.to_string();
+        }
+        "compact.target_clusters_cap" | "compact.target-clusters-cap" => {
+            let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                flag: format!("value (expected positive integer, got `{value}`)"),
+            })?;
+            if n == 0 {
+                return Err(HewError::MissingFlag {
+                    flag: "value (compact.target_clusters_cap must be >= 1)".to_string(),
+                });
+            }
+            cfg.compact.target_clusters_cap = n;
+        }
+        "compact.allow_recompact_default" | "compact.allow-recompact-default" => {
+            cfg.compact.allow_recompact_default = bool_val(value)?
+        }
+        "compact.exempt" => {
+            cfg.compact.exempt = if value.is_empty() {
+                Vec::new()
+            } else {
+                value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+            };
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -313,6 +390,11 @@ pub fn keys() -> &'static [&'static str] {
         "testing.require",
         "craft.max_function_lines",
         "craft.warn_on_unused",
+        "compact.dry_run_default",
+        "compact.granularity_default",
+        "compact.target_clusters_cap",
+        "compact.allow_recompact_default",
+        "compact.exempt",
     ]
 }
 
@@ -400,6 +482,9 @@ mod tests {
                 "review.batch_size" => "10",
                 "review.after_epic" => "true",
                 "craft.max_function_lines" => "20",
+                "compact.granularity_default" => "fine",
+                "compact.target_clusters_cap" => "8",
+                "compact.exempt" => "STATUS:custom,SOMETHING:else",
                 _ => "true",
             };
             set(&mut cfg, k, probe_value).expect(k);
@@ -529,5 +614,93 @@ mod tests {
         assert!(loaded.testing.require);
         assert_eq!(loaded.craft.max_function_lines, 30);
         assert!(!loaded.craft.warn_on_unused);
+    }
+
+    // ──────── compact.* ────────
+
+    #[test]
+    fn compact_defaults_match_decisions() {
+        let cfg = Config::default();
+        assert!(cfg.compact.dry_run_default, "DECISION:compact-safety");
+        assert_eq!(
+            cfg.compact.granularity_default, "broad",
+            "DECISION:compact-granularity-default"
+        );
+        assert_eq!(cfg.compact.target_clusters_cap, 6, "DECISION:compact-k-default");
+        assert!(!cfg.compact.allow_recompact_default, "DECISION:compact-drift-guard");
+        assert!(cfg.compact.exempt.is_empty());
+    }
+
+    #[test]
+    fn compact_get_returns_known_keys() {
+        let cfg = Config::default();
+        assert_eq!(get(&cfg, "compact.dry_run_default"), Some("true".into()));
+        assert_eq!(get(&cfg, "compact.granularity-default"), Some("broad".into()));
+        assert_eq!(get(&cfg, "compact.target_clusters_cap"), Some("6".into()));
+        assert_eq!(get(&cfg, "compact.allow-recompact-default"), Some("false".into()));
+        assert_eq!(get(&cfg, "compact.exempt"), Some(String::new()));
+    }
+
+    #[test]
+    fn compact_granularity_validates() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "compact.granularity_default", "fine").unwrap();
+        assert_eq!(cfg.compact.granularity_default, "fine");
+        set(&mut cfg, "compact.granularity-default", "broad").unwrap();
+        assert_eq!(cfg.compact.granularity_default, "broad");
+        assert!(set(&mut cfg, "compact.granularity_default", "ultra-fine").is_err());
+    }
+
+    #[test]
+    fn compact_target_clusters_cap_rejects_zero() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "compact.target_clusters_cap", "8").unwrap();
+        assert_eq!(cfg.compact.target_clusters_cap, 8);
+        assert!(set(&mut cfg, "compact.target_clusters_cap", "0").is_err());
+        assert!(set(&mut cfg, "compact.target_clusters_cap", "abc").is_err());
+    }
+
+    #[test]
+    fn compact_exempt_parses_comma_list() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "compact.exempt", "STATUS:foo, DECISION:bar,SECURITY:baz").unwrap();
+        assert_eq!(cfg.compact.exempt, vec!["STATUS:foo", "DECISION:bar", "SECURITY:baz"]);
+        assert_eq!(
+            get(&cfg, "compact.exempt"),
+            Some("STATUS:foo,DECISION:bar,SECURITY:baz".into())
+        );
+        // Empty clears the list.
+        set(&mut cfg, "compact.exempt", "").unwrap();
+        assert!(cfg.compact.exempt.is_empty());
+    }
+
+    #[test]
+    fn compact_bool_keys_accept_bool() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "compact.dry_run_default", "false").unwrap();
+        assert!(!cfg.compact.dry_run_default);
+        set(&mut cfg, "compact.allow-recompact-default", "true").unwrap();
+        assert!(cfg.compact.allow_recompact_default);
+        assert!(set(&mut cfg, "compact.dry_run_default", "later").is_err());
+    }
+
+    #[test]
+    fn compact_keys_survive_disk_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "compact.dry_run_default", "false").unwrap();
+        set(&mut cfg, "compact.granularity_default", "fine").unwrap();
+        set(&mut cfg, "compact.target_clusters_cap", "4").unwrap();
+        set(&mut cfg, "compact.allow_recompact_default", "true").unwrap();
+        set(&mut cfg, "compact.exempt", "STATUS:custom,STATUS:other").unwrap();
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert!(!loaded.compact.dry_run_default);
+        assert_eq!(loaded.compact.granularity_default, "fine");
+        assert_eq!(loaded.compact.target_clusters_cap, 4);
+        assert!(loaded.compact.allow_recompact_default);
+        assert_eq!(loaded.compact.exempt, vec!["STATUS:custom", "STATUS:other"]);
     }
 }
