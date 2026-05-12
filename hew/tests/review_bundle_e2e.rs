@@ -130,8 +130,13 @@ fn default_scope_uses_batch_size_from_config() {
         "update_check = true\n[review]\nafter_n_tasks = 0\nafter_epic = false\nbatch_size = 2\n",
     );
 
-    let out =
-        hew(dir.path()).args(["review", "bundle"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "bundle", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["scope"]["kind"], "last_n");
     assert_eq!(v["scope"]["n"], 2);
@@ -151,7 +156,7 @@ fn n_flag_overrides_config() {
     write_fixture(dir.path(), "memories.json", "{}");
 
     hew(dir.path())
-        .args(["review", "bundle", "--n", "1"])
+        .args(["review", "bundle", "--n", "1", "--json"])
         .assert()
         .success()
         .stdout(contains("\"n\": 1"));
@@ -171,7 +176,7 @@ fn since_epic_id_is_classified_as_epic_scope() {
     );
 
     hew(dir.path())
-        .args(["review", "bundle", "--since", "e-1"])
+        .args(["review", "bundle", "--since", "e-1", "--json"])
         .assert()
         .success()
         .stdout(contains("\"kind\": \"epic\""))
@@ -192,7 +197,7 @@ fn since_task_id_is_classified_as_task_scope() {
     );
 
     let out = hew(dir.path())
-        .args(["review", "bundle", "--since", "t-2"])
+        .args(["review", "bundle", "--since", "t-2", "--json"])
         .assert()
         .success()
         .get_output()
@@ -219,7 +224,7 @@ fn since_git_ref_is_classified_as_git_scope() {
     write_fixture(dir.path(), "list-closed.json", "[]");
 
     let out = hew(dir.path())
-        .args(["review", "bundle", "--since", "HEAD~3"])
+        .args(["review", "bundle", "--since", "HEAD~3", "--json"])
         .assert()
         .success()
         .get_output()
@@ -242,7 +247,7 @@ fn unknown_since_errors_with_clear_message() {
     write_fixture(dir.path(), "memories.json", "{}");
 
     hew(dir.path())
-        .args(["review", "bundle", "--since", "totally-not-a-ref"])
+        .args(["review", "bundle", "--since", "totally-not-a-ref", "--json"])
         .assert()
         .failure()
         .stderr(contains("matches no bd issue"));
@@ -267,8 +272,13 @@ fn memories_are_filtered_to_review_relevant_prefixes() {
         }"#,
     );
 
-    let out =
-        hew(dir.path()).args(["review", "bundle"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "bundle", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["memories"]["conventions"].as_array().unwrap().len(), 1);
     assert_eq!(v["memories"]["boundaries"].as_array().unwrap().len(), 1);
@@ -285,7 +295,7 @@ fn json_output_is_valid() {
     write_fixture(dir.path(), "memories.json", "{}");
 
     let out = hew(dir.path())
-        .args(["review", "bundle", "--n", "1"])
+        .args(["review", "bundle", "--n", "1", "--json"])
         .assert()
         .success()
         .get_output()
@@ -302,7 +312,7 @@ fn since_and_n_are_mutually_exclusive() {
     install_stub(dir.path(), "git", GIT_STUB);
 
     hew(dir.path())
-        .args(["review", "bundle", "--since", "x", "--n", "3"])
+        .args(["review", "bundle", "--since", "x", "--n", "3", "--json"])
         .assert()
         .failure()
         // clap's standard conflict message
@@ -336,6 +346,54 @@ fn one_closed_task_json(id: &str, issue_type: &str, closed_at: &str) -> String {
 }
 
 #[test]
+fn bundle_text_default_is_a_summary_not_raw_json() {
+    let dir = tempfile::tempdir().unwrap();
+    install_stub(dir.path(), "bd", BD_STUB);
+    install_stub(dir.path(), "git", GIT_STUB);
+    write_fixture(dir.path(), "list-closed.json", three_closed_tasks_newest_first());
+    write_fixture(dir.path(), "memories.json", "{}");
+    write_fixture(
+        dir.path(),
+        "config.toml",
+        "[review]\nafter_n_tasks = 0\nafter_epic = false\nbatch_size = 8\n",
+    );
+
+    hew(dir.path())
+        .args(["review", "bundle", "--n", "2"])
+        .assert()
+        .success()
+        .stdout(contains("review bundle"))
+        .stdout(contains("closed tasks:"))
+        .stdout(contains("LastN(2)"));
+}
+
+#[test]
+fn check_text_default_renders_fire_or_skip_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    install_stub(dir.path(), "bd", BD_STUB);
+    install_stub(dir.path(), "git", GIT_STUB);
+    write_fixture(
+        dir.path(),
+        "list-closed.json",
+        &one_closed_task_json("t-1", "task", "2026-05-12T11:00:00Z"),
+    );
+    write_fixture(dir.path(), "memories.json", "{}");
+    write_fixture(
+        dir.path(),
+        "config.toml",
+        "[review]\nafter_n_tasks = 0\nafter_epic = false\nbatch_size = 8\n",
+    );
+
+    hew(dir.path())
+        .args(["review", "check"])
+        .assert()
+        .success()
+        .stdout(contains("review check"))
+        .stdout(contains("skip"))
+        .stdout(contains("tasks_since_last_review"));
+}
+
+#[test]
 fn check_reports_no_triggers_when_unconfigured() {
     let dir = tempfile::tempdir().unwrap();
     install_stub(dir.path(), "bd", BD_STUB);
@@ -352,8 +410,13 @@ fn check_reports_no_triggers_when_unconfigured() {
         "[review]\nafter_n_tasks = 0\nafter_epic = false\nbatch_size = 8\n",
     );
 
-    let out =
-        hew(dir.path()).args(["review", "check"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "check", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["picker_should_fire"], false);
     assert!(v["reason"].as_str().unwrap().contains("no triggers"));
@@ -372,8 +435,13 @@ fn check_fires_when_after_n_tasks_threshold_met() {
         "[review]\nafter_n_tasks = 2\nafter_epic = false\nbatch_size = 8\n",
     );
 
-    let out =
-        hew(dir.path()).args(["review", "check"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "check", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     // 3 closed tasks, threshold 2, no review marker → fires.
     assert_eq!(v["tasks_since_last_review"], 3);
@@ -399,8 +467,13 @@ fn check_detects_epic_just_closed_from_bd() {
         "[review]\nafter_n_tasks = 0\nafter_epic = true\nbatch_size = 8\n",
     );
 
-    let out =
-        hew(dir.path()).args(["review", "check"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "check", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["epic_just_closed"], true);
     assert_eq!(v["picker_should_fire"], true);
@@ -426,7 +499,7 @@ fn check_honors_explicit_epic_closed_flag() {
     );
 
     let out = hew(dir.path())
-        .args(["review", "check", "--epic-closed", "true"])
+        .args(["review", "check", "--epic-closed", "true", "--json"])
         .assert()
         .success()
         .get_output()
@@ -454,8 +527,13 @@ fn check_does_not_fire_when_threshold_not_met() {
         "[review]\nafter_n_tasks = 5\nafter_epic = false\nbatch_size = 8\n",
     );
 
-    let out =
-        hew(dir.path()).args(["review", "check"]).assert().success().get_output().stdout.clone();
+    let out = hew(dir.path())
+        .args(["review", "check", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["tasks_since_last_review"], 1);
     assert_eq!(v["picker_should_fire"], false);

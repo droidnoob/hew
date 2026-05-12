@@ -1,5 +1,5 @@
 use clap::Args as ClapArgs;
-use hew_core::Ctx;
+use hew_core::{Ctx, OutputMode};
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -7,7 +7,9 @@ pub struct Args {
     #[arg(long)]
     pub local: bool,
 
-    /// Print version diff JSON without actually updating the binary.
+    /// Check for a newer release without updating the binary. Prints
+    /// text by default; use the global `--json` for the structured
+    /// `{current, update_available, error?}` payload.
     #[arg(long)]
     pub check_only: bool,
 
@@ -32,23 +34,34 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     if args.check_only {
         let current = env!("CARGO_PKG_VERSION");
+        let want_json = matches!(ctx.output, OutputMode::Json);
         let upgrade_available = match updater.is_update_needed_sync() {
             Ok(v) => v,
             Err(e) => {
-                let payload = serde_json::json!({
-                    "current": current,
-                    "update_available": false,
-                    "error": e.to_string(),
-                });
-                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                if want_json {
+                    let payload = serde_json::json!({
+                        "current": current,
+                        "update_available": false,
+                        "error": e.to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                } else {
+                    println!("hew {current} — update check failed: {e}");
+                }
                 return Ok(());
             }
         };
-        let payload = serde_json::json!({
-            "current": current,
-            "update_available": upgrade_available,
-        });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        if want_json {
+            let payload = serde_json::json!({
+                "current": current,
+                "update_available": upgrade_available,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        } else if upgrade_available {
+            println!("hew {current} — update available. Run `hew update` to upgrade.");
+        } else {
+            println!("hew {current} — up to date.");
+        }
         return Ok(());
     }
 

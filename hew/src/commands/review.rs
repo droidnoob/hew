@@ -8,11 +8,11 @@
 //!   from DECISION:review-trigger.
 
 use clap::{Args as ClapArgs, Subcommand};
-use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::config;
 use hew_core::git::{GitClient, RealGit};
 use hew_core::review::{self, ReviewScope};
+use hew_core::{Ctx, OutputMode};
 use serde::Serialize;
 
 #[derive(Debug, ClapArgs)]
@@ -51,18 +51,22 @@ pub struct CheckArgs {
     pub epic_closed: Option<bool>,
 }
 
-pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
+pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     match args.op {
-        Op::Bundle(a) => run_bundle(a),
-        Op::Check(a) => run_check(a),
+        Op::Bundle(a) => run_bundle(ctx, a),
+        Op::Check(a) => run_check(ctx, a),
     }
+}
+
+fn wants_json(ctx: &Ctx) -> bool {
+    matches!(ctx.output, OutputMode::Json)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // bundle
 // ────────────────────────────────────────────────────────────────────────────
 
-fn run_bundle(args: BundleArgs) -> miette::Result<()> {
+fn run_bundle(ctx: &Ctx, args: BundleArgs) -> miette::Result<()> {
     let bd = RealBd::discover()?;
     let git = RealGit::discover()?;
     let cfg = config::load()?;
@@ -70,9 +74,44 @@ fn run_bundle(args: BundleArgs) -> miette::Result<()> {
     let scope = resolve_scope(&bd, &git, &args, &cfg)?;
     let bundle = review::bundle(&bd, &git, scope)?;
 
-    let json = serde_json::to_string_pretty(&bundle)
-        .map_err(|e| miette::miette!("serialize bundle: {e}"))?;
-    println!("{json}");
+    if wants_json(ctx) {
+        let json = serde_json::to_string_pretty(&bundle)
+            .map_err(|e| miette::miette!("serialize bundle: {e}"))?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    // Text mode: one-screen summary; full payload requires --json.
+    let scope_label = match &bundle.scope {
+        hew_core::review::ReviewScopeRepr::LastN { n } => format!("LastN({n})"),
+        hew_core::review::ReviewScopeRepr::Epic { id } => format!("Epic({id})"),
+        hew_core::review::ReviewScopeRepr::Task { id } => format!("Task({id})"),
+        hew_core::review::ReviewScopeRepr::GitRef { rev } => format!("GitRef({rev})"),
+    };
+    let diff_lines = bundle.diff.lines().count();
+    println!("review bundle — scope={scope_label}");
+    println!("  closed tasks:    {}", bundle.closed_tasks.len());
+    if let Some(anchor) = &bundle.anchor_at {
+        println!("  anchor_at:       {anchor}");
+    }
+    if let Some(base) = &bundle.diff_base {
+        println!("  diff_base:       {base}");
+    }
+    println!("  diff_lines:      {diff_lines}");
+    println!(
+        "  memories:        {}c / {}b / {}s",
+        bundle.memories.conventions.len(),
+        bundle.memories.boundaries.len(),
+        bundle.memories.security.len()
+    );
+    if let Some(epic) = &bundle.epic {
+        println!("  epic:            {} — {}", epic.id, epic.title);
+    }
+    if let Some(prev) = &bundle.last_review_at {
+        println!("  last_review_at:  {prev}");
+    }
+    println!();
+    println!("Pass --json for the full ReviewBundle payload consumed by /hew:review.");
     Ok(())
 }
 
@@ -166,7 +205,7 @@ struct ConfigSnapshot {
     batch_size: u32,
 }
 
-fn run_check(args: CheckArgs) -> miette::Result<()> {
+fn run_check(ctx: &Ctx, args: CheckArgs) -> miette::Result<()> {
     let bd = RealBd::discover()?;
     let cfg = config::load()?;
 
@@ -193,9 +232,25 @@ fn run_check(args: CheckArgs) -> miette::Result<()> {
         reason,
     };
 
-    let json =
-        serde_json::to_string_pretty(&out).map_err(|e| miette::miette!("serialize check: {e}"))?;
-    println!("{json}");
+    if wants_json(ctx) {
+        let json = serde_json::to_string_pretty(&out)
+            .map_err(|e| miette::miette!("serialize check: {e}"))?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    let verdict = if out.picker_should_fire { "FIRE" } else { "skip" };
+    println!("review check — {verdict}");
+    println!("  tasks_since_last_review: {}", out.tasks_since_last_review);
+    if let Some(prev) = &out.last_review_at {
+        println!("  last_review_at:          {prev}");
+    }
+    println!("  epic_just_closed:        {}", out.epic_just_closed);
+    println!(
+        "  config:                  after_n_tasks={}, after_epic={}, batch_size={}",
+        out.config.after_n_tasks, out.config.after_epic, out.config.batch_size,
+    );
+    println!("  reason:                  {}", out.reason);
     Ok(())
 }
 

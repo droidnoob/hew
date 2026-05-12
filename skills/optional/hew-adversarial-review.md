@@ -2,7 +2,7 @@
 ---
 name: hew-adversarial-review
 category: optional
-init: hew review bundle
+init: hew review bundle --json
 ---
 
 # hew-adversarial-review — Red-Team / Steelman Pass
@@ -37,9 +37,11 @@ hew config set optional-skills.review true   # same flag as hew-review
 
 ## Inputs from `hew review bundle`
 
-Same JSON bundle as `hew-review`: `scope`, `closed_tasks`, `diff`,
-`diff_base`, `memories`, `epic`, `last_review_at`. The shape is
-identical; what differs is the stance you take reading it.
+Same JSON bundle as `hew-review` (invoke `hew review bundle --json` —
+the text default is a short summary, not the full payload): `scope`,
+`closed_tasks`, `diff`, `diff_base`, `memories`, `epic`,
+`last_review_at`. The shape is identical; what differs is the stance
+you take reading it.
 
 ## Stance — be the antagonist
 

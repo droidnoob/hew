@@ -2,7 +2,7 @@
 ---
 name: hew-review
 category: optional
-init: hew review bundle
+init: hew review bundle --json
 ---
 
 # hew-review — Friendly Second-Pass Code Review
@@ -43,8 +43,9 @@ config.
 
 ## Inputs from `hew review bundle`
 
-`hew review bundle [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
-emits a JSON `ReviewBundle` with:
+`hew review bundle --json [--since=<epic-id|task-id|git-ref>] [--n=<count>]`
+emits a JSON `ReviewBundle` (use `--json` — the text default is a
+short summary, not the full payload) with:
 
 - `scope` — what the caller asked for (LastN / Epic / Task / GitRef).
 - `closed_tasks` — oldest-first list of tasks in scope, each with id,
