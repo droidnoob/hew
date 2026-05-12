@@ -67,7 +67,7 @@ fn hew_in(dir: &std::path::Path) -> Command {
 
 fn issue_json(id: &str, title: &str, status: &str, closed_at: &str) -> String {
     format!(
-        r#"{{"id":"{id}","title":"{title}","status":"{status}","priority":2,"issue_type":"task","closed_at":"{closed_at}","close_reason":null,"parent":null}}"#
+        r#"{{"id":"{id}","title":"{title}","description":"body for {id}","status":"{status}","priority":2,"issue_type":"task","closed_at":"{closed_at}","close_reason":null,"parent":null}}"#
     )
 }
 
@@ -87,7 +87,8 @@ fn show_text_includes_title_and_status() {
         .stdout(contains("hew-1"))
         .stdout(contains("do the thing"))
         .stdout(contains("status:"))
-        .stdout(contains("open"));
+        .stdout(contains("open"))
+        .stdout(contains("body for hew-1"));
 }
 
 #[test]

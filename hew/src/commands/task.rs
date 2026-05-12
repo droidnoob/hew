@@ -338,6 +338,12 @@ fn print_task_long(t: &TaskSummary) {
             _ => println!("  closed:   {}", t.closed_at),
         }
     }
+    if !t.description.trim().is_empty() {
+        println!();
+        for line in t.description.lines() {
+            println!("  {line}");
+        }
+    }
 }
 
 fn print_task_row(t: &TaskSummary) {

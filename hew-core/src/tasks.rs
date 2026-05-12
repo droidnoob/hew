@@ -37,6 +37,10 @@ pub struct TaskSummary {
     /// populated from `bd show --json` `status` field.
     #[serde(default)]
     pub status: String,
+    /// Full task body (markdown). Empty for issues that haven't been
+    /// fleshed out yet.
+    #[serde(default)]
+    pub description: String,
     pub closed_at: String,
     pub close_reason: Option<String>,
     pub parent: Option<String>,
@@ -190,6 +194,7 @@ impl BdIssueRaw {
             issue_type: self.issue_type,
             priority: self.priority,
             status: self.status,
+            description: self.description,
             closed_at: self.closed_at,
             close_reason: self.close_reason,
             parent: self.parent,
