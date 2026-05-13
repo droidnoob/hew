@@ -9,6 +9,36 @@
 
 set -euo pipefail
 
+# ────────────────────────────────────────────────────────────────────────────
+# Branch guard — refuse commits on protected branches.
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Workflow is feature-branch → PR → merge. Commits directly on `main`
+# break that contract and bypass the GitHub branch protection that
+# enforces it server-side.
+#
+# Emergency override (use sparingly — e.g. for a release-tag commit
+# that must land on main directly):
+#   HEW_ALLOW_MAIN_COMMIT=1 git commit ...
+
+PROTECTED_BRANCHES="main master"
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+for protected in $PROTECTED_BRANCHES; do
+  if [[ "$CURRENT_BRANCH" == "$protected" ]]; then
+    if [[ "${HEW_ALLOW_MAIN_COMMIT:-}" == "1" ]]; then
+      echo "pre-commit: HEW_ALLOW_MAIN_COMMIT=1 — allowing commit on '$CURRENT_BRANCH'." >&2
+      break
+    fi
+    echo "pre-commit: refusing to commit on protected branch '$CURRENT_BRANCH'." >&2
+    echo "pre-commit:   Open a feature branch first:" >&2
+    echo "pre-commit:     hew branch new --prefix=<feat|fix|chore|docs> --slug=<text>" >&2
+    echo "pre-commit:   Emergency override:" >&2
+    echo "pre-commit:     HEW_ALLOW_MAIN_COMMIT=1 git commit ..." >&2
+    exit 1
+  fi
+done
+
 STAGED=$(git diff --cached --name-only --diff-filter=ACMR)
 
 if ! printf '%s\n' "$STAGED" | grep -E '(\.rs$|(^|/)Cargo\.toml$)' >/dev/null; then
