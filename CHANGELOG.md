@@ -6,6 +6,88 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-13
+
+Branch-protection hardening + project-level agent guidance docs. No
+functional CLI changes; methodology + tooling refinements that
+formalize the "no commits on `main`" contract end-to-end.
+
+### Added
+
+- **Branch protection — local pre-commit hook** (`.githooks/pre-commit`
+  + `.pre-commit-config.yaml`): refuses commits while HEAD is on
+  `main` / `master`. Emergency override via
+  `HEW_ALLOW_MAIN_COMMIT=1`. Mirrored across both the bash hook and
+  the pre-commit framework config so installing either gets the
+  guard.
+- **Branch protection — GitHub ruleset spec** at
+  `.github/protection/main-ruleset.json` plus a
+  `.github/protection/README.md` documenting when and how to apply.
+  The ruleset refuses deletion + force-push, requires PRs to merge,
+  requires all 8 CI contexts to pass (rustfmt + clippy + 4-way test
+  matrix + cargo-audit + cargo-deny), with no admin bypass. Tracked
+  for deferred apply once the repo flips public.
+- **Project-level agent guidance**: new `CLAUDE.md` (~200 lines) +
+  `AGENTS.md` (thin pointer following the [agents.md](https://agents.md)
+  convention). CLAUDE.md is the canonical source — covers project
+  shape, branching contract, build/test/lint, how to use the
+  methodology on itself, memory prefix semantics, the three-place
+  test-count-drift contract, hard-won gotchas (pipe-deadlock, zsh
+  heredoc, clippy traps, bd-mol-bond, flaky pre-commit), locked
+  behavioral preferences (`FEEDBACK:no-json-piping`,
+  `FEEDBACK:prefer-hew-over-bd`, `CONVENTION:commit-messages`),
+  locked architectural decisions (craft-enforcement, craft-adaptive,
+  compact-safety, review-filing, hew-remember-type-allowlist), and
+  the 5-step release process.
+- **CONTRIBUTING.md "Branching" section** documenting that `main` is
+  protected on both ends, the conventional prefix list, and the
+  override env var.
+
+### Changed
+
+- **`hew-plan`** now decides the branch shape (prefix + slug) as
+  part of the plan output rather than the agent inventing one at
+  claim time. New "Decide the branch shape (don't create it)"
+  section right after "When this skill runs". Output recap gains a
+  `Branch: <prefix>/<slug>` line alongside Goal / Acceptance /
+  Architecture / Order / Graph shape / Open questions.
+- **`hew-execute` Step 3a** renamed "create the branch on first
+  claim" and restructured around the new skill-boundary contract:
+  - **Branch source-of-truth** subsection reads the plan's `Branch:`
+    recap, falls back to the epic body, then asks the user once and
+    caches.
+  - **Protected-branch guard** subsection refuses to proceed
+    without a branch decision when HEAD is on `main` / `master` and
+    the project uses protected-branch enforcement. Never invents a
+    branch name — that's the planner's job.
+  - **Opt-in auto-branch strategy** subsection unchanged in spirit
+    but now layered cleanly on top of the per-plan decision.
+  Catches the "agent walked the loop on main and only discovered
+  the problem at commit time" failure mode at claim time instead.
+- **README.md** restructured for breathing room: horizontal rules
+  between every major section, dense 4–6 sentence paragraphs split
+  at natural pivots, numbered phase items broken into lead lines +
+  rationale sub-paragraphs, install methods bolded as labels, the
+  39-slashes line expanded into a bulleted category list,
+  troubleshooting entries split into bold-header + body. 245 → 372
+  lines, content byte-identical word-for-word.
+
+### Fixed
+
+- `hew/tests/completions_e2e.rs::manpage_emits_roff_header` no
+  longer hardcodes the version string; reads `CARGO_PKG_VERSION` at
+  compile time. (Already fixed in 0.2.0 but worth flagging since it
+  was the bump-blocker.)
+
+### Memories
+
+- New `CONVENTION:skill-boundaries-plan-vs-execute` codifies the
+  rule: `hew-plan` DECIDES, `hew-execute` DOES. Plan never runs
+  `git`; execute never makes architectural calls. Apply this lens
+  to any new skill-body work that touches actions vs. decisions.
+- New `CONVENTION:commit-messages` codifies the no-GSD-by-name rule
+  for commit messages and bodies.
+
 ## [0.2.0] — 2026-05-13
 
 The Craft + Compaction release. The methodology now adapts to each project's chosen quality dial, surfaces drift as soft warnings without blocking close, and ships a controlled compaction surface for noisy memory prefixes. Plus 12 new slash commands and a docs refresh.
