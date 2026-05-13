@@ -343,6 +343,7 @@ Not slashes, but referenced by skill bodies and worth knowing:
 | `hew status` | Human-readable project state |
 | `hew memories [--prefix\|--grep\|--research\|--recall\|--forget]` | List, filter, recall, or forget memories |
 | `hew remember --type=<allowlist> "<body>"` | Write a memory with type validation; `--raw` to bypass |
+| `hew remember --from-file <path>` | Bulk insert from a JSON array of `{type, body, key?, raw?}` entries. All-or-nothing: every entry validated before any write. |
 | `hew task {show,list,claim,close,new,reopen,children,note,search}` | Curated `bd` wrappers for task ops |
 | `hew dep {add,remove,tree,blocked}` | Curated `bd` wrappers for dependency ops |
 | `hew epic {list,show,tree,close,audit,summary}` | Epic-level operations |

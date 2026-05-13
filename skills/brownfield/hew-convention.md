@@ -326,6 +326,63 @@ Include:
 If a convention has known exceptions, include them in the rule — the
 executor will follow the rule literally otherwise.
 
+## Group by domain — one memory per domain, not one per rule
+
+When a domain has multiple related rules (e.g. `errors`, `cli-output`,
+`testing`), **issue one `hew remember` per domain** with the rules
+folded into a single structured body. Atomic per-rule memories are
+how a project ends up with a 30-entry `CONVENTION:*` set that has to
+be compacted back down to 9 anyway — write them grouped from the
+start.
+
+**Atomic per rule (avoid for multi-rule domains):**
+
+```
+hew remember --type=convention "errors — never raise raw exceptions"
+hew remember --type=convention "errors — wrap in AppError"
+hew remember --type=convention "errors — middleware catches AppError; never call jsonify"
+```
+
+**Grouped per domain (preferred):**
+
+```
+hew remember --type=convention "errors — Never raise raw exceptions. Wrap in AppError(code, message, details) defined in app/exceptions.py. AppError is caught by error_middleware (app/middleware/errors.py); never call jsonify/Response directly from a route handler."
+```
+
+Rule of thumb: if you're about to issue ≥3 `hew remember` calls with
+the same `<domain> —` lead, fold them into one body with sub-paragraphs.
+
+### Bulk emission via `--from-file`
+
+For a whole pass that produces 5+ memories across several domains,
+prefer `hew remember --from-file <path>` over a sequence of CLI
+calls. Each entry is one *domain-grouped* memory:
+
+```json
+[
+  {
+    "type": "convention",
+    "body": "errors — Never raise raw exceptions. Wrap in AppError(code, message, details). Caught by error_middleware; never jsonify from a route."
+  },
+  {
+    "type": "convention",
+    "body": "tests — One test file per source module. Fixtures live in tests/conftest.py + tests/factories/ (factory_boy). Real Postgres via testcontainers; no mocking of the DB layer."
+  },
+  {
+    "type": "convention",
+    "body": "naming — snake_case for functions/variables. PascalCase for classes. UPPER_SNAKE for constants. Private fields prefix with single underscore."
+  }
+]
+```
+
+```sh
+hew remember --from-file conventions.json
+# → remembered 3
+```
+
+The whole file is validated up-front; a single malformed entry rejects
+the batch with `entry[N]: <reason>` and zero side effects.
+
 ## Resolution when the codebase contradicts itself
 
 Real codebases have drift. You'll find services that follow the
