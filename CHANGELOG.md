@@ -6,6 +6,81 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-13
+
+First feature release of the 0.3 line. Two new CLI surfaces (`hew
+epic list`, `hew remember --from-file`, `hew memories --export`), a
+real correctness fix in `hew compact apply`, and a methodology
+refinement that teaches memory grouping by domain — all on top of
+the 0.2.1 branch-protection baseline. Repo stays private until the
+treesitter milestone (`hew-sb7`) ships; this tag exists for version
+hygiene + local installers.
+
+### Added
+
+- **`hew epic list`** (#6): new verb under `hew epic`. Lists epics
+  with status-filter defaults (open/in_progress/blocked/deferred);
+  `--all` includes closed, `--closed` filters to closed-only,
+  `--n <N>` caps rows, `--json` emits structured output. Routes
+  through `hew_core::tasks::list` with `issue_type=epic`. Four unit
+  tests cover the status-filter branches.
+- **`hew remember --from-file <PATH>`** (#8): bulk insert from a JSON
+  array of `{ type?, body, key?, raw? }` entries. All-or-nothing
+  semantics — every entry is validated up-front before any
+  `bd remember` is called, so a malformed entry in the middle of the
+  file rejects the whole batch with `entry[N]: <reason>` and zero
+  partial writes. Nine unit tests cover the payload-building logic.
+- **`hew memories --export [-o PATH] [--plaintext]`** (#10): dump
+  filtered memories to a file. Default format JSON; `--plaintext`
+  for a human-readable text listing. Default path when `-o` is
+  omitted: `<projname>-memories-<iso-ts>.<ext>` in the current
+  directory, with a filesystem-safe ISO timestamp
+  (`YYYY-MM-DDTHH-MM-SSZ`, colons replaced with dashes for Windows
+  safety). Filters reuse the existing `--prefix`, `--grep`,
+  `--research` flags. Six unit tests.
+- **Memory-grouping methodology** (#9): three high-volume
+  memory-creating skill bodies (`hew-convention`, `hew-audit`,
+  `hew-plan`) now teach **one memory per domain** with structured
+  sub-sections instead of atomic per-rule writes. Each skill has a
+  worked atomic-vs-grouped contrast and a rule of thumb (≥3
+  same-domain remembers → fold). The JSON shape for
+  `--from-file` is documented once in `hew-convention.md`; the
+  others cross-reference. `docs/COMMANDS.md` picks up the new
+  `--from-file` row.
+
+### Fixed
+
+- **`hew compact apply` silent data loss on slug collision** (#7):
+  bd's `remember` auto-derives a slug from the body. A compacted
+  replacement whose body starts with `<PREFIX>:<topic>` (e.g.
+  `CONVENTION:subprocess —…`) could auto-slug to the same key as a
+  not-yet-forgotten source. bd treated the write as
+  update-in-place; phase 2's forget then erased the new entry along
+  with the source — silently. `ApplyReport.added` still reported
+  success.
+
+  The fix routes every compaction write through an explicit
+  `--key` of shape `<prefix-lower>-compact-<topic-slug>[-<idx>]
+  [-<n>]`. The `compact-` infix guarantees no auto-derived slug
+  can match. A new phase 1.5 read-back verification re-fetches
+  memories after writes and bails with
+  `HewError::CompactWriteLost { keys }` if any chosen key didn't
+  land — **no sources are forgotten on a broken write**, which
+  preserves the `DECISION:compact-safety` invariant under failure.
+  `ApplyReport` gains `added_keys: Vec<String>`
+  (`serde(default)`, additive-only). Four new regression tests
+  include simulating the exact failure mode via a `MockBd::drop_keys`
+  field.
+
+### Internal
+
+- `MockBd` in `hew-core::compact::tests` now mutates its memory
+  store on remember/forget so post-write verification is testable.
+- The ISO-timestamp helper in `hew/src/commands/memories.rs`
+  intentionally duplicates `iso_from_unix` from
+  `hew/src/commands/compact.rs` (~25 lines); a third call site will
+  trigger an extraction to a shared utility module.
+
 ## [0.2.1] — 2026-05-13
 
 Branch-protection hardening + project-level agent guidance docs. No

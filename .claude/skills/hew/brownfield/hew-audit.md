@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.1 -->
+<!-- hew:version=0.3.0 -->
 ---
 name: hew-audit
 category: brownfield
@@ -109,6 +109,35 @@ hew remember --type=audit "duplicate uuid@8.3.2 + uuid@9.0.0 in tree. Unify to 9
 
 Be specific: package name + version + why + suggested action + where
 it's used (file path if known).
+
+### Group by domain when a finding cluster shares a theme
+
+For a pass that surfaces several findings under the same category
+(e.g. four "deprecated transitively via X" notes, three "version
+drift in the crypto stack"), **fold them into one domain-grouped
+`AUDIT:` memory** rather than N atomic ones. The compaction step
+downstream collapses fragmented audits back into per-domain
+summaries — write them grouped from the start.
+
+**Atomic (avoid for clustered findings):**
+
+```
+hew remember --type=audit "deprecated:lodash@4.17.20"
+hew remember --type=audit "deprecated:moment"
+hew remember --type=audit "deprecated:request@2.88"
+```
+
+**Grouped per domain (preferred):**
+
+```
+hew remember --type=audit "deprecated-deps — lodash@4.17.20 (CVE-2021-23337, prototype pollution; bump to 4.17.21+). moment (UNMAINTAINED, README recommends dayjs/date-fns). request@2.88 (deprecated 2020, migrate to undici or axios). All three are in the same dep tree under app/http/."
+```
+
+For a whole audit batch across several domains, prefer
+`hew remember --from-file <path>` over a sequence of CLI calls — see
+the `hew-convention` skill body for the JSON shape. Single-finding
+critical bugs still go through `hew task new --type=bug` (next
+section).
 
 ## Open Beads tasks for the critical findings
 
