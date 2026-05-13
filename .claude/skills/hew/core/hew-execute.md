@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.0 -->
+<!-- hew:version=0.2.1 -->
 ---
 name: hew-execute
 category: core
@@ -75,41 +75,80 @@ Never start work without claiming. The audit trail (`hew task show <id>`) shows
 who picked up what when — important when sessions fail and a new agent
 needs to resume.
 
-### Step 3a — auto-branch on first claim (optional)
+### Step 3a — create the branch on first claim
 
-Right after claiming, consult `hew config get branching.strategy`:
+`hew-plan` already decided the branch name and surfaced it in the plan
+output (`Branch: <prefix>/<slug>`). This step **creates** it. If
+planning didn't happen (entered the loop cold via `/hew:next` /
+`/hew:work`), the protected-branch guard below catches it.
+
+#### The branch source-of-truth
+
+In priority order:
+
+1. The plan's `Branch:` recap line, if `hew-plan` ran in this
+   conversation. The prefix/slug there is authoritative.
+2. Otherwise, the epic body — re-read `hew epic show <epic-id>` for
+   a `Branch:` line.
+3. Otherwise, ask the user once: "No branch decision found. What
+   prefix + slug should this work go on?" Cache the answer for the
+   session; don't re-ask for sibling tasks under the same epic.
+
+Once you have a `<prefix>/<slug>`, run:
+
+```
+hew branch new --prefix=<prefix> --slug='<slug>'
+```
+
+Skip silently when you're already on the right branch — check via
+`git symbolic-ref --short HEAD`.
+
+#### Protected-branch guard
+
+Run `git symbolic-ref --short HEAD` first. If HEAD is on `main` /
+`master` **and** the project uses protected-branch enforcement
+(detect via `git config core.hooksPath` returning `.githooks`, or
+the presence of `.github/protection/main-ruleset.json`), **refuse to
+proceed without a branch decision**. The pre-commit hook will refuse
+the final commit otherwise; catching it here saves a back-out.
+
+If the plan named a branch, just create it (per "The branch
+source-of-truth" above). If no branch decision exists, ask the user
+for one — don't invent it. Naming the branch is `hew-plan`'s job
+(per `CONVENTION:skill-boundaries-plan-vs-execute`); doing it here
+without a plan recap means the agent is making architectural calls
+the planner skipped.
+
+Skip the guard only when:
+
+- The project doesn't have `.githooks/pre-commit` and doesn't have
+  `.github/protection/main-ruleset.json` (no protection in force).
+- You're already on a non-protected branch.
+- The user explicitly authorized a main-commit (set
+  `HEW_ALLOW_MAIN_COMMIT=1` in the shell). Honor it; do not branch.
+
+#### Opt-in: auto-branch strategy
+
+`hew config get branching.strategy` adds **per-claim** branching on
+top of the plan's per-feature decision:
 
 | Value | Behavior |
 |-------|----------|
-| `none` *(default)* | skip — user manages branches |
-| `epic` | create a branch the first time any task under a given epic is claimed; subsequent tasks under the same epic stay on the same branch |
-| `always` | create a branch every claim (rare; use for review-per-task workflows) |
+| `none` *(default)* | one branch per plan (the plan's `Branch:` decision). Sibling tasks under the same epic stay on it. |
+| `epic` | same as `none` — one branch per epic. (The plan's branch decision typically maps 1:1 to an epic.) |
+| `always` | create a fresh branch every claim. Rare; for review-per-task workflows. Each task ships under its own PR. |
 
-When the strategy fires:
+When `always` fires, derive the per-task slug from the task title
+(`hew task show` → slug the title) and append it to the plan's
+branch: `<plan-branch>/<task-slug>`.
 
-1. Read `hew config get branching.strategy`. If `none`, skip silently.
-2. If `epic`: check whether `git symbolic-ref --short HEAD` already
-   matches a hew-managed branch for this epic (e.g. `feat/<epic-id>-…`).
-   If yes, you're already on it — skip. If no, proceed.
-3. Pick the prefix once per chain — ask the user via picker (default
-   `feat` for tasks under a feature epic, `fix` for bug epics). Cache
-   the choice for the session; don't re-ask for sibling tasks.
-4. Compose the slug as `<epic-id>-<slugified-epic-title>` (e.g.
-   `vhz-agent-ergonomics`). The hew CLI slugifies on its end, so passing
-   the raw title is fine.
-5. Run `hew branch new --prefix=<picked> --slug='<epic-id> <epic-title>'`.
+Skip the strategy silently — never block the claim — when:
 
-Skip silently — never block the claim — when:
-
-- `branching.strategy=none`
-- `git` is not on PATH (`hew branch new` will return `hew::git::not_found`;
-  treat as soft-skip, not an error)
+- `branching.strategy=none` and you're already on the plan's branch.
+- `git` is not on PATH (`hew branch new` will return
+  `hew::git::not_found`; treat as soft-skip).
 - The user passed `--no-branch` to the loop (or said "no branch" in
-  conversation)
-- You're already on a hew-managed branch matching this epic
-
-The branch is a convenience, not a constraint. Closing the task and
-committing still works on whatever branch the user is on.
+  conversation).
 
 ## Step 4 — read the task properly
 

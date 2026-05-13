@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.0 -->
+<!-- hew:version=0.2.1 -->
 ---
 name: hew-adversarial-review
 category: optional
