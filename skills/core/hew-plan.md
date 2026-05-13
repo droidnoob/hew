@@ -20,6 +20,45 @@ looks like."
   exists, you are probably looking for `hew-decompose` (to extend it) or
   `hew-execute` (to start working).
 
+## Decide the branch shape (don't create it)
+
+Planning **decides** which branch the work belongs on; `hew-execute`
+**creates** it on first claim. Plan never runs `git` — it just names
+the branch as part of the plan output.
+
+Pick a **prefix** from the conventional-commit set, matching the
+work's intent:
+
+| Prefix | When |
+|--------|------|
+| `feat` | new feature or capability |
+| `fix` | bug fix |
+| `chore` | tooling, deps, infra, version bumps |
+| `docs` | docs-only changes |
+| `refactor` | restructure without behavior change |
+| `perf` | performance improvement |
+| `test` | tests only |
+| `style` | formatting / linting only |
+
+Pick a **slug** that describes the work in 2–5 kebab-case words —
+not the file paths touched. Examples: `passwordless-email-auth`,
+`pipe-deadlock-fix`, `craft-warnings-soft-mode`.
+
+Record the branch decision in the plan output (next section). One
+plan = one branch. Sub-epics within a milestone may earn their own
+branches; let `hew-decompose` flag that if it surfaces during graph
+construction.
+
+Skip this step only when:
+
+- The work is a single trivial commit that legitimately belongs on
+  `main` (release tag commit, hotfix the team explicitly authorized).
+  In that case, name the override path: `HEW_ALLOW_MAIN_COMMIT=1`.
+- The project doesn't use protected-branch enforcement (no
+  `.githooks/pre-commit`, no `.github/protection/main-ruleset.json`).
+  Detect by checking `git config core.hooksPath` (should be
+  `.githooks`) or the protection-config file's presence.
+
 ## Inputs you get from `hew prime plan`
 
 - `project.bd_version` and `beads_initialized` — confirms `bd` is wired up.
@@ -69,6 +108,9 @@ from the conversation. The summary contains:
 - **Architecture** (one paragraph, naming components and key choices).
 - **Order of work** (numbered list of slices, critical path called out).
 - **Graph shape** (one of: flat / single epic / multi-epic + bonds).
+- **Branch** (prefix + slug picked above — `hew-execute` Step 3a will
+  run `hew branch new` from this on first claim. Format the recap
+  line as `Branch: <prefix>/<slug>`).
 - **Open questions** (anything you need from the user before decomposition).
 
 Ask the user to confirm the plan, or to push back on any of it, before handing
