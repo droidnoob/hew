@@ -1,5 +1,9 @@
 # Hew
 
+[![CI](https://img.shields.io/github/actions/workflow/status/droidnoob/hew/ci.yml?branch=main&style=for-the-badge&logo=github&label=CI)](https://github.com/droidnoob/hew/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/droidnoob/hew?style=for-the-badge&logo=github&color=blue)](https://github.com/droidnoob/hew/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
+
 **Carve code, not chaos.**
 
 A methodology and CLI for AI coding agents, backed by [Beads](https://gastownhall.github.io/beads/) — a dependency-aware graph issue tracker on Dolt.
