@@ -345,7 +345,7 @@ Not slashes, but referenced by skill bodies and worth knowing:
 | `hew remember --type=<allowlist> "<body>"` | Write a memory with type validation; `--raw` to bypass |
 | `hew task {show,list,claim,close,new,reopen,children,note,search}` | Curated `bd` wrappers for task ops |
 | `hew dep {add,remove,tree,blocked}` | Curated `bd` wrappers for dependency ops |
-| `hew epic {show,tree,close,audit,summary}` | Epic-level operations |
+| `hew epic {list,show,tree,close,audit,summary}` | Epic-level operations |
 | `hew compact {apply,list-prefixes}` | Memory compaction CLI (called by `/hew:compact` skill) |
 | `hew review bundle` | Assemble the bundle the review skills consume |
 | `hew schema <name>` | JSON Schema for prime / resume / config / review-bundle / task / epic / craft-principles / compact-plan / etc. |

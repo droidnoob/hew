@@ -1,5 +1,6 @@
 //! `hew epic <verb>` — epic-shaped queries over [`hew_core::tasks`].
 //!
+//! - `list`     lists epics (open by default; `--all` includes closed).
 //! - `show`     fetches the epic + first-level children.
 //! - `tree`     recursively walks parent-child (transitive children).
 //! - `close`    refuses if any child is still open (unless `--force`).
@@ -8,7 +9,7 @@
 
 use clap::{Args as ClapArgs, Subcommand};
 use hew_core::bd::{BdClient, RealBd};
-use hew_core::tasks::{self, EpicSummary, TaskSummary};
+use hew_core::tasks::{self, EpicSummary, TaskListFilter, TaskSummary};
 use hew_core::{Ctx, OutputMode};
 use serde::Serialize;
 
@@ -20,6 +21,8 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Op {
+    /// List epics. Open-only by default; pass `--all` to include closed.
+    List(ListArgs),
     /// Show epic body + first-level children.
     Show(ShowArgs),
     /// Walk parent-child transitively.
@@ -30,6 +33,21 @@ pub enum Op {
     Audit(AuditArgs),
     /// One-line-per-child readout for stand-ups.
     Summary(IdArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct ListArgs {
+    /// Include closed epics in the listing.
+    #[arg(long)]
+    pub all: bool,
+    /// Only list closed epics (overrides `--all`).
+    #[arg(long, conflicts_with = "all")]
+    pub closed: bool,
+    /// Cap on rows (`0` = unlimited).
+    #[arg(long, default_value_t = 0)]
+    pub n: u32,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -77,11 +95,64 @@ pub struct IdArgs {
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let bd = RealBd::discover()?;
     match args.op {
+        Op::List(a) => list(ctx, &bd, a),
         Op::Show(a) => show(ctx, &bd, a),
         Op::Tree(a) => tree(ctx, &bd, a),
         Op::Close(a) => close(ctx, &bd, a),
         Op::Audit(a) => audit(ctx, &bd, a),
         Op::Summary(a) => summary(ctx, &bd, a),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// list
+// ────────────────────────────────────────────────────────────────────────────
+
+fn list(ctx: &Ctx, bd: &dyn BdClient, args: ListArgs) -> miette::Result<()> {
+    let status = if args.closed {
+        vec!["closed".into()]
+    } else if args.all {
+        Vec::new()
+    } else {
+        vec!["open".into(), "in_progress".into(), "blocked".into(), "deferred".into()]
+    };
+    let filter =
+        TaskListFilter { status, issue_type: Some("epic".into()), n: args.n, ..Default::default() };
+    let epics = tasks::list(bd, &filter)?;
+
+    if wants_json(ctx, args.json) {
+        emit_json(&epics)?;
+        return Ok(());
+    }
+
+    if epics.is_empty() {
+        if !ctx.quiet {
+            println!("(no epics)");
+        }
+        return Ok(());
+    }
+
+    for e in &epics {
+        let status = display_status(e);
+        println!(
+            "  {}  {:<14} P{}  {:<8}  {}",
+            status_marker(status),
+            e.id,
+            e.priority,
+            status,
+            e.title,
+        );
+    }
+    Ok(())
+}
+
+fn display_status(t: &TaskSummary) -> &str {
+    if t.status.is_empty() && !t.closed_at.is_empty() {
+        "closed"
+    } else if t.status.is_empty() {
+        "open"
+    } else {
+        t.status.as_str()
     }
 }
 
@@ -332,5 +403,55 @@ mod tests {
         assert!(is_thin_reason("shipped"));
         assert!(!is_thin_reason("shipped via abc123"));
         assert!(!is_thin_reason("Closed because the integration changed."));
+    }
+
+    fn list_status_filter(args: &ListArgs) -> Vec<String> {
+        if args.closed {
+            vec!["closed".into()]
+        } else if args.all {
+            Vec::new()
+        } else {
+            vec!["open".into(), "in_progress".into(), "blocked".into(), "deferred".into()]
+        }
+    }
+
+    #[test]
+    fn list_defaults_to_open_statuses() {
+        let f = list_status_filter(&ListArgs { all: false, closed: false, n: 0, json: false });
+        assert_eq!(f, vec!["open", "in_progress", "blocked", "deferred"]);
+    }
+
+    #[test]
+    fn list_all_drops_status_filter() {
+        let f = list_status_filter(&ListArgs { all: true, closed: false, n: 0, json: false });
+        assert!(f.is_empty(), "--all should produce empty (no status filter)");
+    }
+
+    #[test]
+    fn list_closed_only() {
+        let f = list_status_filter(&ListArgs { all: false, closed: true, n: 0, json: false });
+        assert_eq!(f, vec!["closed"]);
+    }
+
+    #[test]
+    fn display_status_falls_back_when_blank() {
+        let t = TaskSummary {
+            id: "x".into(),
+            title: "t".into(),
+            issue_type: "epic".into(),
+            priority: 1,
+            status: String::new(),
+            description: String::new(),
+            closed_at: String::new(),
+            close_reason: None,
+            parent: None,
+        };
+        assert_eq!(display_status(&t), "open");
+
+        let closed = TaskSummary { closed_at: "2026-05-13".into(), ..t.clone() };
+        assert_eq!(display_status(&closed), "closed");
+
+        let explicit = TaskSummary { status: "in_progress".into(), ..t };
+        assert_eq!(display_status(&explicit), "in_progress");
     }
 }
