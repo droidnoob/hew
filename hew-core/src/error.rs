@@ -46,6 +46,19 @@ pub enum HewError {
     #[error("`git` exited with status {code}: {stderr}")]
     #[diagnostic(code(hew::git::nonzero_exit))]
     GitNonZero { code: i32, stderr: String },
+
+    #[error(
+        "compact apply: {} replacement(s) did not land in bd after write: {}",
+        keys.len(),
+        keys.join(", ")
+    )]
+    #[diagnostic(
+        code(hew::compact::write_lost),
+        help(
+            "no sources were forgotten. Re-run `hew compact apply` (the plan is unchanged); if it repeats, file a bug — bd may be silently deduplicating on slug collision."
+        )
+    )]
+    CompactWriteLost { keys: Vec<String> },
 }
 
 pub type Result<T> = std::result::Result<T, HewError>;
