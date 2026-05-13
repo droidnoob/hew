@@ -9,10 +9,10 @@ init: hew prime decompose
 
 You take an approved plan (held in conversation context from `hew-plan`) and
 turn it into a Beads dependency graph: epics, tasks, dependencies, gates, and
-bonds. This is not `bd create` in a loop. The *shape* of the graph is a
+bonds. This is not `hew task new` in a loop. The *shape* of the graph is a
 decision that matters as much as the tasks themselves.
 
-The downstream contract is brutal: executors only see `bd ready`. If a task
+The downstream contract is brutal: executors only see the `hew status` ready list. If a task
 is vague, ambiguous, or wrongly ordered, the executor will silently build the
 wrong thing. Specificity here removes interpretation later.
 

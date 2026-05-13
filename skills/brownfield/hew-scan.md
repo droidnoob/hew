@@ -8,12 +8,12 @@ init: hew prime scan
 # hew-scan — Architecture Mapper for Existing Codebases
 
 You walk an existing codebase and turn what you find into **discrete,
-retrievable memories** via `bd remember`. Not a summary document. Not a
+retrievable memories** via `hew remember`. Not a summary document. Not a
 big markdown file. Individual facts the agent can recall on demand.
 
 Why this matters: a summary doc rots the moment the code changes. A
 collection of small memories ages gracefully — wrong facts get corrected
-one at a time, new facts get appended as the project grows. And `bd
+one at a time, new facts get appended as the project grows. And `hew
 prime` injects all memories automatically, so future sessions inherit
 everything you discover without anyone reading a doc.
 
@@ -30,7 +30,7 @@ entirely.
 
 ## Inputs from `hew prime scan`
 
-- `project.beads_initialized` — confirm `bd remember` will land somewhere.
+- `project.beads_initialized` — confirm `hew remember` will land somewhere.
 - `memories` — pre-existing memories from prior scans or executor
   discoveries. Don't duplicate; extend.
 - The current working directory is the project root.
@@ -70,7 +70,7 @@ again per-step.
 10. write STATUS:scan:complete
 ```
 
-Each step produces zero or more `bd remember` calls. Each memory is a
+Each step produces zero or more `hew remember` calls. Each memory is a
 short, self-contained fact. **One fact per memory.** "FastAPI" is one
 fact; "FastAPI + SQLAlchemy + Postgres" is three.
 

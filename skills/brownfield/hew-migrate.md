@@ -89,7 +89,7 @@ After a migration is successfully added and applied, persist the link:
 hew remember --raw "MIGRATION:003_add_email_verified — Added users.email_verified BOOLEAN NOT NULL DEFAULT false. Models touched: app/models/user.py. Applied 2026-05-12."
 ```
 
-Future audits and `bd remember`-driven recall can answer "when did
+Future audits and `hew remember`-driven recall can answer "when did
 this column appear?" without scanning git history.
 
 ## Verification — does the migration actually do what the model says?
