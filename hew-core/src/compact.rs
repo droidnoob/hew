@@ -31,10 +31,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::bd::BdClient;
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{HewError, Result};
 use crate::tasks;
 
 const PROVENANCE_TAG: &str = "[compacted-from:";
+
+/// Infix injected into derived keys for compaction writes. Picked so no
+/// auto-derived bd slug (which starts with a body's content slug) can ever
+/// collide with it — see `apply` for the why.
+const COMPACT_KEY_INFIX: &str = "compact";
 
 /// Hardcoded exempt prefixes (in addition to `cfg.compact.exempt`).
 /// These mark phase completion and the loss of any one would corrupt
@@ -91,6 +96,12 @@ pub struct CompactPlan {
 pub struct ApplyReport {
     /// New memory bodies written via `bd remember` (in write order).
     pub added: Vec<String>,
+    /// Explicit keys passed to `bd remember --key <k>` for each entry in
+    /// [`Self::added`], in matching order. Added in 0.3.0 to make the
+    /// post-write verification step (which guards against slug-collision
+    /// silent overwrites) observable to callers.
+    #[serde(default)]
+    pub added_keys: Vec<String>,
     /// Source keys successfully forgotten.
     pub forgotten: Vec<String>,
     /// Source keys skipped because they matched the exempt allowlist.
@@ -145,6 +156,18 @@ pub fn default_k(n: usize) -> u32 {
 /// then writes the status marker. Per `DECISION:compact-safety`, an
 /// error after the additions land leaves the bd store with extra
 /// memory rather than missing memory — which is recoverable.
+///
+/// **Slug-collision guard (added in 0.3.0, hew-eje):** bd's auto-derived
+/// slug for a replacement body could collide with a not-yet-forgotten
+/// source key (their bodies both start with `<PREFIX>:<topic>`). bd then
+/// treats the write as `update-in-place`, and the subsequent forget pass
+/// erases the new entry along with the source. To prevent silent data
+/// loss, every replacement is written with an explicit `--key` of the
+/// shape `<prefix-lower>-compact-<topic-slug>[-n]`, which no auto-derived
+/// slug can match. A post-write read-back verifies each chosen key
+/// actually landed; if any are missing, [`apply`] returns
+/// [`HewError::CompactWriteLost`] before phase 2 fires so no sources are
+/// forgotten on a broken write.
 pub fn apply(
     bd: &dyn BdClient,
     plan: &CompactPlan,
@@ -155,16 +178,42 @@ pub fn apply(
     let memories = bd.memories()?;
     let exempt_set: BTreeSet<&str> = cfg.compact.exempt.iter().map(|s| s.as_str()).collect();
 
+    let source_keys: BTreeSet<&str> =
+        plan.clusters.iter().flat_map(|c| c.source_keys.iter().map(|s| s.as_str())).collect();
+
     // Phase 1: write all replacement bodies with the provenance suffix
     // appended. Done before any forgets so a mid-apply crash leaves
-    // strictly more memory.
+    // strictly more memory. Each write uses an explicit `--key` to
+    // sidestep auto-slug collisions.
+    let mut used_keys: BTreeSet<String> = BTreeSet::new();
     for cluster in &plan.clusters {
         let provenance = build_provenance(&cluster.source_keys);
-        for body in &cluster.replacement_bodies {
+        let multi = cluster.replacement_bodies.len() > 1;
+        for (idx, body) in cluster.replacement_bodies.iter().enumerate() {
             let full = format!("{body}\n\n{provenance}");
-            bd.remember(&full)?;
+            let key = derive_compact_key(
+                &plan.prefix,
+                &cluster.topic,
+                multi.then_some(idx),
+                &memories,
+                &source_keys,
+                &used_keys,
+            );
+            tasks::remember(bd, &full, Some(&key))?;
+            used_keys.insert(key.clone());
             report.added.push(full);
+            report.added_keys.push(key);
         }
+    }
+
+    // Phase 1.5: verify every chosen key actually landed before we touch
+    // any source. Defends against bd quirks (slug collision, silent
+    // dedupe, transient write failures).
+    let post_write = bd.memories()?;
+    let missing: Vec<String> =
+        report.added_keys.iter().filter(|k| !post_write.contains_key(*k)).cloned().collect();
+    if !missing.is_empty() {
+        return Err(HewError::CompactWriteLost { keys: missing });
     }
 
     // Phase 2: forget source keys, honoring exempt + drift-guard.
@@ -192,6 +241,65 @@ pub fn apply(
     }
 
     Ok(report)
+}
+
+/// Build a unique `--key` for a compaction write. Shape:
+/// `<prefix-lower>-compact-<topic-slug>[-<idx>][-<n>]` where `idx` is
+/// present only when a cluster has multiple replacement bodies, and the
+/// trailing `-<n>` (n≥2) is appended only to disambiguate against an
+/// existing memory, a source key in the same plan, or a sibling
+/// replacement already written this run.
+fn derive_compact_key(
+    prefix: &str,
+    topic: &str,
+    body_idx: Option<usize>,
+    existing: &std::collections::BTreeMap<String, String>,
+    source_keys: &BTreeSet<&str>,
+    used: &BTreeSet<String>,
+) -> String {
+    let prefix_slug = slugify(prefix);
+    let topic_slug = slugify(topic);
+    let base = match body_idx {
+        Some(i) => format!("{prefix_slug}-{COMPACT_KEY_INFIX}-{topic_slug}-{i}"),
+        None => format!("{prefix_slug}-{COMPACT_KEY_INFIX}-{topic_slug}"),
+    };
+    if !collides(&base, existing, source_keys, used) {
+        return base;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        if !collides(&candidate, existing, source_keys, used) {
+            return candidate;
+        }
+    }
+    unreachable!("u32 range exhausted while disambiguating compact key")
+}
+
+fn collides(
+    key: &str,
+    existing: &std::collections::BTreeMap<String, String>,
+    source_keys: &BTreeSet<&str>,
+    used: &BTreeSet<String>,
+) -> bool {
+    existing.contains_key(key) || source_keys.contains(key) || used.contains(key)
+}
+
+fn slugify(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_dash = true; // suppress leading dash
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() { "_".to_string() } else { out }
 }
 
 fn build_provenance(source_keys: &[String]) -> String {
@@ -224,23 +332,53 @@ mod tests {
     use std::ffi::OsStr;
 
     /// Records the bd surface calls in call order so we can assert
-    /// adds-before-forgets.
+    /// adds-before-forgets. Now mutates `memories` on every
+    /// remember/forget so the post-write verification in [`apply`] can
+    /// observe writes from the same run.
     #[derive(Debug, Default)]
     struct MockBd {
-        memories: BTreeMap<String, String>,
+        memories: RefCell<BTreeMap<String, String>>,
         calls: RefCell<Vec<String>>, // "remember:<body>" or "forget:<key>"
         forget_fails: BTreeMap<String, String>,
+        /// If non-empty, any `remember --key <k>` whose `k` is listed
+        /// here will be silently dropped (the write is reported success
+        /// but the entry is NOT inserted). Used to simulate the bd
+        /// slug-collision drop the hew-eje fix guards against.
+        drop_keys: BTreeSet<String>,
     }
 
     impl MockBd {
         fn with_memories(pairs: &[(&str, &str)]) -> Self {
             let memories: BTreeMap<String, String> =
                 pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
-            Self { memories, ..Default::default() }
+            Self { memories: RefCell::new(memories), ..Default::default() }
         }
 
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
+        }
+
+        /// Auto-derived bd slug stand-in: takes the first ~50 chars of
+        /// the body, lowercases, replaces non-alnum with `-`. Real bd's
+        /// algorithm is more nuanced but the collision-failure mode the
+        /// tests care about (body-prefix collision with an existing
+        /// source key) is captured.
+        fn auto_slug(body: &str) -> String {
+            let mut out = String::new();
+            let mut last_dash = true;
+            for ch in body.chars().take(60) {
+                if ch.is_ascii_alphanumeric() {
+                    out.push(ch.to_ascii_lowercase());
+                    last_dash = false;
+                } else if !last_dash {
+                    out.push('-');
+                    last_dash = true;
+                }
+            }
+            while out.ends_with('-') {
+                out.pop();
+            }
+            out
         }
     }
 
@@ -258,20 +396,46 @@ mod tests {
             Ok(String::new())
         }
         fn memories(&self) -> Result<BTreeMap<String, String>> {
-            Ok(self.memories.clone())
+            Ok(self.memories.borrow().clone())
         }
         fn remember(&self, text: &str) -> Result<()> {
             self.calls.borrow_mut().push(format!("remember:{text}"));
+            // Trait-level remember has no explicit key — derive one.
+            let key = MockBd::auto_slug(text);
+            self.memories.borrow_mut().insert(key, text.to_string());
             Ok(())
         }
         fn run_raw(&self, args: &[&OsStr]) -> Result<BdOutput> {
-            // tasks::forget calls run_raw with ["forget", key]
+            // tasks::forget → ["forget", key]
             if args.len() == 2 && args[0] == OsStr::new("forget") {
                 let key = args[1].to_string_lossy().to_string();
                 if let Some(msg) = self.forget_fails.get(&key) {
                     return Err(HewError::BdNonZero { code: 1, stderr: msg.clone() });
                 }
                 self.calls.borrow_mut().push(format!("forget:{key}"));
+                self.memories.borrow_mut().remove(&key);
+                return Ok(BdOutput { stdout: String::new(), stderr: String::new() });
+            }
+            // tasks::remember(body, Some(key)) → ["remember", body, "--key", key]
+            if args.len() == 4
+                && args[0] == OsStr::new("remember")
+                && args[2] == OsStr::new("--key")
+            {
+                let body = args[1].to_string_lossy().to_string();
+                let key = args[3].to_string_lossy().to_string();
+                self.calls.borrow_mut().push(format!("remember:{body}"));
+                if !self.drop_keys.contains(&key) {
+                    self.memories.borrow_mut().insert(key, body);
+                }
+                return Ok(BdOutput { stdout: String::new(), stderr: String::new() });
+            }
+            // tasks::remember(body, None) → ["remember", body]
+            if args.len() == 2 && args[0] == OsStr::new("remember") {
+                let body = args[1].to_string_lossy().to_string();
+                let key = MockBd::auto_slug(&body);
+                self.calls.borrow_mut().push(format!("remember:{body}"));
+                self.memories.borrow_mut().insert(key, body);
+                return Ok(BdOutput { stdout: String::new(), stderr: String::new() });
             }
             Ok(BdOutput { stdout: String::new(), stderr: String::new() })
         }
@@ -525,6 +689,134 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: CompactPlan = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    // ──────── hew-eje regression: slug-collision guard ────────
+
+    #[test]
+    fn apply_uses_explicit_key_per_replacement() {
+        let bd = MockBd::with_memories(&[
+            ("convention-subprocess-foo", "CONVENTION:subprocess — old A"),
+            ("convention-rust-subprocess-foo", "CONVENTION:subprocess — old B"),
+        ]);
+        let cfg = Config::default();
+        let plan = CompactPlan {
+            prefix: "CONVENTION".into(),
+            target_clusters: 1,
+            granularity: Granularity::Broad,
+            allow_recompact: false,
+            clusters: vec![Cluster {
+                topic: "subprocess".into(),
+                source_keys: vec![
+                    "convention-subprocess-foo".into(),
+                    "convention-rust-subprocess-foo".into(),
+                ],
+                replacement_bodies: vec!["CONVENTION:subprocess — merged".into()],
+            }],
+        };
+        let report = apply(&bd, &plan, &cfg, "T").unwrap();
+        assert_eq!(report.added_keys, vec!["convention-compact-subprocess"]);
+        let after = bd.memories().unwrap();
+        assert!(after.contains_key("convention-compact-subprocess"));
+        assert!(!after.contains_key("convention-subprocess-foo"));
+        assert!(!after.contains_key("convention-rust-subprocess-foo"));
+    }
+
+    #[test]
+    fn apply_disambiguates_key_when_already_taken() {
+        // Pre-existing entry sits on the would-be derived key — apply
+        // must walk to `-2`, then `-3`, etc.
+        let bd = MockBd::with_memories(&[
+            ("convention-compact-subprocess", "an existing compaction"),
+            ("convention-compact-subprocess-2", "and another"),
+            ("k-src", "CONVENTION:subprocess — old"),
+        ]);
+        let cfg = Config::default();
+        let plan = CompactPlan {
+            prefix: "CONVENTION".into(),
+            target_clusters: 1,
+            granularity: Granularity::Broad,
+            allow_recompact: false,
+            clusters: vec![Cluster {
+                topic: "subprocess".into(),
+                source_keys: vec!["k-src".into()],
+                replacement_bodies: vec!["CONVENTION:subprocess — merged".into()],
+            }],
+        };
+        let report = apply(&bd, &plan, &cfg, "T").unwrap();
+        assert_eq!(report.added_keys, vec!["convention-compact-subprocess-3"]);
+    }
+
+    #[test]
+    fn apply_returns_compact_write_lost_when_bd_drops_the_write() {
+        // Simulate the exact hew-eje failure: bd silently no-ops the
+        // remember (drop_keys) while reporting success. apply must
+        // detect this and bail BEFORE forgetting any source.
+        let mut bd = MockBd::with_memories(&[("k-src", "CONVENTION:foo — old")]);
+        bd.drop_keys.insert("convention-compact-foo".into());
+
+        let cfg = Config::default();
+        let plan = CompactPlan {
+            prefix: "CONVENTION".into(),
+            target_clusters: 1,
+            granularity: Granularity::Broad,
+            allow_recompact: false,
+            clusters: vec![Cluster {
+                topic: "foo".into(),
+                source_keys: vec!["k-src".into()],
+                replacement_bodies: vec!["CONVENTION:foo — merged".into()],
+            }],
+        };
+        let err = apply(&bd, &plan, &cfg, "T").unwrap_err();
+        match err {
+            HewError::CompactWriteLost { keys } => {
+                assert_eq!(keys, vec!["convention-compact-foo"]);
+            }
+            other => panic!("expected CompactWriteLost, got {other:?}"),
+        }
+        // Source key must still be present — phase 2 must not have run.
+        let after = bd.memories().unwrap();
+        assert!(
+            after.contains_key("k-src"),
+            "source key forgotten despite failed write — DECISION:compact-safety violated"
+        );
+    }
+
+    #[test]
+    fn apply_handles_multi_body_cluster_with_indexed_keys() {
+        let bd = MockBd::with_memories(&[("k1", "A"), ("k2", "B")]);
+        let cfg = Config::default();
+        let plan = CompactPlan {
+            prefix: "RESEARCH".into(),
+            target_clusters: 1,
+            granularity: Granularity::Fine,
+            allow_recompact: false,
+            clusters: vec![Cluster {
+                topic: "auth".into(),
+                source_keys: vec!["k1".into(), "k2".into()],
+                replacement_bodies: vec![
+                    "RESEARCH:auth — finding 1".into(),
+                    "RESEARCH:auth — finding 2".into(),
+                ],
+            }],
+        };
+        let report = apply(&bd, &plan, &cfg, "T").unwrap();
+        assert_eq!(
+            report.added_keys,
+            vec!["research-compact-auth-0".to_string(), "research-compact-auth-1".to_string()]
+        );
+    }
+
+    // ──────── slugify ────────
+
+    #[test]
+    fn slugify_drops_non_alnum_and_collapses_dashes() {
+        assert_eq!(slugify("Hello, World!"), "hello-world");
+        assert_eq!(slugify("CONVENTION:cli-output"), "convention-cli-output");
+        assert_eq!(slugify("___leading"), "leading");
+        assert_eq!(slugify("trailing___"), "trailing");
+        assert_eq!(slugify(""), "_");
+        assert_eq!(slugify("!!!"), "_");
     }
 
     #[test]
