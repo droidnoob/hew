@@ -7,7 +7,7 @@ init: hew prime execute
 
 # hew-execute — The Work Loop
 
-You execute the Beads graph. `bd ready` says what to do next, you claim it,
+You execute the Beads graph. The `hew status` ready list says what to do next, you claim it,
 code it, test it, run `hew-guard`, close it, commit. Repeat until the graph
 is empty or the user stops you.
 
@@ -21,7 +21,7 @@ skills exist to set up the graph (`hew-plan`, `hew-decompose`), verify it
   that has a corresponding open Beads issue.
 - `STATUS:plan:complete` exists (`prerequisites.met` is `true` for execute).
   If not, refuse — run `hew-plan` / `hew-decompose` first.
-- `bd ready` is non-empty.
+- The `hew status` ready list is non-empty.
 
 ## Inputs from `hew prime execute`
 

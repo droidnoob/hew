@@ -1,4 +1,4 @@
-<!-- hew:version=0.3.0 -->
+<!-- hew:version=0.2.1 -->
 ---
 name: hew-plan
 category: core
@@ -131,33 +131,6 @@ hew remember --type=decision "framework — FastAPI over Flask. Async-first, Ope
 These are factual decision memories (no special prefix beyond `DECISION:`),
 not `CONVENTION:` rules. They explain *why* the codebase looks the way it
 does. Future work can revisit them; current work treats them as settled.
-
-### Group related decisions under one domain key
-
-When a single plan locks several related calls — e.g. three choices
-that together define the auth boundary — fold them into one
-domain-grouped `DECISION:` memory rather than three atomic ones.
-Atomic per-choice writes fragment the decision log and lose the
-*relationship* between the calls (which was the load-bearing
-context).
-
-**Atomic (avoid when choices are related):**
-
-```
-hew remember --type=decision "auth — JWT, 15min access tokens"
-hew remember --type=decision "auth — refresh tokens 7d, httpOnly cookies"
-hew remember --type=decision "auth — refresh rotation on every use"
-```
-
-**Grouped per domain (preferred):**
-
-```
-hew remember --type=decision "auth — JWT with 15min access + 7d refresh in httpOnly cookies; refresh rotates on every use. Reason: SPA + mobile share the API and we want revocation without a session store. Reviewed alternatives: opaque tokens with Redis (rejected — operational cost), session cookies (rejected — mobile)."
-```
-
-For a plan that locks 5+ decisions across several domains, prefer
-`hew remember --from-file <path>` over a sequence of CLI calls — JSON
-shape documented in the `hew-convention` skill body.
 
 ## Vague-ask gate (optional)
 

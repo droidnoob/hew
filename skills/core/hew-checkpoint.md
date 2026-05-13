@@ -39,7 +39,7 @@ Memory shape: a single rich `CHECKPOINT:` memory with structured
 content, or two or three if the state is genuinely separable. Not
 forty.
 
-The body should answer: **"if a fresh agent loaded only `bd prime
+The body should answer: **"if a fresh agent loaded only `hew prime
 execute` 24 hours from now, what would they need to know to pick
 up cleanly?"**
 
@@ -162,12 +162,12 @@ After persisting:
   `/hew:checkpoint` explicitly, just save — no preview prompt.)
 - **Write a 5KB memory.** That's a transcript, not a checkpoint.
   Compress to the load-bearing facts.
-- **Mix per-task and cross-session state.** Per-task = `bd close`
+- **Mix per-task and cross-session state.** Per-task = `hew task close`
   reason. Checkpoint = "what's still in my head."
 
 ## Anti-patterns
 
-- **Checkpoint after every task.** Defeats the per-task `bd close`
+- **Checkpoint after every task.** Defeats the per-task `hew task close`
   audit trail.
 - **Checkpoint with no decisions / hypotheses / next-moves.** If
   there's nothing in your head that isn't already in Beads, you
