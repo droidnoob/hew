@@ -4,6 +4,35 @@
 # Install once with:  pre-commit install
 # Run on demand:      pre-commit run --all-files
 repos:
+  # ──────────────────────────────────────────────────────────────────────
+  # Branch guard — refuse commits on `main` / `master`.
+  # Mirrors the same check in .githooks/pre-commit so both setups behave
+  # identically. Emergency override: HEW_ALLOW_MAIN_COMMIT=1 git commit ...
+  # ──────────────────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: no-commit-on-main
+        name: refuse commits on main/master
+        language: system
+        always_run: true
+        pass_filenames: false
+        entry: |
+          bash -c '
+            b=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+            case "$b" in
+              main|master)
+                if [ "${HEW_ALLOW_MAIN_COMMIT:-}" = "1" ]; then
+                  echo "pre-commit: HEW_ALLOW_MAIN_COMMIT=1 — allowing commit on $b." >&2
+                  exit 0
+                fi
+                echo "pre-commit: refusing to commit on protected branch '\''$b'\''."  >&2
+                echo "pre-commit:   Open a feature branch first." >&2
+                echo "pre-commit:   Emergency override: HEW_ALLOW_MAIN_COMMIT=1 git commit ..." >&2
+                exit 1
+                ;;
+            esac
+          '
+
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

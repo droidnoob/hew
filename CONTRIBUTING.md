@@ -18,7 +18,8 @@ git config core.hooksPath .githooks
 
 That last line wires up `.githooks/pre-commit`, which runs `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, and the test suite on every
-commit that touches Rust files.
+commit that touches Rust files. It also refuses commits on `main` /
+`master` (see "Branching" below).
 
 If you prefer the [pre-commit](https://pre-commit.com/) framework, the
 repo also ships `.pre-commit-config.yaml`:
@@ -34,6 +35,31 @@ Either is sufficient — pick one, don't run both.
 - `HEW_SKIP_HOOKS=1 git commit ...` — bypass hooks once. Use sparingly.
 - `HEW_HOOK_NO_TESTS=1 git commit ...` — skip the test step but still run
   fmt + clippy.
+- `HEW_ALLOW_MAIN_COMMIT=1 git commit ...` — allow a single commit on
+  `main` / `master`. The GitHub branch protection still blocks the
+  push; use this only for local rebase / amend operations.
+
+## Branching
+
+`main` is protected on both ends:
+
+- **Local pre-commit hook** refuses commits while the working branch is
+  `main` or `master`. Override via `HEW_ALLOW_MAIN_COMMIT=1` (see
+  "Escape hatches").
+- **GitHub branch protection** refuses direct pushes to `main`. Changes
+  land via pull request. CI must pass (rustfmt + clippy + the test
+  matrix + cargo-audit + cargo-deny) before merge. Admin bypass is
+  disabled — the maintainer goes through PRs too.
+
+Open a feature branch with the conventional prefix + slug:
+
+```sh
+hew branch new --prefix=feat --slug="passwordless-email-auth"
+# → feat/passwordless-email-auth
+```
+
+Allowed prefixes: `feat`, `fix`, `chore`, `docs`, `refactor`, `perf`,
+`test`, `style`.
 
 ## Day-to-day workflow
 
