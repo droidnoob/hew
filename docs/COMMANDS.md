@@ -342,6 +342,7 @@ Not slashes, but referenced by skill bodies and worth knowing:
 | `hew prime resume` | The SessionStart-hook payload — project state + memories + checkpoint |
 | `hew status` | Human-readable project state |
 | `hew memories [--prefix\|--grep\|--research\|--recall\|--forget]` | List, filter, recall, or forget memories |
+| `hew memories --export [-o PATH] [--plaintext]` | Dump filtered memories to a file. Default format JSON; `--plaintext` for text. Default path `<projname>-memories-<iso-ts>.<ext>` when `-o` is omitted. |
 | `hew remember --type=<allowlist> "<body>"` | Write a memory with type validation; `--raw` to bypass |
 | `hew remember --from-file <path>` | Bulk insert from a JSON array of `{type, body, key?, raw?}` entries. All-or-nothing: every entry validated before any write. |
 | `hew task {show,list,claim,close,new,reopen,children,note,search}` | Curated `bd` wrappers for task ops |
