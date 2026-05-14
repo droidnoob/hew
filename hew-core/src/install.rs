@@ -121,6 +121,8 @@ fn uninstall_single_file(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
 
 fn uninstall_codex(root: &Path) -> Result<Vec<PathBuf>> {
     let mut removed = Vec::new();
+
+    // Agent roles under .codex/agents/.
     let agents_dir = root.join(".codex").join("agents");
     if agents_dir.exists() {
         for entry in fs::read_dir(&agents_dir)? {
@@ -131,11 +133,34 @@ fn uninstall_codex(root: &Path) -> Result<Vec<PathBuf>> {
                 removed.push(entry.path());
             }
         }
-        // Tidy: remove agents_dir if now empty.
         if fs::read_dir(&agents_dir)?.next().is_none() {
             let _ = fs::remove_dir(&agents_dir);
         }
     }
+
+    // Skills under .agents/skills/hew-*/. Remove each hew-* directory
+    // entirely. Leave non-hew skills and the parent dirs alone unless
+    // they end up empty.
+    let skills_dir = root.join(".agents").join("skills");
+    if skills_dir.exists() {
+        for entry in fs::read_dir(&skills_dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            if name.starts_with("hew-") && path.is_dir() {
+                fs::remove_dir_all(&path)?;
+                removed.push(path);
+            }
+        }
+        if fs::read_dir(&skills_dir)?.next().is_none() {
+            let _ = fs::remove_dir(&skills_dir);
+            let parent = root.join(".agents");
+            if parent.exists() && fs::read_dir(&parent)?.next().is_none() {
+                let _ = fs::remove_dir(&parent);
+            }
+        }
+    }
+
     // Strip section from AGENTS.md (or delete if only hew owned it).
     removed.extend(uninstall_single_file(root, "AGENTS.md")?);
     Ok(removed)
@@ -615,27 +640,45 @@ fn write_windsurfrules(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(vec![path])
 }
 
-/// Codex adapter: drop each skill into `.codex/agents/hew-<name>.toml`
-/// with the minimal frontmatter Codex expects, plus an AGENTS.md
-/// pointer at the project root.
+/// Codex adapter: writes three things side-by-side so Codex picks hew up
+/// through every primitive it exposes.
+///
+/// 1. **Agent roles** at `.codex/agents/hew-<name>.toml` — `AgentRoleToml`
+///    shape (`name` + `description` + `developer_instructions`). Used when
+///    a parent agent spawns a hew persona as a sub-agent.
+/// 2. **Skills** at `.agents/skills/hew-<name>/SKILL.md` — Codex's
+///    auto-discovered skill primitive (YAML frontmatter `name` +
+///    `description`, then the body). This is the canonical way for
+///    users to invoke hew in Codex chat.
+/// 3. **`AGENTS.md`** at the project root — bundled body for Codex builds
+///    that read AGENTS.md directly.
 fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
-    let agents_dir = root.join(".codex").join("agents");
-    fs::create_dir_all(&agents_dir)?;
     let mut written = Vec::new();
 
+    // Agent roles.
+    let agents_dir = root.join(".codex").join("agents");
+    fs::create_dir_all(&agents_dir)?;
     for s in skills::all() {
         if s.category == Category::Index {
             continue;
         }
-        let toml = format!(
-            "name = \"{}\"\ncategory = \"{}\"\n\nbody = \"\"\"\n{}\n\"\"\"\n",
-            s.name,
-            s.category,
-            s.body.replace("\"\"\"", "\\\"\\\"\\\""),
-        );
+        let toml = render_codex_role(s.name, s.body);
         let dest = agents_dir.join(format!("{}.toml", s.name));
         fs::write(&dest, toml)?;
         written.push(dest);
+    }
+
+    // Skills (`.agents/skills/<name>/SKILL.md`).
+    let skills_root = root.join(".agents").join("skills");
+    for s in skills::all() {
+        if s.category == Category::Index {
+            continue;
+        }
+        let dir = skills_root.join(s.name);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("SKILL.md");
+        fs::write(&path, render_codex_skill_md(s.name, s.body))?;
+        written.push(path);
     }
 
     // AGENTS.md at project root as a pointer + bundled body for Codex
@@ -645,6 +688,119 @@ fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
     written.push(agents_md);
 
     Ok(written)
+}
+
+/// Render a single Codex agent role TOML for the given skill.
+///
+/// Codex's `AgentRoleToml` requires three fields: `name`, `description`,
+/// and `developer_instructions`. We derive `description` from the first
+/// markdown H1 in the skill body (e.g. `# hew-execute — The Work Loop`),
+/// falling back to the skill name. Optional fields like
+/// `model_reasoning_effort` and `background_terminal_max_timeout` are
+/// left to Codex's defaults.
+///
+/// TOML literal multi-line strings (`'''...'''`) skip backslash processing,
+/// so regex chars like `\s` in skill bodies pass through untouched. The
+/// only escape-sensitive edge is a literal `'''` in the body — we fall
+/// back to a basic string with full escaping in that case.
+fn render_codex_role(name: &str, body: &str) -> String {
+    let description = codex_role_description(name, body);
+    let header =
+        format!("name = \"{name}\"\ndescription = \"{}\"\n", toml_basic_escape(&description),);
+    if body.contains("'''") {
+        // Defensive fallback. Escape backslashes and triple-double-quotes.
+        let escaped = body.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
+        format!("{header}developer_instructions = \"\"\"\n{escaped}\n\"\"\"\n")
+    } else {
+        format!("{header}developer_instructions = '''\n{body}\n'''\n")
+    }
+}
+
+/// Pull the first `# ` heading out of a skill body and use it as the
+/// Codex `description`. Fallback: the skill name.
+fn codex_role_description(name: &str, body: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Minimal escape for a TOML basic (single-line) string.
+fn toml_basic_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Render a `SKILL.md` for Codex's skill discovery
+/// (`.agents/skills/<name>/SKILL.md`).
+///
+/// Codex expects YAML frontmatter with at least `name` and `description`,
+/// then the natural-language body. Our skill bodies already start with a
+/// YAML frontmatter block (our own `name`/`category`/`init` keys); we
+/// strip and replace it so Codex sees exactly the two fields it needs.
+/// The rest of the body — including the `<!-- hew:version=... -->` line
+/// above the frontmatter — is preserved.
+fn render_codex_skill_md(name: &str, body: &str) -> String {
+    let description = codex_role_description(name, body);
+    let safe_desc = yaml_double_quoted_escape(&description);
+    let frontmatter = format!("---\nname: {name}\ndescription: \"{safe_desc}\"\n---\n");
+    let trimmed = strip_existing_frontmatter(body);
+    format!("{frontmatter}{trimmed}")
+}
+
+/// Strip a leading YAML frontmatter block (`---\n...\n---\n`) from a
+/// skill body. Handles an optional pre-frontmatter HTML comment line
+/// (the `<!-- hew:version=X.Y.Z -->` marker every skill carries).
+/// Returns the remaining body verbatim. If no frontmatter is found,
+/// returns the body unchanged.
+fn strip_existing_frontmatter(body: &str) -> String {
+    let mut lines = body.lines().peekable();
+    let mut prelude: Vec<&str> = Vec::new();
+
+    // Allow a single HTML-comment line ahead of frontmatter — we drop it,
+    // because Codex doesn't care about hew's version marker.
+    if let Some(first) = lines.peek()
+        && first.trim_start().starts_with("<!--")
+        && first.trim_end().ends_with("-->")
+    {
+        lines.next();
+    }
+
+    // Look for the opening `---` fence.
+    let Some(first) = lines.peek() else {
+        return body.to_string();
+    };
+    if first.trim() != "---" {
+        // No frontmatter — return body unchanged (minus the version comment).
+        for line in lines {
+            prelude.push(line);
+        }
+        return prelude.join("\n");
+    }
+    lines.next(); // consume opening `---`
+
+    // Drop everything until the closing `---`.
+    for line in lines.by_ref() {
+        if line.trim() == "---" {
+            break;
+        }
+    }
+
+    // Collect the rest.
+    let remaining: Vec<&str> = lines.collect();
+    let mut out = remaining.join("\n");
+    // Trim a leading blank line that often sits between frontmatter and body.
+    if let Some(rest) = out.strip_prefix('\n') {
+        out = rest.to_string();
+    }
+    out
+}
+
+/// Escape a value for embedding inside a YAML double-quoted scalar.
+fn yaml_double_quoted_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn write_generic_claude_md(root: &Path) -> Result<Vec<PathBuf>> {
@@ -781,16 +937,136 @@ mod tests {
     fn install_codex_writes_per_skill_toml_and_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Codex, tmp.path()).expect("install");
-        // 20 skills + AGENTS.md
-        assert_eq!(plan.written.len(), 21);
+        // 20 agent roles + 20 SKILL.md skill files + AGENTS.md = 41 files.
+        assert_eq!(plan.written.len(), 41);
         let agents = tmp.path().join(".codex").join("agents");
         assert!(agents.join("hew-execute.toml").exists());
         assert!(agents.join("hew-scan.toml").exists());
-        let body = fs::read_to_string(agents.join("hew-execute.toml")).unwrap();
-        assert!(body.starts_with("name = \"hew-execute\""));
-        assert!(body.contains("category = \"core\""));
-        assert!(body.contains("hew-execute")); // body field present
         assert!(tmp.path().join("AGENTS.md").exists());
+
+        // Every emitted role TOML must be valid TOML and contain the
+        // `developer_instructions` key Codex's AgentRoleToml expects.
+        // Anything else regresses to the "unknown field `body`" bug.
+        for entry in fs::read_dir(&agents).unwrap() {
+            let path = entry.unwrap().path();
+            let body = fs::read_to_string(&path).unwrap();
+            let parsed: toml::Value = toml::from_str(&body)
+                .unwrap_or_else(|e| panic!("{} is not valid TOML: {e}", path.display()));
+            assert!(
+                parsed.get("developer_instructions").is_some(),
+                "{} missing developer_instructions key",
+                path.display()
+            );
+            // `name` must be present and non-empty (Codex rejects empty names).
+            let name = parsed
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{} missing or non-string `name`", path.display()));
+            assert!(!name.is_empty(), "{} has empty `name`", path.display());
+            // Schema fields we must NOT emit (regression guard).
+            assert!(parsed.get("body").is_none(), "{} has stale `body` field", path.display());
+            assert!(
+                parsed.get("category").is_none(),
+                "{} has stale `category` field",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn install_codex_writes_skill_md_per_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Codex, tmp.path()).expect("install");
+
+        let skills_root = tmp.path().join(".agents").join("skills");
+        let mut seen = 0usize;
+        for s in skills::all() {
+            if s.category == Category::Index {
+                continue;
+            }
+            let path = skills_root.join(s.name).join("SKILL.md");
+            assert!(path.exists(), "missing SKILL.md for {}", s.name);
+            let body = fs::read_to_string(&path).unwrap();
+            assert!(
+                body.starts_with("---\n"),
+                "{}: SKILL.md must start with YAML frontmatter, got:\n{body}",
+                s.name
+            );
+            assert!(
+                body.contains(&format!("name: {}", s.name)),
+                "{}: SKILL.md missing `name:` key",
+                s.name
+            );
+            assert!(
+                body.contains("description: \""),
+                "{}: SKILL.md missing `description:` key",
+                s.name
+            );
+            // Our internal version marker must NOT leak into Codex's view.
+            assert!(
+                !body.contains("hew:version="),
+                "{}: stale hew version marker should be stripped",
+                s.name
+            );
+            // Our internal frontmatter keys (`category`, `init`) must not
+            // collide with Codex's expectations — they should be absent.
+            assert!(
+                !body.contains("category:"),
+                "{}: stale `category:` from original frontmatter",
+                s.name
+            );
+            seen += 1;
+        }
+        assert!(seen >= 19, "expected at least 19 skill SKILL.md files, saw {seen}");
+    }
+
+    #[test]
+    fn codex_skill_md_strips_pre_frontmatter_version_comment() {
+        let body = "<!-- hew:version=0.3.0 -->\n---\nname: hew-execute\ncategory: core\n---\n\n# hew-execute — The Work Loop\n\nbody here";
+        let out = render_codex_skill_md("hew-execute", body);
+        assert!(
+            out.starts_with("---\nname: hew-execute\ndescription:"),
+            "expected new frontmatter at top, got:\n{out}"
+        );
+        assert!(!out.contains("hew:version="));
+        assert!(!out.contains("category: core"));
+        assert!(out.contains("# hew-execute — The Work Loop"));
+        assert!(out.contains("body here"));
+    }
+
+    #[test]
+    fn codex_skill_md_handles_body_without_frontmatter() {
+        let body = "# hew-thing — Standalone\n\njust a body, no frontmatter";
+        let out = render_codex_skill_md("hew-thing", body);
+        assert!(out.starts_with("---\nname: hew-thing\ndescription:"));
+        assert!(out.contains("just a body"));
+    }
+
+    #[test]
+    fn codex_role_body_with_backslashes_round_trips() {
+        // The pre-fix emitter broke on regex chars like `\s` because basic
+        // multi-line strings `"""..."""` still process escape sequences.
+        let body = "password\\s*=\\s*[\"'][^\"']+[\"']";
+        let toml = render_codex_role("hew-guard", body);
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse");
+        let got = parsed["developer_instructions"].as_str().expect("string");
+        assert!(got.contains("\\s*"), "backslash-s lost in round-trip: {got}");
+    }
+
+    #[test]
+    fn codex_role_body_with_triple_single_quote_uses_basic_string_fallback() {
+        let body = "edge case: ''' inside body";
+        let toml = render_codex_role("hew-test", body);
+        // Fallback uses basic string `"""..."""` for developer_instructions.
+        // The body's `'''` may appear inside it — that's fine because basic
+        // strings don't treat `'` as a delimiter.
+        assert!(
+            toml.contains("developer_instructions = \"\"\""),
+            "fallback should use basic string, got: {toml}"
+        );
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse");
+        let got = parsed["developer_instructions"].as_str().expect("string");
+        assert_eq!(got.trim(), body);
     }
 
     #[test]
