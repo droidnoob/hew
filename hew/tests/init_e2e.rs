@@ -185,6 +185,82 @@ fn init_warns_when_git_missing_in_non_interactive() {
 }
 
 #[test]
+fn init_runs_git_init_when_repo_absent() {
+    // git stub that creates .git/ on `init --quiet` (mimics real git init).
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let git_stub = r#"#!/bin/sh
+PATH="/usr/bin:/bin:$PATH"
+case "$1" in
+  --version) echo "git version 0.0-stub"; exit 0 ;;
+  -C)
+    target="$2"
+    if [ "$3" = "init" ]; then
+      mkdir -p "$target/.git"
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+"#;
+    let git_path = stub_dir.path().join("git");
+    fs::write(&git_path, git_stub).unwrap();
+    let mut perms = fs::metadata(&git_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&git_path, perms).unwrap();
+
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("git: ✓ on PATH"))
+        .stdout(contains("git: ✓ initialised repo"));
+
+    // Resolve symlinks (/tmp -> /private/tmp on macOS) so the path the stub
+    // wrote into matches the path we're checking.
+    let resolved = fs::canonicalize(project.path()).unwrap();
+    assert!(resolved.join(".git").exists(), ".git/ should exist after init");
+}
+
+#[test]
+fn init_skips_git_init_when_repo_present() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    // Stub that explodes if called with `init` — we want to verify we skip.
+    let git_stub = r#"#!/bin/sh
+case "$1" in
+  --version) exit 0 ;;
+  -C)
+    if [ "$3" = "init" ]; then
+      echo "should not run init on existing repo" >&2
+      exit 17
+    fi
+    ;;
+esac
+exit 0
+"#;
+    let git_path = stub_dir.path().join("git");
+    fs::write(&git_path, git_stub).unwrap();
+    let mut perms = fs::metadata(&git_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&git_path, perms).unwrap();
+
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join(".git")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("git: ✓ on PATH"))
+        .stdout(contains("git: ✓ initialised repo").not());
+}
+
+#[test]
 fn init_does_not_warn_when_git_present() {
     // PATH includes both bd and git stubs.
     let stub_dir = tempfile::tempdir().unwrap();

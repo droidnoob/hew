@@ -5,7 +5,7 @@ use clap::Args as ClapArgs;
 use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::error::HewError;
-use hew_core::git::RealGit;
+use hew_core::git::{GitClient, RealGit};
 use hew_core::install::{self, Runtime};
 use hew_core::os::{self, OsKind};
 
@@ -69,6 +69,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     run_bd_init(&bd, &project_root, args.prefix.as_deref())?;
 
     ensure_git(ctx);
+    init_git_repo(ctx, &project_root)?;
 
     if !args.git_track {
         let _ = install::ensure_beads_gitignored(&project_root)
@@ -226,13 +227,16 @@ fn run_streaming(cmd: &mut std::process::Command) -> std::io::Result<()> {
 
 /// Git is *optional* for hew. Detect, then per DECISION:git-install-policy:
 ///
-/// - Present → no-op.
+/// - Present → status line, continue.
 /// - Missing + non-interactive → warn that auto-branching will be skipped.
-/// - Missing + interactive → ask. On yes, try the sudo-free path (brew on
-///   macOS); on no sudo-free path, print the distro install hint and let
-///   the user run it themselves. Never invoke sudo. Never fail init.
+/// - Missing + interactive → auto-attempt sudo-free install (no prompt). On
+///   failure, print the hint and let the user run it themselves. Never sudo.
+///   Never fail init.
 fn ensure_git(ctx: &Ctx) {
     if RealGit::is_available() {
+        if !ctx.quiet {
+            println!("git: ✓ on PATH");
+        }
         return;
     }
 
@@ -246,47 +250,65 @@ fn ensure_git(ctx: &Ctx) {
         return;
     }
 
+    // Interactive + missing: auto-install, no Confirm prompt.
     let os = os::detect_os();
     let hint = os::git_install_hint(&os);
+    if !ctx.quiet {
+        println!("git: ✗ not on PATH — installing...");
+    }
 
-    use inquire::Confirm;
-    let prompt = match Confirm::new("`git` is not on PATH. Try to install it?")
-        .with_default(true)
-        .with_help_message(&format!("Suggested: {hint}"))
-        .prompt()
-    {
-        Ok(v) => v,
-        Err(_) => {
-            // User aborted (ESC/Ctrl-C). Treat as "no" and continue.
-            eprintln!("hew init: continuing without git.");
-            return;
-        }
-    };
-    if !prompt {
-        eprintln!("hew init: skipping git install. Run `{hint}` yourself if you change your mind.");
+    let outcome = os::try_install_git_sudo_free(&os);
+    let installed = matches!(&outcome, Ok(true));
+    if installed && !ctx.quiet {
+        println!("git: ✓ installed");
         return;
     }
 
-    match os::try_install_git_sudo_free(&os) {
-        Ok(true) => {
-            if !ctx.quiet {
-                eprintln!("hew init: git installed.");
-            }
+    if !ctx.quiet {
+        match &outcome {
+            Ok(false) => eprintln!(
+                "git: ✗ install needs sudo on this OS. Run: {hint}\n  see https://git-scm.com/downloads"
+            ),
+            Err(e) => eprintln!(
+                "git: ✗ install failed: {e}. Run: {hint}\n  see https://git-scm.com/downloads"
+            ),
+            _ => {}
         }
-        Ok(false) => {
-            // No sudo-free path on this OS — print the hint, don't run sudo.
-            eprintln!(
-                "hew init: this OS needs sudo to install git. Run the following yourself, then re-run hew if you want auto-branching:\n  {hint}"
-            );
-            // Special-case the macOS-without-brew message for clarity.
-            if matches!(os, OsKind::MacOs) {
-                eprintln!("  (or install Homebrew first: https://brew.sh)");
+        if matches!(os, OsKind::MacOs) {
+            eprintln!("  (or install Homebrew first: https://brew.sh)");
+        }
+    }
+}
+
+/// Initialise a git repo in `project_root` if git is available and no
+/// `.git/` exists. Never fails the install; just prints a status line.
+fn init_git_repo(ctx: &Ctx, project_root: &std::path::Path) -> miette::Result<()> {
+    if !RealGit::is_available() {
+        return Ok(());
+    }
+    if project_root.join(".git").exists() {
+        return Ok(());
+    }
+    let git = match RealGit::discover() {
+        Ok(g) => g,
+        Err(_) => return Ok(()),
+    };
+    let root_os = std::ffi::OsString::from(project_root.as_os_str());
+    let args: [&OsStr; 4] =
+        [OsStr::new("-C"), root_os.as_os_str(), OsStr::new("init"), OsStr::new("--quiet")];
+    match git.run_raw(&args) {
+        Ok(_) => {
+            if !ctx.quiet {
+                println!("git: ✓ initialised repo");
             }
         }
         Err(e) => {
-            eprintln!("hew init: git install attempt failed: {e}. Continuing without git.");
+            if !ctx.quiet {
+                eprintln!("git: ✗ git init failed: {e}");
+            }
         }
     }
+    Ok(())
 }
 
 fn run_bd_init(
