@@ -125,6 +125,83 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_yes_runs_with_all_defaults() {
+    // -y + --non-interactive + --runtime must succeed end-to-end with every
+    // sensible default applied. This is the canonical CI/script invocation.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "-y"])
+        .assert()
+        .success()
+        .stdout(contains("Setup complete"));
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    // Every key surfaced by the v2 flow must appear with the expected default.
+    assert!(cfg_body.contains("git_track = false"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"strategy = "epic""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"deps = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("require = false"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"default = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 0"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = false"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_every_v2_flag_round_trips_via_cli() {
+    // Catch-all: pass every IV.4-IV.9 flag together and assert all values
+    // round-trip into the on-disk config.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--git-track",
+            "--project-type",
+            "existing",
+            "--branching",
+            "always",
+            "--deps",
+            "yes",
+            "--research",
+            "no",
+            "--security",
+            "yes",
+            "--require-tests",
+            "--research-default",
+            "auto-skip",
+            "--review-after-n",
+            "3",
+            "--review-after-epic",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:scan to map this codebase"));
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("git_track = true"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"strategy = "always""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"deps = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "no""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("require = true"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"default = "auto-skip""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 3"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = true"), "config:\n{cfg_body}");
+}
+
+#[test]
 fn init_banner_absent_in_non_interactive_runs() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);
