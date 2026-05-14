@@ -238,13 +238,55 @@ impl RealBd {
 /// and call site. The parent dir is auto-created on first use. Files persist
 /// under `.hew/` to aid debugging when a query goes sideways; they are
 /// cheap to ignore.
+///
+/// A process-local atomic counter is folded into the filename so that two
+/// concurrent callers in the same process (e.g. parallel cargo tests on
+/// Apple Silicon, where `SystemTime::now()` nanos can repeat) never share
+/// a path.
 pub(crate) fn hew_temp_path(label: &str, ext: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let pid = std::process::id();
-    std::env::temp_dir().join(".hew").join(format!("{label}-{pid}-{nanos}.{ext}"))
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(".hew").join(format!("{label}-{pid}-{nanos}-{seq}.{ext}"))
+}
+
+#[cfg(test)]
+mod temp_path_tests {
+    use super::hew_temp_path;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn hew_temp_path_is_unique_under_parallel_calls() {
+        // Reproduces the GitHub Actions macos / 1.91 flake: when two test
+        // threads race into hew_temp_path with the same (pid, nanos), they
+        // got the same path and clobbered each other's mock output. The
+        // atomic counter guarantees uniqueness.
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 64;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                (0..PER_THREAD).map(|_| hew_temp_path("race-test", "json")).collect::<Vec<_>>()
+            }));
+        }
+        let mut seen: HashSet<_> = HashSet::new();
+        for h in handles {
+            for p in h.join().unwrap() {
+                assert!(seen.insert(p.clone()), "duplicate temp path: {}", p.display());
+            }
+        }
+        assert_eq!(seen.len(), THREADS * PER_THREAD);
+    }
 }
 
 fn args_to_display(args: &[&OsStr]) -> String {
