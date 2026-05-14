@@ -66,7 +66,11 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
     let bd = ensure_bd(ctx)?;
+    let beads_pre_existed = project_root.join(".beads").exists();
     run_bd_init(&bd, &project_root, args.prefix.as_deref())?;
+    if !beads_pre_existed && !ctx.quiet {
+        println!("beads: ✓ task graph initialised in .beads/");
+    }
 
     ensure_git(ctx);
     init_git_repo(ctx, &project_root)?;
@@ -157,45 +161,51 @@ fn resolve_install_root(scope: Scope, project_root: &std::path::Path) -> miette:
 /// Prefers `brew` if available, falls back to `curl ... beads.sh/install | sh`.
 fn ensure_bd(ctx: &Ctx) -> miette::Result<RealBd> {
     if let Ok(bd) = RealBd::discover() {
+        if !ctx.quiet {
+            println!("beads: ✓ on PATH");
+        }
         return Ok(bd);
     }
 
-    if !ctx.quiet {
-        eprintln!("hew init: `bd` not on PATH — installing Beads.");
-    }
-
-    if which::which("brew").is_ok() {
-        install_via_brew(ctx)?;
+    let installer = if which::which("brew").is_ok() {
+        "brew"
     } else if which::which("curl").is_ok() && which::which("sh").is_ok() {
-        install_via_curl(ctx)?;
+        "curl"
     } else {
         return Err(miette::miette!(
             "Beads is required and neither `brew` nor `curl` is on PATH. \
              Install Homebrew (https://brew.sh) or curl, then re-run. \
              Beads docs: https://gastownhall.github.io/beads/"
         ));
+    };
+
+    if !ctx.quiet {
+        println!("beads: ✗ not on PATH — installing via {installer}...");
     }
 
-    RealBd::discover().map_err(|_| {
+    match installer {
+        "brew" => install_via_brew(ctx)?,
+        _ => install_via_curl(ctx)?,
+    }
+
+    let bd = RealBd::discover().map_err(|_| {
         miette::miette!(
             "Beads install ran but `bd` still isn't on PATH. \
              Open a new shell so PATH refreshes, then re-run `hew init`."
         )
-    })
+    })?;
+    if !ctx.quiet {
+        println!("beads: ✓ installed");
+    }
+    Ok(bd)
 }
 
-fn install_via_brew(ctx: &Ctx) -> miette::Result<()> {
-    if !ctx.quiet {
-        eprintln!("  -> brew install beads");
-    }
+fn install_via_brew(_ctx: &Ctx) -> miette::Result<()> {
     run_streaming(std::process::Command::new("brew").args(["install", "beads"]))
         .map_err(|e| miette::miette!("brew install beads failed: {e}"))
 }
 
-fn install_via_curl(ctx: &Ctx) -> miette::Result<()> {
-    if !ctx.quiet {
-        eprintln!("  -> curl -sSL https://beads.sh/install | sh");
-    }
+fn install_via_curl(_ctx: &Ctx) -> miette::Result<()> {
     // Pipe curl into sh. Manual two-stage so we can stream both stdouts.
     let mut curl = std::process::Command::new("curl")
         .args(["-sSL", "https://beads.sh/install"])

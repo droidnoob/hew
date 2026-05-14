@@ -131,6 +131,37 @@ fn init_errors_clearly_when_bd_missing_and_no_installer_available() {
 }
 
 #[test]
+fn init_prints_beads_status_lines() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("beads: ✓ on PATH"))
+        .stdout(contains("beads: ✓ task graph initialised in .beads/"));
+}
+
+#[test]
+fn init_skips_beads_init_message_when_already_initialised() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join(".beads")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("beads: ✓ on PATH"))
+        .stdout(contains("task graph initialised").not());
+}
+
+#[test]
 fn init_is_idempotent_when_beads_already_exists() {
     let stub_dir = tempfile::tempdir().unwrap();
     // Stub fails noisily if `bd init` is called. Idempotence means we skip it.
