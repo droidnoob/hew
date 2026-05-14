@@ -16,11 +16,18 @@ pub fn should_show(ctx: &Ctx) -> bool {
     !ctx.quiet && ctx.interactive
 }
 
-/// Pure banner text. Newline-separated; one trailing blank line for spacing
-/// against whatever the caller prints next.
+/// Pure banner text. Block-letter wordmark + version + tagline. Trailing
+/// blank line gives breathing room before whatever the caller prints next.
 pub fn banner_text() -> String {
+    let art = "\
+██╗  ██╗███████╗██╗    ██╗
+██║  ██║██╔════╝██║    ██║
+███████║█████╗  ██║ █╗ ██║
+██╔══██║██╔══╝  ██║███╗██║
+██║  ██║███████╗╚███╔███╔╝
+╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ";
     format!(
-        "\n  hew  v{version}\n  ━━━  Carve code, not chaos.\n",
+        "\n{art}\n  v{version}  ━  Carve code, not chaos.\n",
         version = env!("CARGO_PKG_VERSION"),
     )
 }
