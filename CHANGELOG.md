@@ -6,6 +6,25 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex adapter: malformed `AgentRoleToml` schema** (#13). The
+  `.codex/agents/hew-*.toml` emitter wrote `name` + `category` +
+  `body`, none of which Codex's `AgentRoleToml` accepts. Codex
+  silently dropped all 20 hew roles at startup. Emitter now writes
+  the correct shape (`name` + `description` + `developer_instructions`)
+  and uses TOML literal multi-line strings so regex escapes (`\s`,
+  `\b`) pass through untouched.
+
+### Added
+
+- **Codex adapter: skills emitter** (#13). `hew init --runtime=codex`
+  also writes `.agents/skills/hew-<name>/SKILL.md` per skill —
+  Codex's auto-discovered skill primitive. Hew methodology is now
+  natively invokable in Codex chat, not just spawn-able as a sub-agent
+  role. File count emitted by `Runtime::Codex` install bumps 21 → 41
+  (20 roles + 20 SKILL.md + AGENTS.md).
+
 ## [0.3.0] — 2026-05-13
 
 First feature release of the 0.3 line. Two new CLI surfaces (`hew

@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.1 -->
+<!-- hew:version=0.3.0 -->
 ---
 name: hew-spec
 category: optional
@@ -30,7 +30,7 @@ directly via `/hew:spec` or via the `hew-plan` tail picker.)*
 
 - The **request** — the user's prompt verbatim.
 - `memories.factual` — what's already known about the codebase, so you
-  don't ask the user to restate things bd already knows.
+  don't ask the user to restate things hew already knows.
 - `memories.boundaries` — existing public interfaces that constrain what
   "build X" can mean here.
 

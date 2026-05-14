@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.1 -->
+<!-- hew:version=0.3.0 -->
 ---
 name: hew
 description: Index of installed hew skills. Loaded by the agent on session start.
@@ -12,7 +12,7 @@ Methodology for AI coding agents. State lives in Beads (`bd`), not markdown file
 
 On every session, run `hew prime <skill>` before invoking that skill. `hew prime`
 returns one JSON blob with: project state, `STATUS:` flags, prerequisites,
-unblocked tasks (`bd ready`), categorized memories, and the embedded skill body.
+unblocked tasks (`hew status` ready list), categorized memories, and the embedded skill body.
 
 **Session resume.** In Claude Code, `hew init` installs a `SessionStart` hook
 that runs `hew prime resume` automatically on every session entry (startup,
@@ -38,8 +38,8 @@ If the user describes intent in plain English, route by intent:
 plan → decompose → (ready → claim → [branch?] → execute → guard → close) → verify
 ```
 
-The agent does not manage phases. It manages the dependency graph. `bd ready`
-always says what to do next. `bd close` marks it done. Nothing else is required.
+The agent does not manage phases. It manages the dependency graph. `hew status`
+always says what to do next. `hew task close` marks it done. Nothing else is required.
 
 **Auto-branching is opt-in.** `hew config set branching.strategy epic`
 makes `hew-execute` create a `<prefix>/<epic-id>-<slug>` branch on the
@@ -60,7 +60,7 @@ via `hew branch new --prefix=<type> --slug=<text>`.
 
 ### Brownfield (for existing codebases)
 
-- **hew-scan** — architecture mapping via `bd remember`
+- **hew-scan** — architecture mapping via `hew remember`
 - **hew-convention** — extract `CONVENTION:` rules from existing code
 - **hew-audit** — dependency health check
 - **hew-boundary** — API + interface map (`BOUNDARY:` memories)
@@ -83,7 +83,7 @@ put their own deploy/review/onboard skills there.
 
 ## Memory prefixes
 
-Every `bd remember` follows a prefix convention. The executor treats prefixes differently.
+Every `hew remember` follows a prefix convention. The executor treats prefixes differently.
 
 | Prefix | Meaning | Treatment |
 |--------|---------|-----------|
@@ -152,11 +152,11 @@ hew-adversarial-review → attacks gaps left by unpicked principles
 ## Anti-patterns
 
 Do not create planning markdown files (`PLAN.md`, `TODO.md`, `ROADMAP.md`,
-`MEMORY.md`). All state belongs in Beads or `bd remember`. The filesystem is for
+`MEMORY.md`). All state belongs in Beads or `hew remember`. The filesystem is for
 code, not plans.
 
 Do not use string-prefixed task titles (`"GATE: ..."`, `"PHASE: ..."`) to fake
 structural roles. Beads has native types: `--type=gate`, `--type=epic`,
 `bd mol bond`. Use them.
 
-Do not skip the `hew-guard` step before `bd close`. Drift compounds.
+Do not skip the `hew-guard` step before `hew task close`. Drift compounds.

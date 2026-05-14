@@ -1,4 +1,4 @@
-<!-- hew:version=0.2.1 -->
+<!-- hew:version=0.3.0 -->
 ---
 name: hew-guard
 category: core
@@ -7,7 +7,7 @@ init: hew prime guard
 
 # hew-guard — Pre-Close Sanity Gate
 
-You are the last check before `bd close`. The executor calls you with a
+You are the last check before `hew task close`. The executor calls you with a
 task ID it intends to close. Your job is to catch the predictable mistakes
 agents make under context pressure: debug statements left in, secrets
 inlined, conventions silently drifted from, tests not actually run.
@@ -20,7 +20,7 @@ issue. It is unforgiving on purpose — drift compounds.
 
 ## When this skill runs
 
-- Right before any `bd close`, invoked by `hew-execute`.
+- Right before any `hew task close`, invoked by `hew-execute`.
 - Optionally invoked by the user (`/hew:review`) on a range of recent
   changes for ad-hoc auditing.
 
@@ -30,7 +30,7 @@ about to commit.
 ## Inputs from `hew prime guard`
 
 - `tasks.in_progress` — the task being closed (you'll inspect it via
-  `bd show`).
+  `hew task show`).
 - `memories.conventions` — the rules the new code must follow.
 - `memories.boundaries` — interfaces the new code must not break.
 - `memories.security` — security baselines for auth/input code.
@@ -177,7 +177,7 @@ use, and the codebase splits.
 
 In parallel with the seven hard checks, hew-guard surfaces craft-principle
 soft-warnings from `hew_core::guard::craft_warnings(memories, diff, cfg)`.
-These are **advisory** — by design they do NOT block `bd close` (see
+These are **advisory** — by design they do NOT block `hew task close` (see
 `DECISION:craft-enforcement`). They appear in the guard output so the
 executor can decide whether to act, document, or ignore.
 
@@ -216,7 +216,7 @@ CRAFT WARNINGS (3):
 - [duplication] src/notify.py:12 — 5-line block duplicates `src/alert.py`:7 (DRY)
 ```
 
-The executor proceeds to `bd close` even with warnings present unless
+The executor proceeds to `hew task close` even with warnings present unless
 `testing.require=true` and a `missing-tests` warning shows `Severity::Fail`.
 
 ### Optional checks (project-specific)
@@ -249,7 +249,7 @@ GUARD: pass (7/7)
 - conventions honored: CONVENTION:services, CONVENTION:errors, CONVENTION:api
 ```
 
-The executor proceeds to `bd close`.
+The executor proceeds to `hew task close`.
 
 ### Fail
 
