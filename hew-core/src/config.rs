@@ -54,7 +54,10 @@ pub struct BranchingConfig {
 
 impl Default for BranchingConfig {
     fn default() -> Self {
-        Self { strategy: "none".to_string() }
+        // `epic` is the recommended out-of-box default: one branch per epic,
+        // matching how most hew users actually structure their work. Switched
+        // from `none` in IV.6 (hew-j7h).
+        Self { strategy: "epic".to_string() }
     }
 }
 
@@ -162,13 +165,70 @@ impl Default for CompactConfig {
 
 pub const COMPACT_GRANULARITIES: &[&str] = &["broad", "fine"];
 
+/// Tri-state opt-in for plan-chain optional skills. `Ask` means the
+/// hew-plan picker prompts the user; `Yes`/`No` make the call upfront.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillMode {
+    Yes,
+    No,
+    #[default]
+    Ask,
+}
+
+// Hand-rolled Deserialize so on-disk configs from the pre-tri-state era
+// (where these fields were `bool`) still load: `true` -> Yes, `false` -> No.
+impl<'de> Deserialize<'de> for SkillMode {
+    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = SkillMode;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"yes\" | \"no\" | \"ask\" (or legacy bool)")
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> std::result::Result<SkillMode, E> {
+                Ok(if v { SkillMode::Yes } else { SkillMode::No })
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<SkillMode, E> {
+                match v.to_ascii_lowercase().as_str() {
+                    "yes" => Ok(SkillMode::Yes),
+                    "no" => Ok(SkillMode::No),
+                    "ask" => Ok(SkillMode::Ask),
+                    _ => Err(E::custom(format!("expected yes|no|ask (or legacy bool), got `{v}`"))),
+                }
+            }
+        }
+        de.deserialize_any(V)
+    }
+}
+
+impl SkillMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+impl std::fmt::Display for SkillMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+pub const SKILL_MODES: &[&str] = &["yes", "no", "ask"];
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(default)]
 pub struct OptionalSkills {
-    pub deps: bool,
-    pub research: bool,
-    pub quick: bool,
-    pub security: bool,
+    pub deps: SkillMode,
+    pub research: SkillMode,
+    pub security: SkillMode,
 }
 
 /// Resolve the user-config path. Honors `HEW_CONFIG` for tests.
@@ -221,7 +281,6 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "git-track" | "git_track" => Some(cfg.git_track.to_string()),
         "optional-skills.deps" => Some(cfg.optional_skills.deps.to_string()),
         "optional-skills.research" => Some(cfg.optional_skills.research.to_string()),
-        "optional-skills.quick" => Some(cfg.optional_skills.quick.to_string()),
         "optional-skills.security" => Some(cfg.optional_skills.security.to_string()),
         "branching.strategy" => Some(cfg.branching.strategy.clone()),
         "research.default" => Some(cfg.research.default.clone()),
@@ -266,6 +325,17 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         }
     };
 
+    let skill_mode_val = |v: &str| -> Result<SkillMode> {
+        match v.to_ascii_lowercase().as_str() {
+            "yes" => Ok(SkillMode::Yes),
+            "no" => Ok(SkillMode::No),
+            "ask" => Ok(SkillMode::Ask),
+            _ => Err(HewError::MissingFlag {
+                flag: format!("value (expected one of yes|no|ask, got `{v}`)"),
+            }),
+        }
+    };
+
     match key {
         "update-check" | "update_check" => cfg.update_check = bool_val(value)?,
         "default-runtime" | "default_runtime" => {
@@ -275,10 +345,9 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
             cfg.default_scope = if value.is_empty() { None } else { Some(value.to_string()) }
         }
         "git-track" | "git_track" => cfg.git_track = bool_val(value)?,
-        "optional-skills.deps" => cfg.optional_skills.deps = bool_val(value)?,
-        "optional-skills.research" => cfg.optional_skills.research = bool_val(value)?,
-        "optional-skills.quick" => cfg.optional_skills.quick = bool_val(value)?,
-        "optional-skills.security" => cfg.optional_skills.security = bool_val(value)?,
+        "optional-skills.deps" => cfg.optional_skills.deps = skill_mode_val(value)?,
+        "optional-skills.research" => cfg.optional_skills.research = skill_mode_val(value)?,
+        "optional-skills.security" => cfg.optional_skills.security = skill_mode_val(value)?,
         "branching.strategy" => {
             if !BRANCHING_STRATEGIES.contains(&value) {
                 return Err(HewError::MissingFlag {
@@ -380,7 +449,6 @@ pub fn keys() -> &'static [&'static str] {
         "git-track",
         "optional-skills.deps",
         "optional-skills.research",
-        "optional-skills.quick",
         "optional-skills.security",
         "branching.strategy",
         "research.default",
@@ -409,7 +477,7 @@ mod tests {
 
         let cfg = Config {
             default_runtime: Some("claude".into()),
-            optional_skills: OptionalSkills { deps: true, ..Default::default() },
+            optional_skills: OptionalSkills { deps: SkillMode::Yes, ..Default::default() },
             update_check: false,
             ..Default::default()
         };
@@ -417,7 +485,7 @@ mod tests {
         save_to(&path, &cfg).unwrap();
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.default_runtime.as_deref(), Some("claude"));
-        assert!(loaded.optional_skills.deps);
+        assert_eq!(loaded.optional_skills.deps, SkillMode::Yes);
         assert!(!loaded.update_check);
     }
 
@@ -485,6 +553,7 @@ mod tests {
                 "compact.granularity_default" => "fine",
                 "compact.target_clusters_cap" => "8",
                 "compact.exempt" => "STATUS:custom,SOMETHING:else",
+                k if k.starts_with("optional-skills.") => "yes",
                 _ => "true",
             };
             set(&mut cfg, k, probe_value).expect(k);
@@ -494,9 +563,9 @@ mod tests {
     #[test]
     fn branching_strategy_validates() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.branching.strategy, "none");
-        set(&mut cfg, "branching.strategy", "epic").unwrap();
         assert_eq!(cfg.branching.strategy, "epic");
+        set(&mut cfg, "branching.strategy", "none").unwrap();
+        assert_eq!(cfg.branching.strategy, "none");
         set(&mut cfg, "branching.strategy", "always").unwrap();
         assert_eq!(cfg.branching.strategy, "always");
         assert!(set(&mut cfg, "branching.strategy", "weekly").is_err());
@@ -614,6 +683,85 @@ mod tests {
         assert!(loaded.testing.require);
         assert_eq!(loaded.craft.max_function_lines, 30);
         assert!(!loaded.craft.warn_on_unused);
+    }
+
+    // ──────── optional-skills.* ────────
+
+    #[test]
+    fn optional_skills_default_to_ask() {
+        let cfg = Config::default();
+        assert_eq!(cfg.optional_skills.deps, SkillMode::Ask);
+        assert_eq!(cfg.optional_skills.research, SkillMode::Ask);
+        assert_eq!(cfg.optional_skills.security, SkillMode::Ask);
+        assert_eq!(get(&cfg, "optional-skills.deps"), Some("ask".into()));
+        assert_eq!(get(&cfg, "optional-skills.research"), Some("ask".into()));
+        assert_eq!(get(&cfg, "optional-skills.security"), Some("ask".into()));
+    }
+
+    #[test]
+    fn optional_skills_quick_key_is_gone() {
+        let mut cfg = Config::default();
+        assert!(get(&cfg, "optional-skills.quick").is_none());
+        assert!(set(&mut cfg, "optional-skills.quick", "yes").is_err());
+        assert!(!keys().contains(&"optional-skills.quick"));
+    }
+
+    #[test]
+    fn optional_skills_accept_yes_no_ask_case_insensitive() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "optional-skills.deps", "yes").unwrap();
+        assert_eq!(cfg.optional_skills.deps, SkillMode::Yes);
+        set(&mut cfg, "optional-skills.deps", "NO").unwrap();
+        assert_eq!(cfg.optional_skills.deps, SkillMode::No);
+        set(&mut cfg, "optional-skills.deps", "Ask").unwrap();
+        assert_eq!(cfg.optional_skills.deps, SkillMode::Ask);
+    }
+
+    #[test]
+    fn optional_skills_reject_invalid_values() {
+        let mut cfg = Config::default();
+        assert!(set(&mut cfg, "optional-skills.deps", "true").is_err());
+        assert!(set(&mut cfg, "optional-skills.research", "false").is_err());
+        assert!(set(&mut cfg, "optional-skills.security", "maybe").is_err());
+        assert!(set(&mut cfg, "optional-skills.security", "").is_err());
+    }
+
+    #[test]
+    fn optional_skills_load_legacy_bool_config() {
+        // Pre-tri-state configs stored deps/research/security as TOML bools.
+        // Loading must not hard-error — true -> Yes, false -> No.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let legacy = r#"
+update_check = true
+
+[optional_skills]
+deps = true
+research = false
+quick = true
+security = false
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.optional_skills.deps, SkillMode::Yes);
+        assert_eq!(loaded.optional_skills.research, SkillMode::No);
+        assert_eq!(loaded.optional_skills.security, SkillMode::No);
+    }
+
+    #[test]
+    fn optional_skills_survive_disk_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "optional-skills.deps", "yes").unwrap();
+        set(&mut cfg, "optional-skills.research", "no").unwrap();
+        // security stays at default Ask — should survive too.
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.optional_skills.deps, SkillMode::Yes);
+        assert_eq!(loaded.optional_skills.research, SkillMode::No);
+        assert_eq!(loaded.optional_skills.security, SkillMode::Ask);
     }
 
     // ──────── compact.* ────────

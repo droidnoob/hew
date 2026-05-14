@@ -6,6 +6,75 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-14
+
+First public release. Repo flipped from private to public; cargo-dist
+publish and `hew update` come online for end users. The headline
+change is the **init v2 flow** — a complete reimagining of
+`hew init`, expanding it from a single runtime prompt to a structured
+13-step setup wizard that surfaces every config knob the methodology
+relies on, with a matching CLI flag for every prompt so scripted
+installs stay first-class. Codex adapter fixes that landed in the
+0.3.1 unreleased window ship as part of this release.
+
+### Added — init v2 flow (hew-hxr)
+
+- **Tri-state `SkillMode` for plan-chain optional skills**
+  (hew-d3r). `OptionalSkills` switches from four booleans to three
+  `SkillMode { Yes, No, Ask }` fields (`deps`, `research`,
+  `security`); `quick` dropped (it's a here-and-now utility, not a
+  plan-chain decision). Default is `Ask` for all three so the
+  hew-plan picker stays the source of truth. Hand-rolled
+  `Deserialize` accepts legacy bool on-disk configs (`true → Yes`,
+  `false → No`) so pre-0.4 users don't see hard parse errors.
+- **`hew init` status lines, no install prompts** (hew-c0u +
+  hew-8xl). git and beads detection now emits readable status lines
+  (`git: ✓ on PATH`, `beads: ✓ installed`). The Confirm prompt for
+  git auto-install is gone — interactive runs try the sudo-free
+  path automatically and surface a hint on failure. Beads install
+  always prints the installer it's using (`brew` or `curl`). Never
+  blocks init.
+- **`hew init` runs `git init` when no `.git/` is present** (hew-c0u).
+  Idempotent: skips when the repo exists.
+- **`Share the task graph in git?` prompt** (hew-op2). Git-gated:
+  only asked when `.git/` exists and interactive. Persists to
+  `git_track` in `~/.config/hew/config.toml`. `--git-track` CLI flag
+  still works.
+- **Project state detection + prompt** (hew-t4l). New
+  `--project-type=new|existing` flag; interactive runs ask with
+  cursor pre-positioned on detected default (`existing` if any
+  source-like files exist, else `new`). Drives the post-install
+  routing hint (`/hew:new-project` vs `/hew:scan`).
+- **Auto-branching strategy prompt + default `epic`** (hew-j7h).
+  `BranchingConfig::default` bumped from `"none"` to `"epic"`; new
+  `--branching=epic|none|always` flag.
+- **Optional skills tri-state prompts** (hew-t11). Three Select
+  prompts (deps / research / security), each picking
+  `yes|no|ask`, with a preamble warning about token cost. New
+  flags: `--deps`, `--research`, `--security`.
+- **Require-tests prompt** (hew-7pr). New `--require-tests` /
+  `--no-require-tests` flag pair persists to `testing.require`.
+- **Configure-more gate for advanced knobs** (hew-ajw). Optional
+  Confirm gates the `research.default` and review-cadence
+  prompts. New flags `--research-default`, `--review-after-n`,
+  `--review-after-epic` short-circuit the gate.
+- **Summary panel at end of install** (hew-bcz). Replaces the
+  one-line "hew installed for X" output with a structured panel
+  showing every decided value. `--quiet` keeps the old one-liner
+  for scripts.
+- **ASCII banner at top of `hew init`** (hew-id2). Six-line block-
+  letter "HEW" wordmark + version + tagline. Suppressed in
+  `--quiet` and non-interactive runs (`hew/src/ui/banner.rs`).
+- **e2e coverage** (hew-efy). 34 tests in
+  `hew/tests/init_e2e.rs`, including a catch-all that round-trips
+  every v2 flag through the on-disk config.
+
+### Changed
+
+- **`BranchingConfig::default` is now `"epic"`** (hew-j7h). Was
+  `"none"` in 0.3.x. New installs get auto-branching on out of the
+  box; existing installs that set it explicitly are unaffected.
+
 ### Fixed
 
 - **Codex adapter: malformed `AgentRoleToml` schema** (#13). The
@@ -16,7 +85,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
   and uses TOML literal multi-line strings so regex escapes (`\s`,
   `\b`) pass through untouched.
 
-### Added
+### Added — adapters
 
 - **Codex adapter: skills emitter** (#13). `hew init --runtime=codex`
   also writes `.agents/skills/hew-<name>/SKILL.md` per skill —
@@ -24,6 +93,16 @@ versioning follows [Semantic Versioning](https://semver.org/).
   natively invokable in Codex chat, not just spawn-able as a sub-agent
   role. File count emitted by `Runtime::Codex` install bumps 21 → 41
   (20 roles + 20 SKILL.md + AGENTS.md).
+
+### Notes
+
+- Repo flipped public on 2026-05-14 ahead of the originally-planned
+  treesitter gate (`hew-sb7`). cargo-dist publish, `hew update`, and
+  the deferred branch-protection ruleset are now live — see
+  `project:release-gating` memory for the workflow implications.
+- Re-running `hew init` in an already-inited dir still overwrites
+  config + re-asks every prompt. Detect-and-offer-refresh logic is
+  filed as **hew-0wa** for a follow-up release.
 
 ## [0.3.0] — 2026-05-13
 

@@ -39,6 +39,9 @@ fn hew_with_stub(project: &Path, stub_dir: &Path) -> Command {
     // Force non-interactive so inquire never engages even if a TTY is somehow visible.
     c.env("HEW_NON_INTERACTIVE", "1");
     c.env("CI", "true");
+    // Isolate config writes — init persists choices to ~/.config/hew/config.toml
+    // from IV.4 onward; tests must not stomp the user's real config.
+    c.env("HEW_CONFIG", project.join("hew-test-config.toml"));
     c
 }
 
@@ -54,7 +57,8 @@ fn init_claude_writes_full_layout_and_gitignores_beads() {
         .args(["init", "--non-interactive"])
         .assert()
         .success()
-        .stdout(contains("hew installed for claude"));
+        .stdout(contains("Setup complete"))
+        .stdout(contains("runtime           claude"));
 
     let hew_root = project.path().join(".claude").join("skills").join("hew");
     assert!(hew_root.join("SKILL.md").exists());
@@ -65,6 +69,42 @@ fn init_claude_writes_full_layout_and_gitignores_beads() {
 
     let gitignore = fs::read_to_string(project.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains(".beads/"), "expected .beads/ in .gitignore:\n{gitignore}");
+}
+
+#[test]
+fn init_persists_git_track_to_config() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--git-track"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("git_track = true"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_no_git_repo_forces_git_track_false() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    // No .git/ — even with no flag, git_track must end up false and .beads/ gitignored.
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let gi = fs::read_to_string(project.path().join(".gitignore")).unwrap_or_default();
+    assert!(gi.contains(".beads/"), ".beads/ should be gitignored when no .git/:\n{gi}");
+    let cfg_body =
+        fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap_or_default();
+    assert!(cfg_body.contains("git_track = false"), "config:\n{cfg_body}");
 }
 
 #[test]
@@ -82,6 +122,377 @@ fn init_git_track_flag_skips_gitignore() {
     let gi = project.path().join(".gitignore");
     let body = fs::read_to_string(&gi).unwrap_or_default();
     assert!(!body.contains(".beads/"), "git-track must not add .beads/:\n{body}");
+}
+
+#[test]
+fn init_yes_runs_with_all_defaults() {
+    // -y + --non-interactive + --runtime must succeed end-to-end with every
+    // sensible default applied. This is the canonical CI/script invocation.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "-y"])
+        .assert()
+        .success()
+        .stdout(contains("Setup complete"));
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    // Every key surfaced by the v2 flow must appear with the expected default.
+    assert!(cfg_body.contains("git_track = false"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"strategy = "epic""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"deps = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("require = false"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"default = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 0"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = false"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_every_v2_flag_round_trips_via_cli() {
+    // Catch-all: pass every IV.4-IV.9 flag together and assert all values
+    // round-trip into the on-disk config.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--git-track",
+            "--project-type",
+            "existing",
+            "--branching",
+            "always",
+            "--deps",
+            "yes",
+            "--research",
+            "no",
+            "--security",
+            "yes",
+            "--require-tests",
+            "--research-default",
+            "auto-skip",
+            "--review-after-n",
+            "3",
+            "--review-after-epic",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:scan to map this codebase"));
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("git_track = true"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"strategy = "always""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"deps = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "no""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("require = true"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"default = "auto-skip""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 3"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = true"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_banner_absent_in_non_interactive_runs() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Carve code, not chaos.").not());
+}
+
+#[test]
+fn init_summary_panel_renders_all_rows() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Setup complete"))
+        .stdout(contains("runtime           claude"))
+        .stdout(contains("branching         epic"))
+        .stdout(contains("optional skills   deps=ask"))
+        .stdout(contains("require tests     no"))
+        .stdout(contains("review cadence    off"));
+}
+
+#[test]
+fn init_quiet_suppresses_panel_keeps_one_liner() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--quiet"])
+        .assert()
+        .success()
+        .stdout(contains("hew installed for claude"))
+        .stdout(contains("Setup complete").not());
+}
+
+#[test]
+fn init_advanced_defaults_preserved_when_not_set() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"default = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 0"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = false"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_research_default_flag_persists() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--research-default",
+            "auto-run",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"default = "auto-run""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_review_cadence_flags_persist() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--review-after-n",
+            "5",
+            "--review-after-epic",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("after_n_tasks = 5"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = true"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_require_tests_default_false() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("require = false"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_require_tests_flag_persists_true() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--require-tests"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("require = true"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_optional_skills_default_to_ask() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"deps = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "ask""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_optional_skills_flags_persist() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--deps",
+            "yes",
+            "--security",
+            "no",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"deps = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "no""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_optional_skills_reject_invalid_value() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--deps", "maybe"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn init_branching_defaults_to_epic_non_interactive() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"strategy = "epic""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_branching_flag_persists() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--branching", "none"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"strategy = "none""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_branching_rejects_invalid_value() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--branching", "weekly"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn init_project_type_defaults_to_new_in_empty_dir() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:new-project"));
+}
+
+#[test]
+fn init_project_type_detects_existing_codebase() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join("src")).unwrap();
+    fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:scan to map this codebase"));
+}
+
+#[test]
+fn init_project_type_flag_overrides_detection() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join("src")).unwrap(); // would auto-detect existing
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--project-type", "new"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:new-project"));
 }
 
 #[test]
@@ -128,6 +539,37 @@ fn init_errors_clearly_when_bd_missing_and_no_installer_available() {
         .stderr(contains("Beads is required"))
         .stderr(contains("brew"))
         .stderr(contains("curl"));
+}
+
+#[test]
+fn init_prints_beads_status_lines() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("beads: ✓ on PATH"))
+        .stdout(contains("beads: ✓ task graph initialised in .beads/"));
+}
+
+#[test]
+fn init_skips_beads_init_message_when_already_initialised() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join(".beads")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("beads: ✓ on PATH"))
+        .stdout(contains("task graph initialised").not());
 }
 
 #[test]
@@ -182,6 +624,82 @@ fn init_warns_when_git_missing_in_non_interactive() {
         .success()
         .stderr(contains("`git` not on PATH"))
         .stderr(contains("auto-branching will be skipped"));
+}
+
+#[test]
+fn init_runs_git_init_when_repo_absent() {
+    // git stub that creates .git/ on `init --quiet` (mimics real git init).
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let git_stub = r#"#!/bin/sh
+PATH="/usr/bin:/bin:$PATH"
+case "$1" in
+  --version) echo "git version 0.0-stub"; exit 0 ;;
+  -C)
+    target="$2"
+    if [ "$3" = "init" ]; then
+      mkdir -p "$target/.git"
+      exit 0
+    fi
+    ;;
+esac
+exit 0
+"#;
+    let git_path = stub_dir.path().join("git");
+    fs::write(&git_path, git_stub).unwrap();
+    let mut perms = fs::metadata(&git_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&git_path, perms).unwrap();
+
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("git: ✓ on PATH"))
+        .stdout(contains("git: ✓ initialised repo"));
+
+    // Resolve symlinks (/tmp -> /private/tmp on macOS) so the path the stub
+    // wrote into matches the path we're checking.
+    let resolved = fs::canonicalize(project.path()).unwrap();
+    assert!(resolved.join(".git").exists(), ".git/ should exist after init");
+}
+
+#[test]
+fn init_skips_git_init_when_repo_present() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    // Stub that explodes if called with `init` — we want to verify we skip.
+    let git_stub = r#"#!/bin/sh
+case "$1" in
+  --version) exit 0 ;;
+  -C)
+    if [ "$3" = "init" ]; then
+      echo "should not run init on existing repo" >&2
+      exit 17
+    fi
+    ;;
+esac
+exit 0
+"#;
+    let git_path = stub_dir.path().join("git");
+    fs::write(&git_path, git_stub).unwrap();
+    let mut perms = fs::metadata(&git_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&git_path, perms).unwrap();
+
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join(".git")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("git: ✓ on PATH"))
+        .stdout(contains("git: ✓ initialised repo").not());
 }
 
 #[test]

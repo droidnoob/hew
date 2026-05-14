@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod commands;
+pub mod ui;
 
 use tracing_subscriber::EnvFilter;
 
