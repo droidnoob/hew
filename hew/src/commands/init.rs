@@ -49,6 +49,14 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub security: Option<SkillModeArg>,
 
+    /// Require tests before close (hew-guard fails close on missing test).
+    #[arg(long, action = clap::ArgAction::SetTrue, overrides_with = "no_require_tests")]
+    pub require_tests: bool,
+
+    /// Explicit opt-out of require-tests (the default).
+    #[arg(long = "no-require-tests", action = clap::ArgAction::SetTrue, overrides_with = "require_tests")]
+    pub no_require_tests: bool,
+
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
@@ -156,6 +164,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let project_type = resolve_project_type(ctx, &args, &project_root);
     let branching = resolve_branching(ctx, &args);
     let skills = resolve_optional_skills(ctx, &args);
+    let require_tests = resolve_require_tests(ctx, &args);
 
     persist_config(ctx, |cfg| {
         cfg.git_track = git_track;
@@ -163,6 +172,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         cfg.optional_skills.deps = skills.0.into_core();
         cfg.optional_skills.research = skills.1.into_core();
         cfg.optional_skills.security = skills.2.into_core();
+        cfg.testing.require = require_tests;
     });
 
     let plan = install::install(runtime, &install_root)?;
@@ -205,6 +215,27 @@ fn detect_project_type(project_root: &std::path::Path) -> ProjectTypeArg {
         return ProjectTypeArg::Existing;
     }
     ProjectTypeArg::New
+}
+
+fn resolve_require_tests(ctx: &Ctx, args: &Args) -> bool {
+    if args.require_tests {
+        return true;
+    }
+    if args.no_require_tests {
+        return false;
+    }
+    if !ctx.interactive {
+        return false;
+    }
+    use inquire::Confirm;
+    Confirm::new("Require tests before close?")
+        .with_default(false)
+        .with_help_message(
+            "When on, hew-guard fails close if a behavior-changing task ships without a test. \
+             More tokens at close time, better maintainability.",
+        )
+        .prompt()
+        .unwrap_or(false)
 }
 
 fn resolve_optional_skills(ctx: &Ctx, args: &Args) -> (SkillModeArg, SkillModeArg, SkillModeArg) {
