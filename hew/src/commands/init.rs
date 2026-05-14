@@ -28,9 +28,29 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = Scope::Local)]
     pub scope: Scope,
 
+    /// Project state: existing brownfield codebase or fresh start. Defaults
+    /// to auto-detect (existing if any source-like files are present).
+    #[arg(long, value_enum)]
+    pub project_type: Option<ProjectTypeArg>,
+
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProjectTypeArg {
+    New,
+    Existing,
+}
+
+impl ProjectTypeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Existing => "existing",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
@@ -82,6 +102,8 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
             .map_err(|e| miette::miette!("update .gitignore: {e}"))?;
     }
 
+    let project_type = resolve_project_type(ctx, &args, &project_root);
+
     persist_config(ctx, |cfg| {
         cfg.git_track = git_track;
     });
@@ -96,8 +118,55 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
             plan.written.len(),
             plan.root.display()
         );
+        match project_type {
+            ProjectTypeArg::New => println!("Next: /hew:new-project to bootstrap"),
+            ProjectTypeArg::Existing => println!("Next: /hew:scan to map this codebase"),
+        }
     }
     Ok(())
+}
+
+/// Auto-detect whether `project_root` looks like an existing codebase or a
+/// fresh directory. Anything that isn't a known scaffolding/meta file counts
+/// as a source file.
+fn detect_project_type(project_root: &std::path::Path) -> ProjectTypeArg {
+    const IGNORE: &[&str] =
+        &["README.md", "README", "LICENSE", "LICENSE.md", ".gitignore", ".git", ".beads"];
+    let Ok(entries) = std::fs::read_dir(project_root) else {
+        return ProjectTypeArg::New;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if name_str.starts_with('.') || IGNORE.contains(&name_str) {
+            continue;
+        }
+        // Skip runtime-marker dirs we created during this very run.
+        if matches!(name_str, "CLAUDE.md" | "AGENTS.md" | "WINDSURF.md" | ".cursor") {
+            continue;
+        }
+        return ProjectTypeArg::Existing;
+    }
+    ProjectTypeArg::New
+}
+
+fn resolve_project_type(ctx: &Ctx, args: &Args, project_root: &std::path::Path) -> ProjectTypeArg {
+    if let Some(p) = args.project_type {
+        return p;
+    }
+    let detected = detect_project_type(project_root);
+    if !ctx.interactive {
+        return detected;
+    }
+    use inquire::Select;
+    let opts = vec![ProjectTypeArg::Existing.as_str(), ProjectTypeArg::New.as_str()];
+    let cursor = if detected == ProjectTypeArg::Existing { 0 } else { 1 };
+    let pick = Select::new("Project state?", opts).with_starting_cursor(cursor).prompt();
+    match pick {
+        Ok("existing") => ProjectTypeArg::Existing,
+        Ok("new") => ProjectTypeArg::New,
+        _ => detected,
+    }
 }
 
 fn resolve_runtime(

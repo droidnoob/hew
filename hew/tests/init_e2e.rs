@@ -124,6 +124,51 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_project_type_defaults_to_new_in_empty_dir() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:new-project"));
+}
+
+#[test]
+fn init_project_type_detects_existing_codebase() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join("src")).unwrap();
+    fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:scan to map this codebase"));
+}
+
+#[test]
+fn init_project_type_flag_overrides_detection() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join("src")).unwrap(); // would auto-detect existing
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--project-type", "new"])
+        .assert()
+        .success()
+        .stdout(contains("Next: /hew:new-project"));
+}
+
+#[test]
 fn init_runtime_flag_overrides_detection() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);
