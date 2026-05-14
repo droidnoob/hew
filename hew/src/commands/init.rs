@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use clap::Args as ClapArgs;
 use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
+use hew_core::config;
 use hew_core::error::HewError;
 use hew_core::git::{GitClient, RealGit};
 use hew_core::install::{self, Runtime};
@@ -75,10 +76,15 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     ensure_git(ctx);
     init_git_repo(ctx, &project_root)?;
 
-    if !args.git_track {
+    let git_track = resolve_git_track(ctx, &args, &project_root);
+    if !git_track {
         let _ = install::ensure_beads_gitignored(&project_root)
             .map_err(|e| miette::miette!("update .gitignore: {e}"))?;
     }
+
+    persist_config(ctx, |cfg| {
+        cfg.git_track = git_track;
+    });
 
     let plan = install::install(runtime, &install_root)?;
 
@@ -292,6 +298,40 @@ fn ensure_git(ctx: &Ctx) {
 
 /// Initialise a git repo in `project_root` if git is available and no
 /// `.git/` exists. Never fails the install; just prints a status line.
+/// Decide whether to track `.beads/` in git. CLI flag wins. Otherwise:
+/// no .git/ → false; non-interactive → false (default); interactive → ask.
+fn resolve_git_track(ctx: &Ctx, args: &Args, project_root: &std::path::Path) -> bool {
+    if args.git_track {
+        return true;
+    }
+    if !project_root.join(".git").exists() {
+        return false;
+    }
+    if !ctx.interactive {
+        return false;
+    }
+    use inquire::Confirm;
+    Confirm::new("Share the task graph in git?")
+        .with_default(false)
+        .with_help_message(".beads/ would be tracked alongside source.")
+        .prompt()
+        .unwrap_or(false)
+}
+
+/// Best-effort config write. Logs to stderr on failure; never aborts init.
+fn persist_config<F>(ctx: &Ctx, mutate: F)
+where
+    F: FnOnce(&mut config::Config),
+{
+    let mut cfg = config::load().unwrap_or_default();
+    mutate(&mut cfg);
+    if let Err(e) = config::save(&cfg)
+        && !ctx.quiet
+    {
+        eprintln!("hew init: warning — could not persist config: {e}");
+    }
+}
+
 fn init_git_repo(ctx: &Ctx, project_root: &std::path::Path) -> miette::Result<()> {
     if !RealGit::is_available() {
         return Ok(());

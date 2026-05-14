@@ -39,6 +39,9 @@ fn hew_with_stub(project: &Path, stub_dir: &Path) -> Command {
     // Force non-interactive so inquire never engages even if a TTY is somehow visible.
     c.env("HEW_NON_INTERACTIVE", "1");
     c.env("CI", "true");
+    // Isolate config writes — init persists choices to ~/.config/hew/config.toml
+    // from IV.4 onward; tests must not stomp the user's real config.
+    c.env("HEW_CONFIG", project.join("hew-test-config.toml"));
     c
 }
 
@@ -65,6 +68,42 @@ fn init_claude_writes_full_layout_and_gitignores_beads() {
 
     let gitignore = fs::read_to_string(project.path().join(".gitignore")).unwrap();
     assert!(gitignore.contains(".beads/"), "expected .beads/ in .gitignore:\n{gitignore}");
+}
+
+#[test]
+fn init_persists_git_track_to_config() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--git-track"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("git_track = true"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_no_git_repo_forces_git_track_false() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    // No .git/ — even with no flag, git_track must end up false and .beads/ gitignored.
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let gi = fs::read_to_string(project.path().join(".gitignore")).unwrap_or_default();
+    assert!(gi.contains(".beads/"), ".beads/ should be gitignored when no .git/:\n{gi}");
+    let cfg_body =
+        fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap_or_default();
+    assert!(cfg_body.contains("git_track = false"), "config:\n{cfg_body}");
 }
 
 #[test]
