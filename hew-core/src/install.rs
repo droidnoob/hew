@@ -616,8 +616,9 @@ fn write_windsurfrules(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Codex adapter: drop each skill into `.codex/agents/hew-<name>.toml`
-/// with the minimal frontmatter Codex expects, plus an AGENTS.md
-/// pointer at the project root.
+/// with Codex's `AgentRoleToml` schema (role name comes from the
+/// filename stem; the body lives under `developer_instructions`).
+/// Also writes an `AGENTS.md` pointer at the project root.
 fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
     let agents_dir = root.join(".codex").join("agents");
     fs::create_dir_all(&agents_dir)?;
@@ -627,12 +628,7 @@ fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
         if s.category == Category::Index {
             continue;
         }
-        let toml = format!(
-            "name = \"{}\"\ncategory = \"{}\"\n\nbody = \"\"\"\n{}\n\"\"\"\n",
-            s.name,
-            s.category,
-            s.body.replace("\"\"\"", "\\\"\\\"\\\""),
-        );
+        let toml = render_codex_role(s.name, s.body);
         let dest = agents_dir.join(format!("{}.toml", s.name));
         fs::write(&dest, toml)?;
         written.push(dest);
@@ -645,6 +641,49 @@ fn write_codex_layout(root: &Path) -> Result<Vec<PathBuf>> {
     written.push(agents_md);
 
     Ok(written)
+}
+
+/// Render a single Codex agent role TOML for the given skill.
+///
+/// Codex's `AgentRoleToml` requires three fields: `name`, `description`,
+/// and `developer_instructions`. We derive `description` from the first
+/// markdown H1 in the skill body (e.g. `# hew-execute — The Work Loop`),
+/// falling back to the skill name. Optional fields like
+/// `model_reasoning_effort` and `background_terminal_max_timeout` are
+/// left to Codex's defaults.
+///
+/// TOML literal multi-line strings (`'''...'''`) skip backslash processing,
+/// so regex chars like `\s` in skill bodies pass through untouched. The
+/// only escape-sensitive edge is a literal `'''` in the body — we fall
+/// back to a basic string with full escaping in that case.
+fn render_codex_role(name: &str, body: &str) -> String {
+    let description = codex_role_description(name, body);
+    let header =
+        format!("name = \"{name}\"\ndescription = \"{}\"\n", toml_basic_escape(&description),);
+    if body.contains("'''") {
+        // Defensive fallback. Escape backslashes and triple-double-quotes.
+        let escaped = body.replace('\\', "\\\\").replace("\"\"\"", "\\\"\\\"\\\"");
+        format!("{header}developer_instructions = \"\"\"\n{escaped}\n\"\"\"\n")
+    } else {
+        format!("{header}developer_instructions = '''\n{body}\n'''\n")
+    }
+}
+
+/// Pull the first `# ` heading out of a skill body and use it as the
+/// Codex `description`. Fallback: the skill name.
+fn codex_role_description(name: &str, body: &str) -> String {
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Minimal escape for a TOML basic (single-line) string.
+fn toml_basic_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn write_generic_claude_md(root: &Path) -> Result<Vec<PathBuf>> {
@@ -786,11 +825,62 @@ mod tests {
         let agents = tmp.path().join(".codex").join("agents");
         assert!(agents.join("hew-execute.toml").exists());
         assert!(agents.join("hew-scan.toml").exists());
-        let body = fs::read_to_string(agents.join("hew-execute.toml")).unwrap();
-        assert!(body.starts_with("name = \"hew-execute\""));
-        assert!(body.contains("category = \"core\""));
-        assert!(body.contains("hew-execute")); // body field present
         assert!(tmp.path().join("AGENTS.md").exists());
+
+        // Every emitted role TOML must be valid TOML and contain the
+        // `developer_instructions` key Codex's AgentRoleToml expects.
+        // Anything else regresses to the "unknown field `body`" bug.
+        for entry in fs::read_dir(&agents).unwrap() {
+            let path = entry.unwrap().path();
+            let body = fs::read_to_string(&path).unwrap();
+            let parsed: toml::Value = toml::from_str(&body)
+                .unwrap_or_else(|e| panic!("{} is not valid TOML: {e}", path.display()));
+            assert!(
+                parsed.get("developer_instructions").is_some(),
+                "{} missing developer_instructions key",
+                path.display()
+            );
+            // `name` must be present and non-empty (Codex rejects empty names).
+            let name = parsed
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{} missing or non-string `name`", path.display()));
+            assert!(!name.is_empty(), "{} has empty `name`", path.display());
+            // Schema fields we must NOT emit (regression guard).
+            assert!(parsed.get("body").is_none(), "{} has stale `body` field", path.display());
+            assert!(
+                parsed.get("category").is_none(),
+                "{} has stale `category` field",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn codex_role_body_with_backslashes_round_trips() {
+        // The pre-fix emitter broke on regex chars like `\s` because basic
+        // multi-line strings `"""..."""` still process escape sequences.
+        let body = "password\\s*=\\s*[\"'][^\"']+[\"']";
+        let toml = render_codex_role("hew-guard", body);
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse");
+        let got = parsed["developer_instructions"].as_str().expect("string");
+        assert!(got.contains("\\s*"), "backslash-s lost in round-trip: {got}");
+    }
+
+    #[test]
+    fn codex_role_body_with_triple_single_quote_uses_basic_string_fallback() {
+        let body = "edge case: ''' inside body";
+        let toml = render_codex_role("hew-test", body);
+        // Fallback uses basic string `"""..."""` for developer_instructions.
+        // The body's `'''` may appear inside it — that's fine because basic
+        // strings don't treat `'` as a delimiter.
+        assert!(
+            toml.contains("developer_instructions = \"\"\""),
+            "fallback should use basic string, got: {toml}"
+        );
+        let parsed: toml::Value = toml::from_str(&toml).expect("parse");
+        let got = parsed["developer_instructions"].as_str().expect("string");
+        assert_eq!(got.trim(), body);
     }
 
     #[test]
