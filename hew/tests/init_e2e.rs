@@ -125,6 +125,20 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_banner_absent_in_non_interactive_runs() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Carve code, not chaos.").not());
+}
+
+#[test]
 fn init_summary_panel_renders_all_rows() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);

@@ -171,6 +171,8 @@ pub enum Scope {
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
 
+    crate::ui::banner::render(ctx);
+
     let runtime = resolve_runtime(ctx, &args, &project_root)?;
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
