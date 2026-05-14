@@ -568,10 +568,11 @@ const SECTION_END: &str = "<!-- HEW:END -->";
 const RESUME_DIRECTIVE: &str = "\
 # On every new session\n\
 \n\
-Run `hew prime resume` as your first action. It emits a JSON document with\n\
-project state, STATUS flags, categorized memories, and the most recent\n\
-CHECKPOINT. Read that before doing anything else — otherwise you are\n\
-flying blind after `/clear`, session compaction, or a fresh shell.\n\
+Run `hew prime resume` as your first action. It prints a plaintext summary\n\
+of project state, STATUS flags, categorized memory counts, and the most\n\
+recent CHECKPOINT body. Read that before doing anything else — otherwise\n\
+you are flying blind after `/clear`, session compaction, or a fresh shell.\n\
+(Pass `--json` if you need the structured form.)\n\
 \n\
 ---\n\n";
 
