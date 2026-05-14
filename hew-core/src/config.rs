@@ -164,15 +164,42 @@ pub const COMPACT_GRANULARITIES: &[&str] = &["broad", "fine"];
 
 /// Tri-state opt-in for plan-chain optional skills. `Ask` means the
 /// hew-plan picker prompts the user; `Yes`/`No` make the call upfront.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillMode {
     Yes,
     No,
     #[default]
     Ask,
+}
+
+// Hand-rolled Deserialize so on-disk configs from the pre-tri-state era
+// (where these fields were `bool`) still load: `true` -> Yes, `false` -> No.
+impl<'de> Deserialize<'de> for SkillMode {
+    fn deserialize<D>(de: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = SkillMode;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"yes\" | \"no\" | \"ask\" (or legacy bool)")
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> std::result::Result<SkillMode, E> {
+                Ok(if v { SkillMode::Yes } else { SkillMode::No })
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<SkillMode, E> {
+                match v.to_ascii_lowercase().as_str() {
+                    "yes" => Ok(SkillMode::Yes),
+                    "no" => Ok(SkillMode::No),
+                    "ask" => Ok(SkillMode::Ask),
+                    _ => Err(E::custom(format!("expected yes|no|ask (or legacy bool), got `{v}`"))),
+                }
+            }
+        }
+        de.deserialize_any(V)
+    }
 }
 
 impl SkillMode {
@@ -694,6 +721,28 @@ mod tests {
         assert!(set(&mut cfg, "optional-skills.research", "false").is_err());
         assert!(set(&mut cfg, "optional-skills.security", "maybe").is_err());
         assert!(set(&mut cfg, "optional-skills.security", "").is_err());
+    }
+
+    #[test]
+    fn optional_skills_load_legacy_bool_config() {
+        // Pre-tri-state configs stored deps/research/security as TOML bools.
+        // Loading must not hard-error — true -> Yes, false -> No.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let legacy = r#"
+update_check = true
+
+[optional_skills]
+deps = true
+research = false
+quick = true
+security = false
+"#;
+        std::fs::write(&path, legacy).unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.optional_skills.deps, SkillMode::Yes);
+        assert_eq!(loaded.optional_skills.research, SkillMode::No);
+        assert_eq!(loaded.optional_skills.security, SkillMode::No);
     }
 
     #[test]
