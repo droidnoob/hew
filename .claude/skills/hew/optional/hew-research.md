@@ -1,4 +1,4 @@
-<!-- hew:version=0.3.0 -->
+<!-- hew:version=0.4.0 -->
 ---
 name: hew-research
 category: optional
