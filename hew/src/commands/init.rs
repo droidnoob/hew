@@ -210,7 +210,8 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     let plan = install::install(runtime, &install_root)?;
 
-    if !ctx.quiet {
+    if ctx.quiet {
+        // Scripts get the one-liner; panel is for humans only.
         println!(
             "hew installed for {} ({:?} scope) → {} files under {}",
             plan.runtime.as_str(),
@@ -218,12 +219,72 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
             plan.written.len(),
             plan.root.display()
         );
-        match project_type {
-            ProjectTypeArg::New => println!("Next: /hew:new-project to bootstrap"),
-            ProjectTypeArg::Existing => println!("Next: /hew:scan to map this codebase"),
-        }
+    } else {
+        print_summary_panel(
+            &plan,
+            args.scope,
+            git_track,
+            project_type,
+            branching,
+            &skills,
+            require_tests,
+            &advanced,
+        );
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // IV.13 refactor will collapse this into a FlowChoices struct.
+fn print_summary_panel(
+    plan: &install::InstallPlan,
+    scope: Scope,
+    git_track: bool,
+    project_type: ProjectTypeArg,
+    branching: BranchingArg,
+    skills: &(SkillModeArg, SkillModeArg, SkillModeArg),
+    require_tests: bool,
+    advanced: &AdvancedKnobs,
+) {
+    let bar = "──────────────────────────────";
+    println!();
+    println!("Setup complete");
+    println!("{bar}");
+    println!("  runtime           {}", plan.runtime.as_str());
+    println!(
+        "  scope             {}",
+        match scope {
+            Scope::Local => "local",
+            Scope::Global => "global",
+        }
+    );
+    println!("  install root      {}", plan.root.display());
+    println!("  files written     {}", plan.written.len());
+    println!(
+        "  git track         {}",
+        if git_track { "yes (.beads/ tracked)" } else { "no (.beads/ ignored)" }
+    );
+    println!("  project state     {}", project_type.as_str());
+    println!("  branching         {}", branching.as_str());
+    println!(
+        "  optional skills   deps={}, research={}, security={}",
+        skills.0.into_core(),
+        skills.1.into_core(),
+        skills.2.into_core(),
+    );
+    println!("  require tests     {}", if require_tests { "yes" } else { "no" });
+    println!("  research default  {}", advanced.research_default.as_str());
+    let review = match (advanced.review_after_n, advanced.review_after_epic) {
+        (0, false) => "off".to_string(),
+        (0, true) => "on-epic".to_string(),
+        (n, false) => format!("every-{n}"),
+        (n, true) => format!("on-epic + every-{n}"),
+    };
+    println!("  review cadence    {review}");
+    println!("{bar}");
+    match project_type {
+        ProjectTypeArg::New => println!("Next: /hew:new-project to bootstrap"),
+        ProjectTypeArg::Existing => println!("Next: /hew:scan to map this codebase"),
+    }
 }
 
 /// Auto-detect whether `project_root` looks like an existing codebase or a

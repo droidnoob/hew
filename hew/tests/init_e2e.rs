@@ -57,7 +57,8 @@ fn init_claude_writes_full_layout_and_gitignores_beads() {
         .args(["init", "--non-interactive"])
         .assert()
         .success()
-        .stdout(contains("hew installed for claude"));
+        .stdout(contains("Setup complete"))
+        .stdout(contains("runtime           claude"));
 
     let hew_root = project.path().join(".claude").join("skills").join("hew");
     assert!(hew_root.join("SKILL.md").exists());
@@ -121,6 +122,40 @@ fn init_git_track_flag_skips_gitignore() {
     let gi = project.path().join(".gitignore");
     let body = fs::read_to_string(&gi).unwrap_or_default();
     assert!(!body.contains(".beads/"), "git-track must not add .beads/:\n{body}");
+}
+
+#[test]
+fn init_summary_panel_renders_all_rows() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Setup complete"))
+        .stdout(contains("runtime           claude"))
+        .stdout(contains("branching         epic"))
+        .stdout(contains("optional skills   deps=ask"))
+        .stdout(contains("require tests     no"))
+        .stdout(contains("review cadence    off"));
+}
+
+#[test]
+fn init_quiet_suppresses_panel_keeps_one_liner() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--quiet"])
+        .assert()
+        .success()
+        .stdout(contains("hew installed for claude"))
+        .stdout(contains("Setup complete").not());
 }
 
 #[test]
