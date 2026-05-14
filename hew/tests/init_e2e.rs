@@ -124,6 +124,72 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_advanced_defaults_preserved_when_not_set() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"default = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_n_tasks = 0"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = false"), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_research_default_flag_persists() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--research-default",
+            "auto-run",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"default = "auto-run""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_review_cadence_flags_persist() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--review-after-n",
+            "5",
+            "--review-after-epic",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains("after_n_tasks = 5"), "config:\n{cfg_body}");
+    assert!(cfg_body.contains("after_epic = true"), "config:\n{cfg_body}");
+}
+
+#[test]
 fn init_require_tests_default_false() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);

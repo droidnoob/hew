@@ -57,9 +57,38 @@ pub struct Args {
     #[arg(long = "no-require-tests", action = clap::ArgAction::SetTrue, overrides_with = "require_tests")]
     pub no_require_tests: bool,
 
+    /// Default for the hew-plan research-or-decompose picker.
+    #[arg(long, value_enum)]
+    pub research_default: Option<ResearchDefaultArg>,
+
+    /// Trigger review after this many closed tasks since last review. 0 = off.
+    #[arg(long)]
+    pub review_after_n: Option<u32>,
+
+    /// Trigger review when an epic closes.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub review_after_epic: bool,
+
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ResearchDefaultArg {
+    Ask,
+    AutoSkip,
+    AutoRun,
+}
+
+impl ResearchDefaultArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::AutoSkip => "auto-skip",
+            Self::AutoRun => "auto-run",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -165,6 +194,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let branching = resolve_branching(ctx, &args);
     let skills = resolve_optional_skills(ctx, &args);
     let require_tests = resolve_require_tests(ctx, &args);
+    let advanced = resolve_advanced(ctx, &args);
 
     persist_config(ctx, |cfg| {
         cfg.git_track = git_track;
@@ -173,6 +203,9 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         cfg.optional_skills.research = skills.1.into_core();
         cfg.optional_skills.security = skills.2.into_core();
         cfg.testing.require = require_tests;
+        cfg.research.default = advanced.research_default.as_str().to_string();
+        cfg.review.after_n_tasks = advanced.review_after_n;
+        cfg.review.after_epic = advanced.review_after_epic;
     });
 
     let plan = install::install(runtime, &install_root)?;
@@ -215,6 +248,67 @@ fn detect_project_type(project_root: &std::path::Path) -> ProjectTypeArg {
         return ProjectTypeArg::Existing;
     }
     ProjectTypeArg::New
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdvancedKnobs {
+    research_default: ResearchDefaultArg,
+    review_after_n: u32,
+    review_after_epic: bool,
+}
+
+fn resolve_advanced(ctx: &Ctx, args: &Args) -> AdvancedKnobs {
+    let mut out = AdvancedKnobs {
+        research_default: args.research_default.unwrap_or(ResearchDefaultArg::Ask),
+        review_after_n: args.review_after_n.unwrap_or(0),
+        review_after_epic: args.review_after_epic,
+    };
+    // Any explicit flag short-circuits the gate.
+    let any_explicit =
+        args.research_default.is_some() || args.review_after_n.is_some() || args.review_after_epic;
+    if any_explicit || !ctx.interactive {
+        return out;
+    }
+    use inquire::{Confirm, Select};
+    let configure_more = Confirm::new("Configure more?")
+        .with_default(false)
+        .with_help_message("research default + review cadence")
+        .prompt()
+        .unwrap_or(false);
+    if !configure_more {
+        return out;
+    }
+    if let Ok(pick) =
+        Select::new("Research default at plan picker?", vec!["ask", "auto-skip", "auto-run"])
+            .with_starting_cursor(0)
+            .prompt()
+    {
+        out.research_default = match pick {
+            "auto-skip" => ResearchDefaultArg::AutoSkip,
+            "auto-run" => ResearchDefaultArg::AutoRun,
+            _ => ResearchDefaultArg::Ask,
+        };
+    }
+    if let Ok(pick) =
+        Select::new("Review cadence?", vec!["off", "on-epic", "every-3", "every-5", "every-10"])
+            .with_starting_cursor(0)
+            .prompt()
+    {
+        match pick {
+            "on-epic" => {
+                out.review_after_epic = true;
+                out.review_after_n = 0;
+            }
+            "every-3" => out.review_after_n = 3,
+            "every-5" => out.review_after_n = 5,
+            "every-10" => out.review_after_n = 10,
+            _ => {
+                out.review_after_n = 0;
+                out.review_after_epic = false;
+            }
+        }
+    }
+    out
 }
 
 fn resolve_require_tests(ctx: &Ctx, args: &Args) -> bool {
