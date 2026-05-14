@@ -54,7 +54,10 @@ pub struct BranchingConfig {
 
 impl Default for BranchingConfig {
     fn default() -> Self {
-        Self { strategy: "none".to_string() }
+        // `epic` is the recommended out-of-box default: one branch per epic,
+        // matching how most hew users actually structure their work. Switched
+        // from `none` in IV.6 (hew-j7h).
+        Self { strategy: "epic".to_string() }
     }
 }
 
@@ -560,9 +563,9 @@ mod tests {
     #[test]
     fn branching_strategy_validates() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.branching.strategy, "none");
-        set(&mut cfg, "branching.strategy", "epic").unwrap();
         assert_eq!(cfg.branching.strategy, "epic");
+        set(&mut cfg, "branching.strategy", "none").unwrap();
+        assert_eq!(cfg.branching.strategy, "none");
         set(&mut cfg, "branching.strategy", "always").unwrap();
         assert_eq!(cfg.branching.strategy, "always");
         assert!(set(&mut cfg, "branching.strategy", "weekly").is_err());

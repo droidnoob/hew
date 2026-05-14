@@ -33,9 +33,30 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub project_type: Option<ProjectTypeArg>,
 
+    /// Auto-branching strategy. Defaults to `epic` (one branch per epic).
+    #[arg(long, value_enum)]
+    pub branching: Option<BranchingArg>,
+
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum BranchingArg {
+    Epic,
+    None,
+    Always,
+}
+
+impl BranchingArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Epic => "epic",
+            Self::None => "none",
+            Self::Always => "always",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -103,9 +124,11 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     }
 
     let project_type = resolve_project_type(ctx, &args, &project_root);
+    let branching = resolve_branching(ctx, &args);
 
     persist_config(ctx, |cfg| {
         cfg.git_track = git_track;
+        cfg.branching.strategy = branching.as_str().to_string();
     });
 
     let plan = install::install(runtime, &install_root)?;
@@ -148,6 +171,28 @@ fn detect_project_type(project_root: &std::path::Path) -> ProjectTypeArg {
         return ProjectTypeArg::Existing;
     }
     ProjectTypeArg::New
+}
+
+fn resolve_branching(ctx: &Ctx, args: &Args) -> BranchingArg {
+    if let Some(b) = args.branching {
+        return b;
+    }
+    if !ctx.interactive {
+        return BranchingArg::Epic;
+    }
+    use inquire::Select;
+    let opts = vec!["epic", "none", "always"];
+    let pick = Select::new("Auto-branching strategy?", opts)
+        .with_help_message(
+            "epic = one branch per epic (recommended); none = manual; always = one branch per task",
+        )
+        .with_starting_cursor(0)
+        .prompt();
+    match pick {
+        Ok("none") => BranchingArg::None,
+        Ok("always") => BranchingArg::Always,
+        _ => BranchingArg::Epic,
+    }
 }
 
 fn resolve_project_type(ctx: &Ctx, args: &Args, project_root: &std::path::Path) -> ProjectTypeArg {

@@ -124,6 +124,51 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_branching_defaults_to_epic_non_interactive() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"strategy = "epic""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_branching_flag_persists() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--branching", "none"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"strategy = "none""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_branching_rejects_invalid_value() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--branching", "weekly"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn init_project_type_defaults_to_new_in_empty_dir() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);
