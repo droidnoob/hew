@@ -53,7 +53,12 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}-${{ matrix.toolchain }}
+          key: ${{ matrix.os }}-${{ matrix.toolchain }}-v2
+          # Never cache `~/.cargo/bin/`. The rustup-installed `cargo` proxy
+          # there gets clobbered by a stale cache entry, breaking the next
+          # run with `error: unexpected argument 'build' found` (cargo is
+          # actually `rustup-init`). Hit us on macos-latest/1.91 — keep this off.
+          cache-bin: "false"
       - run: cargo build --all-targets --locked
       - run: cargo test --all-targets --locked
 
