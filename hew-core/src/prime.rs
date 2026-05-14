@@ -281,6 +281,130 @@ pub fn resume(client: &dyn BdClient) -> Result<ResumeOutput> {
     })
 }
 
+/// Render a `ResumeOutput` as a human-readable summary for the
+/// SessionStart hook. Mirrors `status::render_text` but adds the
+/// latest CHECKPOINT body and any cached update notice.
+pub fn render_resume_text(out: &ResumeOutput) -> String {
+    use std::fmt::Write;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "hew resume");
+    let _ = writeln!(s, "──────────────────────────────────");
+    match out.project.bd_version.as_deref() {
+        Some(v) => {
+            let _ = writeln!(s, "  bd:        v{v}");
+        }
+        None => {
+            let _ = writeln!(s, "  bd:        not detected");
+        }
+    }
+    if let Some(u) = &out.update_available {
+        let _ = writeln!(s, "  update:    {} → {} ({})", u.current, u.latest, u.message);
+    }
+    let _ = writeln!(s);
+
+    let known_phases = ["scan", "convention", "audit", "boundary", "plan", "decompose", "verify"];
+    let _ = writeln!(s, "Phases");
+    let _ = writeln!(s, "──────────────────────────────────");
+    for name in known_phases {
+        let entry = out.status.get(name);
+        let complete = entry.map(|e| e.complete).unwrap_or(false);
+        let ts = entry.and_then(|e| e.timestamp.as_deref()).unwrap_or("");
+        let mark = if complete { "✓" } else { "○" };
+        let _ = writeln!(s, "  {mark} {:<10}  {ts}", name);
+    }
+    // Surface any phases beyond the known set (e.g., review, compact).
+    let mut extras: Vec<(&String, &StatusEntry)> =
+        out.status.iter().filter(|(k, _)| !known_phases.contains(&k.as_str())).collect();
+    extras.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, entry) in extras {
+        let mark = if entry.complete { "✓" } else { "○" };
+        let ts = entry.timestamp.as_deref().unwrap_or("");
+        let _ = writeln!(s, "  {mark} {:<10}  {ts}", name);
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Tasks");
+    let _ = writeln!(s, "──────────────────────────────────");
+    let _ = writeln!(
+        s,
+        "  {} total │ {} done │ {} in progress │ {} ready │ {} blocked",
+        out.tasks.total, out.tasks.done, out.tasks.in_progress, out.tasks.ready, out.tasks.blocked,
+    );
+    if !out.tasks.ready_list.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "  Next up:");
+        for t in out.tasks.ready_list.iter().take(5) {
+            let _ = writeln!(s, "    • [P{}] {} {}", t.priority, t.id, t.title);
+        }
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Memories");
+    let _ = writeln!(s, "──────────────────────────────────");
+    let m = &out.memories;
+    let _ = writeln!(
+        s,
+        "  {} CONVENTION │ {} BOUNDARY │ {} AUDIT │ {} SECURITY │ {} MIGRATION │ {} DEP │ {} factual",
+        m.conventions.len(),
+        m.boundaries.len(),
+        m.audit.len(),
+        m.security.len(),
+        m.migration.len(),
+        m.dep.len(),
+        m.factual.len(),
+    );
+    if !m.project.is_empty()
+        || !m.milestone.is_empty()
+        || !m.roadmap.is_empty()
+        || !m.research.is_empty()
+    {
+        let _ = writeln!(
+            s,
+            "  {} PROJECT │ {} MILESTONE │ {} ROADMAP │ {} RESEARCH",
+            m.project.len(),
+            m.milestone.len(),
+            m.roadmap.len(),
+            m.research.len(),
+        );
+    }
+
+    // Short labels for conventions.
+    let labels: Vec<String> = m
+        .conventions
+        .iter()
+        .filter_map(|line| {
+            let after = line.trim().strip_prefix("CONVENTION:")?;
+            let label = after.split('—').next()?.trim();
+            if label.is_empty() { None } else { Some(label.to_string()) }
+        })
+        .collect();
+    if !labels.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "  Conventions: {}", labels.join(", "));
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Latest CHECKPOINT");
+    let _ = writeln!(s, "──────────────────────────────────");
+    match &out.latest_checkpoint {
+        Some(c) => {
+            let _ = writeln!(s, "  key:       {}", c.key);
+            if let Some(ts) = &c.timestamp {
+                let _ = writeln!(s, "  timestamp: {ts}");
+            }
+            let _ = writeln!(s);
+            for line in c.body.lines() {
+                let _ = writeln!(s, "  {line}");
+            }
+        }
+        None => {
+            let _ = writeln!(s, "  (none — no CHECKPOINT: memories on file)");
+        }
+    }
+    s
+}
+
 fn resolve_skill(name: &str) -> Result<Skill> {
     // Accept `execute`, `hew-execute`, or the canonical name.
     if let Some(s) = skills::find(name) {

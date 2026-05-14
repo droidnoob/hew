@@ -10,29 +10,43 @@ pub struct Args {
     /// for SessionStart hooks.
     pub skill: String,
 
-    /// Pretty-print the JSON output. Default is compact.
+    /// Pretty-print the JSON output. Default is compact. Implies `--json`.
     #[arg(long)]
     pub pretty: bool,
+
+    /// Emit JSON instead of plaintext. Plaintext is the default for
+    /// `resume`; other skills always emit JSON (this flag is a no-op
+    /// for them, kept for forward-compat).
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
     let client = RealBd::discover()?;
-    let s = if args.skill == "resume" {
+    let want_json = args.json || args.pretty;
+
+    if args.skill == "resume" {
         let output = prime::resume(&client)?;
-        if args.pretty {
-            serde_json::to_string_pretty(&output)
+        if want_json {
+            let s = if args.pretty {
+                serde_json::to_string_pretty(&output)
+            } else {
+                serde_json::to_string(&output)
+            }
+            .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
+            println!("{s}");
         } else {
-            serde_json::to_string(&output)
+            print!("{}", prime::render_resume_text(&output));
         }
     } else {
         let output = prime::build(&client, &args.skill)?;
-        if args.pretty {
+        let s = if args.pretty {
             serde_json::to_string_pretty(&output)
         } else {
             serde_json::to_string(&output)
         }
+        .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
+        println!("{s}");
     }
-    .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
-    println!("{s}");
     Ok(())
 }

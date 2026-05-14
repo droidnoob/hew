@@ -133,7 +133,7 @@ fn prime_resume_emits_skill_agnostic_json() {
         .env("HEW_NON_INTERACTIVE", "1")
         .env_remove("HEW_LOG")
         .env_remove("CI")
-        .args(["prime", "resume"])
+        .args(["prime", "resume", "--json"])
         .assert()
         .success()
         .get_output()
@@ -179,4 +179,42 @@ fn prime_resume_pretty_flag_indents_output() {
         .clone();
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("\n  "), "pretty output should be indented:\n{text}");
+    // --pretty implies --json: output must parse as JSON.
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .expect("--pretty must imply --json and emit valid JSON");
+}
+
+#[test]
+fn prime_resume_defaults_to_plaintext() {
+    let stub_dir = make_resume_stub_dir();
+    let out = Command::cargo_bin("hew")
+        .unwrap()
+        .env("PATH", stub_dir.path())
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .env("HEW_NO_UPDATE_CHECK", "1")
+        .env("HEW_NON_INTERACTIVE", "1")
+        .env_remove("HEW_LOG")
+        .env_remove("CI")
+        .args(["prime", "resume"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    // Plaintext, not JSON.
+    assert!(
+        serde_json::from_str::<serde_json::Value>(text.trim()).is_err(),
+        "default `prime resume` must be plaintext, got JSON:\n{text}"
+    );
+    assert!(text.contains("hew resume"), "missing header:\n{text}");
+    assert!(text.contains("Phases"), "missing Phases section:\n{text}");
+    assert!(text.contains("Tasks"), "missing Tasks section:\n{text}");
+    assert!(text.contains("Memories"), "missing Memories section:\n{text}");
+    assert!(text.contains("Latest CHECKPOINT"), "missing checkpoint section:\n{text}");
+    // CHECKPOINT body content should be surfaced.
+    assert!(text.contains("refresh rotation"), "checkpoint body content missing:\n{text}");
+    // STATUS phase still rendered.
+    assert!(text.contains("✓ scan"), "scan phase mark missing:\n{text}");
 }
