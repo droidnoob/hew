@@ -37,9 +37,39 @@ pub struct Args {
     #[arg(long, value_enum)]
     pub branching: Option<BranchingArg>,
 
+    /// Deps skill mode for the plan picker. Default `ask`.
+    #[arg(long, value_enum)]
+    pub deps: Option<SkillModeArg>,
+
+    /// Research skill mode for the plan picker. Default `ask`.
+    #[arg(long, value_enum)]
+    pub research: Option<SkillModeArg>,
+
+    /// Security skill mode for the plan picker. Default `ask`.
+    #[arg(long, value_enum)]
+    pub security: Option<SkillModeArg>,
+
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum SkillModeArg {
+    Yes,
+    No,
+    Ask,
+}
+
+impl SkillModeArg {
+    fn into_core(self) -> hew_core::config::SkillMode {
+        use hew_core::config::SkillMode;
+        match self {
+            Self::Yes => SkillMode::Yes,
+            Self::No => SkillMode::No,
+            Self::Ask => SkillMode::Ask,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -125,10 +155,14 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     let project_type = resolve_project_type(ctx, &args, &project_root);
     let branching = resolve_branching(ctx, &args);
+    let skills = resolve_optional_skills(ctx, &args);
 
     persist_config(ctx, |cfg| {
         cfg.git_track = git_track;
         cfg.branching.strategy = branching.as_str().to_string();
+        cfg.optional_skills.deps = skills.0.into_core();
+        cfg.optional_skills.research = skills.1.into_core();
+        cfg.optional_skills.security = skills.2.into_core();
     });
 
     let plan = install::install(runtime, &install_root)?;
@@ -171,6 +205,45 @@ fn detect_project_type(project_root: &std::path::Path) -> ProjectTypeArg {
         return ProjectTypeArg::Existing;
     }
     ProjectTypeArg::New
+}
+
+fn resolve_optional_skills(ctx: &Ctx, args: &Args) -> (SkillModeArg, SkillModeArg, SkillModeArg) {
+    // All three flags given? skip the whole prompt block entirely.
+    if let (Some(d), Some(r), Some(s)) = (args.deps, args.research, args.security) {
+        return (d, r, s);
+    }
+    let want_prompt = ctx.interactive;
+    if want_prompt && !ctx.quiet {
+        println!();
+        println!("Plan-chain optional skills (more tokens per plan, but better outcomes):");
+    }
+    let deps = resolve_single_skill(ctx, args.deps, "deps", "vet new dependencies before adopting");
+    let research =
+        resolve_single_skill(ctx, args.research, "research", "web-cited research before planning");
+    let security = resolve_single_skill(ctx, args.security, "security", "auth/input/secret checks");
+    (deps, research, security)
+}
+
+fn resolve_single_skill(
+    ctx: &Ctx,
+    flag: Option<SkillModeArg>,
+    name: &str,
+    blurb: &str,
+) -> SkillModeArg {
+    if let Some(v) = flag {
+        return v;
+    }
+    if !ctx.interactive {
+        return SkillModeArg::Ask;
+    }
+    use inquire::Select;
+    let opts = vec!["ask", "yes", "no"];
+    let pick = Select::new(&format!("{name:<8} — {blurb}"), opts).with_starting_cursor(0).prompt();
+    match pick {
+        Ok("yes") => SkillModeArg::Yes,
+        Ok("no") => SkillModeArg::No,
+        _ => SkillModeArg::Ask,
+    }
 }
 
 fn resolve_branching(ctx: &Ctx, args: &Args) -> BranchingArg {

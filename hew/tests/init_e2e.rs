@@ -124,6 +124,64 @@ fn init_git_track_flag_skips_gitignore() {
 }
 
 #[test]
+fn init_optional_skills_default_to_ask() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"deps = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "ask""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_optional_skills_flags_persist() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--deps",
+            "yes",
+            "--security",
+            "no",
+        ])
+        .assert()
+        .success();
+
+    let cfg_body = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_body.contains(r#"deps = "yes""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"security = "no""#), "config:\n{cfg_body}");
+    assert!(cfg_body.contains(r#"research = "ask""#), "config:\n{cfg_body}");
+}
+
+#[test]
+fn init_optional_skills_reject_invalid_value() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--deps", "maybe"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn init_branching_defaults_to_epic_non_interactive() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);
