@@ -35,6 +35,8 @@ pub enum Op {
     Note(NoteArgs),
     /// Search tasks by title / id prefix.
     Search(SearchArgs),
+    /// Edit an existing task's title / description / acceptance.
+    Update(UpdateArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -141,6 +143,23 @@ pub struct NoteArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+pub struct UpdateArgs {
+    pub id: String,
+    /// New title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New description body (inline).
+    #[arg(long, conflicts_with = "description_file")]
+    pub description: Option<String>,
+    /// Read description from a file. Use `-` for stdin (handled by bd).
+    #[arg(long = "description-file", value_name = "PATH")]
+    pub description_file: Option<std::path::PathBuf>,
+    /// New acceptance-criteria text. `bd update --acceptance` underneath.
+    #[arg(long)]
+    pub acceptance: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
 pub struct SearchArgs {
     pub query: String,
     #[arg(long, default_value_t = 20)]
@@ -161,6 +180,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         Op::Children(a) => children(ctx, &bd, a),
         Op::Note(a) => note(ctx, &bd, a),
         Op::Search(a) => search(ctx, &bd, a),
+        Op::Update(a) => update(ctx, &bd, a),
     }
 }
 
@@ -327,6 +347,28 @@ fn note(ctx: &Ctx, bd: &dyn BdClient, args: NoteArgs) -> miette::Result<()> {
     tasks::note(bd, &args.id, &args.text)?;
     if !ctx.quiet {
         println!("note added to {}", args.id);
+    }
+    Ok(())
+}
+
+fn update(ctx: &Ctx, bd: &dyn BdClient, args: UpdateArgs) -> miette::Result<()> {
+    use hew_core::tasks::{UpdateTaskArgs, update_task};
+
+    let payload = UpdateTaskArgs {
+        title: args.title.as_deref(),
+        description: args.description.as_deref(),
+        description_file: args.description_file.as_deref(),
+        acceptance: args.acceptance.as_deref(),
+    };
+    if payload.is_empty() {
+        return Err(miette::miette!(
+            "no fields to update — pass at least one of --title, --description, --description-file, --acceptance"
+        ));
+    }
+    let changed = update_task(bd, &args.id, &payload)?;
+    if !ctx.quiet {
+        let noun = if changed == 1 { "field" } else { "fields" };
+        println!("updated {} ({changed} {noun})", args.id);
     }
     Ok(())
 }

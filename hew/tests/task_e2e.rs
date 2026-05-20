@@ -35,7 +35,7 @@ case "$verb" in
     q)
         printf '%s\n' "$BD_STUB_Q_BODY"
         ;;
-    update|close|reopen|note|forget|dep|recall)
+    update|close|reopen|note|forget|dep|recall|acceptance)
         # Side-effect verbs — empty stdout, log captures argv.
         exit 0
         ;;
@@ -416,6 +416,78 @@ fn search_includes_status_all_and_json() {
     assert!(recorded.contains("--status all"), "{recorded}");
 }
 
+// ─── update ─────────────────────────────────────────────────────────────
+
+#[test]
+fn update_passes_title_and_description_to_bd() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args([
+            "task",
+            "update",
+            "hew-1",
+            "--title",
+            "new title",
+            "--description",
+            "rewritten body",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("updated hew-1"))
+        .stdout(contains("2 fields"));
+
+    let recorded = fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("update hew-1"), "{recorded}");
+    assert!(recorded.contains("--title new title"), "{recorded}");
+    assert!(recorded.contains("--description rewritten body"), "{recorded}");
+}
+
+#[test]
+fn update_with_description_file_routes_to_body_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+    let spec = tmp.path().join("spec.md");
+    fs::write(&spec, "new spec body").unwrap();
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args(["task", "update", "hew-1", "--description-file", spec.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let recorded = fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("--body-file"), "{recorded}");
+    assert!(recorded.contains(spec.to_str().unwrap()), "{recorded}");
+}
+
+#[test]
+fn update_errors_when_no_fields_provided() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+
+    hew_in(tmp.path())
+        .args(["task", "update", "hew-1"])
+        .assert()
+        .failure()
+        .stderr(contains("no fields to update"));
+}
+
+#[test]
+fn update_rejects_description_and_description_file_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+
+    hew_in(tmp.path())
+        .args(["task", "update", "hew-1", "--description", "x", "--description-file", "/tmp/y"])
+        .assert()
+        .failure();
+}
+
 // ─── help ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -435,5 +507,6 @@ fn task_help_lists_all_verbs() {
         .stdout(contains("reopen"))
         .stdout(contains("children"))
         .stdout(contains("note"))
-        .stdout(contains("search"));
+        .stdout(contains("search"))
+        .stdout(contains("update"));
 }
