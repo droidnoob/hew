@@ -6,6 +6,26 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hew update` works on every distribution channel** (hew-lv2). The
+  in-process `axoupdater` call required an `install-receipt.json` that
+  cargo-dist never writes (we ship with `install-updater = false`) and
+  that brew / `cargo install` never write either — so the bare
+  `hew update` failed with "The updater isn't properly configured" for
+  every shipped install method. Replaced with explicit routing by
+  `InstallSource` (Brew → `brew upgrade hew`; Cargo → `cargo install
+  --git … --force`; curl-installer / unknown → axoupdater; dev build
+  → refuse with hint). `HEW_INSTALL_SOURCE` env var overrides the
+  auto-detected source.
+- **Skill files auto-refresh after a binary upgrade.** Previously
+  `hew update` upgraded the binary but left every project's
+  `.claude/skills/hew/`, `.cursorrules`, etc. running stale skill
+  bodies until the user remembered to also run `hew update --local`.
+  The bare `hew update` now re-execs the freshly-installed `hew update
+  --local` whenever a runtime marker is detected in cwd. Suppress with
+  `--no-refresh`.
+
 ## [0.5.1] — 2026-05-20
 
 Small follow-up release adding the long-missing `hew ready` and
