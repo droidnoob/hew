@@ -1,4 +1,4 @@
-<!-- hew:version=0.4.0 -->
+<!-- hew:version=0.5.0 -->
 ---
 name: hew
 description: Index of installed hew skills. Loaded by the agent on session start.
