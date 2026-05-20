@@ -317,9 +317,27 @@ pub fn claim(bd: &dyn BdClient, id: &str) -> Result<()> {
 
 /// `bd close <id> -r <reason>`. Use [`reopen`] to undo.
 pub fn close_with_reason(bd: &dyn BdClient, id: &str, reason: &str) -> Result<()> {
+    close_with_reason_force(bd, id, reason, false)
+}
+
+/// `bd close <id> -r <reason> [--force]`. When `force` is `true`, the
+/// dep-blocker check inside `bd` is bypassed. Useful when a planner
+/// added an over-conservative dep that didn't actually gate the work
+/// — see GH issue #17.
+pub fn close_with_reason_force(
+    bd: &dyn BdClient,
+    id: &str,
+    reason: &str,
+    force: bool,
+) -> Result<()> {
     let id_os = OsString::from(id);
     let reason_os = OsString::from(reason);
-    bd.run_raw(&[OsStr::new("close"), id_os.as_os_str(), OsStr::new("-r"), reason_os.as_os_str()])?;
+    let mut argv: Vec<&OsStr> =
+        vec![OsStr::new("close"), id_os.as_os_str(), OsStr::new("-r"), reason_os.as_os_str()];
+    if force {
+        argv.push(OsStr::new("--force"));
+    }
+    bd.run_raw(&argv)?;
     Ok(())
 }
 
@@ -768,6 +786,20 @@ mod tests {
         close_with_reason(&bd, "t-1", "shipped via abc123").unwrap();
         let argv = bd.last_call();
         assert_eq!(argv, vec!["close", "t-1", "-r", "shipped via abc123"]);
+    }
+
+    #[test]
+    fn close_with_force_appends_force_flag() {
+        let bd = MockBd::new().with("close", "");
+        close_with_reason_force(&bd, "t-1", "dep was bogus", true).unwrap();
+        assert_eq!(bd.last_call(), vec!["close", "t-1", "-r", "dep was bogus", "--force"]);
+    }
+
+    #[test]
+    fn close_without_force_omits_force_flag() {
+        let bd = MockBd::new().with("close", "");
+        close_with_reason_force(&bd, "t-1", "done", false).unwrap();
+        assert_eq!(bd.last_call(), vec!["close", "t-1", "-r", "done"]);
     }
 
     #[test]

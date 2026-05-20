@@ -86,6 +86,12 @@ pub struct CloseArgs {
     /// reason. See `/hew:execute` Step 10's deviation handling.
     #[arg(long = "type", value_parser = clap::value_parser!(u8).range(1..=3))]
     pub rule: Option<u8>,
+    /// Bypass `bd`'s blocked-by-open-prereq check. Use when a dep edge
+    /// shouldn't gate this close (e.g., over-conservative planner dep
+    /// that didn't actually block the work). Still emits a regular
+    /// close event; deviation type still recorded via `--type`.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -215,9 +221,10 @@ fn close(ctx: &Ctx, bd: &dyn BdClient, args: CloseArgs) -> miette::Result<()> {
         Some(n) => format!("[Rule {n}] {}", args.reason),
         None => args.reason,
     };
-    tasks::close_with_reason(bd, &args.id, &reason)?;
+    tasks::close_with_reason_force(bd, &args.id, &reason, args.force)?;
     if !ctx.quiet {
-        println!("closed {} — {reason}", args.id);
+        let suffix = if args.force { " (forced)" } else { "" };
+        println!("closed {}{suffix} — {reason}", args.id);
     }
     Ok(())
 }
