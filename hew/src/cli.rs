@@ -125,4 +125,10 @@ pub enum Command {
     /// Memory compaction: apply a CompactPlan from stdin, or survey
     /// per-prefix memory counts. See skills/optional/hew-compact.md.
     Compact(crate::commands::compact::Args),
+
+    /// List unblocked tasks (mirrors `bd ready`).
+    Ready(crate::commands::next::ReadyArgs),
+
+    /// Pick the top ready task. Claims by default; `--no-claim` to peek.
+    Next(crate::commands::next::NextArgs),
 }

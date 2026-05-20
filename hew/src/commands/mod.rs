@@ -13,6 +13,7 @@ pub mod epic;
 pub mod init;
 pub mod manpage;
 pub mod memories;
+pub mod next;
 pub mod prime;
 pub mod remember;
 pub mod review;
@@ -51,5 +52,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Remember(a) => remember::run(&ctx, a),
         Command::Epic(a) => epic::run(&ctx, a),
         Command::Compact(a) => compact::run(&ctx, a),
+        Command::Ready(a) => next::run_ready(&ctx, a),
+        Command::Next(a) => next::run_next(&ctx, a),
     }
 }

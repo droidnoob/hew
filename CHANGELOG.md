@@ -6,6 +6,31 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-05-20
+
+Small follow-up release adding the long-missing `hew ready` and
+`hew next` CLI surfaces. The `/hew:next` slash skill was documented as
+picking the top unblocked task, but the CLI had no subcommand to back
+it — agents had to drop to raw `bd ready` / `bd list`, violating
+`prefer-hew-over-bd`. Both gaps now closed.
+
+### Added
+
+- **`hew ready` and `hew next` subcommands** (hew-xtg, GH #23). The
+  `/hew:next` slash skill was documented as picking the top unblocked
+  task, but the CLI itself had no `next` or `ready` command — agents
+  had to drop down to raw `bd ready` / `bd list`, violating
+  `prefer-hew-over-bd`. New surfaces:
+  - `hew ready` mirrors `bd ready --json` through the curated
+    `ReadyTask` type. Text-default; `--json` opts in; `--n` truncates.
+  - `hew next` claims the top ready task and prints its id + title.
+    `--no-claim` peeks. `--branch` additionally creates a feature
+    branch (prefix derived from `issue_type` via
+    `feat/fix/chore/docs`; slug from task title). `--prefix` and
+    `--slug` override the auto-derivation.
+  - The bundled `/hew:next` slash command updated to call the new
+    CLI directly instead of pivoting through `hew prime execute`.
+
 ## [0.5.0] — 2026-05-20
 
 Session-start overhaul plus a sweep of agent-facing bug fixes. The
