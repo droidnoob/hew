@@ -1,21 +1,13 @@
 //! `prime::build` driven against a `RealBd` pointed at a stub script.
 
-use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use hew_core::bd::RealBd;
 use hew_core::prime;
 
 fn write_stub(dir: &std::path::Path, script: &str) -> PathBuf {
-    let path = dir.join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(script.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-    path
+    hew_core::testing::install_executable_stub(dir, "bd", script).unwrap();
+    dir.join("bd")
 }
 
 const STUB: &str = r#"#!/bin/sh
