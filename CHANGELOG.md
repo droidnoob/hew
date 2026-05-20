@@ -34,6 +34,16 @@ automatically after a successful binary upgrade.
   The bare `hew update` now re-execs the freshly-installed `hew update
   --local` whenever a runtime marker is detected in cwd. Suppress with
   `--no-refresh`.
+- **CI stub installer hardened against lingering Linux ETXTBSY.**
+  PR #27 made `install_executable_stub` atomic via tmp+rename, but
+  CI still occasionally hit "Text file busy" on the very next exec.
+  Root cause: post-write chmod dirtied the inode's metadata after the
+  write fd closed, and the kernel could still see the writer-count
+  drop in-flight when exec consulted it. Fix: set the mode at create
+  time (`OpenOptions::mode`), `sync_all()` data + metadata, drop the
+  fd, then rename, then fsync the parent directory. Per-call atomic
+  counter added to the tmp name so two threads sampling identical
+  nanos can no longer collide.
 
 ## [0.5.1] — 2026-05-20
 
