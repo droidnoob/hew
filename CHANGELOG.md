@@ -6,6 +6,134 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-20
+
+Session-start overhaul plus a sweep of agent-facing bug fixes. The
+headline is `hew prime resume`: the SessionStart hook now emits a
+plaintext summary by default and surfaces three new bands of context
+that the agent previously had to discover by hand — `hew config` knobs
+as standing instructions, every claimed in-flight task with its body,
+and the working-tree git state (branch, dirty, ahead/behind). Memory
+bucketing gained `DECISION`, `GOTCHA`, and `FEEDBACK` as first-class
+categories instead of being buried in `factual`.
+
+Alongside that, six bugs filed against the curated wrapper layer
+landed: `hew remember --type=feedback` now accepts, `hew task close`
+gains `--force`, `hew task show` displays children for epics,
+`hew task update` is new, `hew update --local` no longer requires a
+working self-updater, and `hew epic tree` is ~3.5× faster on real
+graphs.
+
+### Added — prime resume context overhaul (hew-5gb, PRs #15 and #22)
+
+- **Plaintext-by-default for `hew prime resume`** (hew-prime-pt, PR
+  #15). The SessionStart hook output is now a readable summary
+  instead of a wall of JSON. `--json` (and `--pretty`, which implies
+  it) emit the structured `ResumeOutput` for tooling consumers.
+  Other `hew prime <skill>` invocations are unchanged — they still
+  emit JSON. The bundled `RESUME_DIRECTIVE` in `install.rs` updated
+  to describe the new default.
+- **`ConfigInstructions` rendered as standing directives** (hew-5gb).
+  `hew config` knobs that shape behavior (`branching.strategy`,
+  `testing.require`, `craft.max_function_lines`,
+  `craft.warn_on_unused`, `review.after_n_tasks`, `review.after_epic`,
+  `research.default`, `optional_skills.*`, `git_track`) appear at
+  every session start as actionable lines, not a raw dump. Loads via
+  `config::load` with default fallback so a missing or malformed
+  config never breaks the hook.
+- **Claimed in-flight tasks surfaced with their body** (hew-5gb).
+  Every `status=in_progress` task appears with id, title, priority,
+  and the first ~20 lines of its description. The "what was I doing?"
+  signal the previous resume output omitted (only the integer count
+  was visible). Routes via `BdClient::run_to_file` per
+  `GOTCHA:pipe-deadlock` since `bd list --json` can exceed the OS
+  pipe buffer on large graphs.
+- **Git working-tree state in the hook output** (hew-5gb). Current
+  branch, dirty/clean, untracked count, ahead/behind upstream.
+  Best-effort: degrades to `None` when not in a repo or git is
+  unavailable.
+- **First-class `DECISION`, `GOTCHA`, `FEEDBACK` memory buckets**
+  (hew-5gb). Previously bucketed into `factual`. `CLAUDE.md` calls
+  these out as "cite when relevant" / "read before debugging" / "honor
+  every time" categories — they deserved direct visibility. On the
+  hew repo's own graph, that's 35 + 9 + 1 entries pulled out of
+  factual.
+
+### Added — task wrappers (hew-fz2, hew-8j7, hew-dm5, PR #24)
+
+- **`hew task close --force`** (hew-fz2 / GH #17). Surfaces `bd`'s
+  existing `--force` flag through the hew wrapper. Useful when a
+  planner added an over-conservative dep that didn't actually gate
+  the work — previously required dropping to `bd close` directly,
+  violating prefer-hew-over-bd. Closes still record the deviation
+  type via `--type N`.
+- **`hew task show <epic>` displays children** (hew-8j7 / GH #20).
+  Default behavior now appends a `CHILDREN (N/M complete)` section
+  whenever the task has children, mirroring `bd show`'s format.
+  `--no-children` flag suppresses for narrow output. `--json` form
+  gains a `children: [TaskSummary, ...]` field (omitted when empty).
+- **`hew task update`** (hew-dm5 / GH #16). New subcommand for
+  editing existing task fields after creation:
+  `--title`, `--description`, `--description-file <path>` (mutually
+  exclusive with `--description`), `--acceptance`. Removes the
+  two-narrative problem with `hew task note` and the
+  prefer-hew-over-bd violation of falling back to raw `bd update`
+  after a spec pivot.
+
+### Added — `feedback` memory type (hew-45h, PR #24)
+
+- **`hew remember --type=feedback`** (hew-45h / GH #18) — adds
+  `feedback` to the `MEMORY_PREFIXES` allowlist (now 14 entries).
+  FEEDBACK is a first-class Anthropic auto-memory category for user
+  preferences and corrections — distinct from `CONVENTION` (project
+  rule), `DECISION` (point-in-time choice), and `GOTCHA` (technical
+  pitfall). Was previously forcing users to either miscategorize or
+  fall back to raw `bd remember`.
+
+### Fixed — `hew update` is usable again (hew-rr8, PR #24)
+
+- **`--local` bypasses the self-updater entirely** (hew-rr8 / GH
+  #19). Previously `hew update --local` ran the axoupdater check
+  first; when that returned "isn't properly configured" the user
+  couldn't refresh their `.claude/` skills either. Now `--local`
+  short-circuits before any updater call, detects every installed
+  runtime via `install::detect_runtimes`, and re-runs
+  `install::install` for each. Errors clean when no runtime marker
+  is found, pointing the user at `hew init`.
+- **Self-updater failures now ship a concrete recovery path**
+  (hew-rr8). The old message ("install a newer release manually from
+  &lt;url&gt;") gave no actionable command. The new
+  `MANUAL_INSTALL_HINT` lists `brew install droidnoob/hew/hew`,
+  `cargo install --git https://github.com/droidnoob/hew hew`, and the
+  releases page. After a successful binary upgrade, `hew update` now
+  also reminds the user to run `hew update --local` in each project
+  root.
+
+### Performance — `hew epic tree` ~3.5× faster (hew-ara, PR #24)
+
+- **Drop the N+1 query** (hew-ara / GH #21). `hew epic tree` was
+  making `2N+1` bd subprocess calls (one show + one children per
+  node). Each bd call costs ~0.5s, so a 7-child epic took ~5–7s.
+  Two fixes: (a) eliminate the redundant per-node `bd show` since
+  `children()` already returns full `TaskSummary` objects;
+  (b) leaf-skip heuristic — non-epic, non-milestone tasks never
+  parent anything in practice, so their `children()` call is
+  skipped. Combined: `O(2N)` → `O(1)` bd calls on a flat-leaf epic.
+  Measured on this repo's `hew-4az`: 6.7s → 1.9s (release build).
+  Regression test `tree_does_not_query_children_of_leaf_tasks`
+  asserts exactly 1 show + 1 children call on a 3-leaf fixture.
+
+### Internal
+
+- `MEMORY_PREFIXES` length is 14 (was 13). The
+  `validate_memory_type_accepts_every_allowlisted_value` test
+  iterates over the array so it auto-covers the new entry; no
+  count-drift bumps needed.
+- `prime::ResumeOutput` JSON gained `config`, `in_progress`, `git`
+  fields. Existing consumers of the JSON shape continue to work —
+  serde's `#[serde(default)]` and `skip_serializing_if = "Option::is_none"`
+  guard against missing fields on older runs.
+
 ## [0.4.0] — 2026-05-14
 
 First public release. Repo flipped from private to public; cargo-dist
