@@ -1,7 +1,6 @@
 //! `hew remember` end-to-end via a PATH-stubbed bd binary.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -26,11 +25,7 @@ esac
 "#;
 
 fn write_bd_stub(dir: &std::path::Path) {
-    let path = dir.join("bd");
-    fs::write(&path, STUB).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(dir, "bd", STUB).unwrap();
 }
 
 fn hew_in(dir: &std::path::Path) -> Command {

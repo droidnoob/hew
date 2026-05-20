@@ -1,9 +1,5 @@
 //! End-to-end: invoke the `hew` binary with PATH pointing at a fake `bd`.
 
-use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-
 use assert_cmd::Command;
 use predicates::str::contains;
 
@@ -19,12 +15,7 @@ exit 2
 
 fn make_stub_dir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(STUB.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(tmp.path(), "bd", STUB).unwrap();
     tmp
 }
 
@@ -113,12 +104,7 @@ exit 2
 
 fn make_resume_stub_dir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(RESUME_STUB.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(tmp.path(), "bd", RESUME_STUB).unwrap();
     tmp
 }
 

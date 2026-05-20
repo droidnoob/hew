@@ -167,7 +167,6 @@ fn run_brew_install_git(brew: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn detect_os_smoke() {
@@ -225,11 +224,7 @@ mod tests {
     }
 
     fn write_stub(dir: &std::path::Path, name: &str, body: &str) {
-        let path = dir.join(name);
-        fs::write(&path, body).unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
+        crate::testing::install_executable_stub(dir, name, body).unwrap();
     }
 
     #[test]

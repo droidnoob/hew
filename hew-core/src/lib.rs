@@ -23,6 +23,7 @@ pub mod slash;
 pub mod stacks;
 pub mod status;
 pub mod tasks;
+pub mod testing;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};

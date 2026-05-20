@@ -208,14 +208,9 @@ impl GitClient for RealGit {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn write_stub(dir: &std::path::Path, body: &str) {
-        let path = dir.join("git");
-        fs::write(&path, body).unwrap();
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
+        crate::testing::install_executable_stub(dir, "git", body).unwrap();
     }
 
     #[test]

@@ -6,7 +6,6 @@
 //! "unhandled" to stderr and exits 2.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -80,11 +79,7 @@ esac
 "#;
 
 fn install_stub(dir: &Path, name: &str, script: &str) {
-    let path = dir.join(name);
-    fs::write(&path, script).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(dir, name, script).unwrap();
 }
 
 fn write_fixture(dir: &Path, name: &str, body: &str) {
