@@ -6,9 +6,9 @@
 //! Every helper here exists to make the test harness less flaky. None
 //! of them are intended for production callers.
 
-use std::fs;
-use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 /// Install an executable stub script at `<dir>/<name>` in an
@@ -34,11 +34,16 @@ use std::path::Path;
 ///
 /// Callers can immediately spawn `<dir>/<name>` afterward.
 pub fn install_executable_stub(dir: &Path, name: &str, body: &str) -> io::Result<()> {
-    // PID + monotonic nanos buys us a unique temp path even when
-    // multiple test threads write the same stub in parallel.
+    // PID + a per-call counter + monotonic nanos buys a unique temp
+    // path even when multiple test threads write the same stub in
+    // parallel. The counter is the load-bearing piece — two threads
+    // can sample identical nanos on the same machine.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let tmp_name = format!(
-        ".{name}.tmp.{}.{}",
+        ".{name}.tmp.{}.{}.{}",
         std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -47,17 +52,33 @@ pub fn install_executable_stub(dir: &Path, name: &str, body: &str) -> io::Result
     let tmp = dir.join(&tmp_name);
     let dest = dir.join(name);
 
-    // Use a fresh write — explicitly creating then closing the file
-    // before chmod + rename. fs::write does this in one shot.
-    fs::write(&tmp, body)?;
-
-    let mut perms = fs::metadata(&tmp)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&tmp, perms)?;
+    // Create with the final mode set in one syscall. Doing chmod
+    // *after* the write would dirty the inode just before we exec
+    // it, which on Linux can trip the writer-vs-exec race even
+    // though our own fd is already closed (see ETXTBSY notes below).
+    // `std::fs::File` already sets `O_CLOEXEC` by default, so we
+    // don't need a `custom_flags` call here.
+    {
+        let mut f = OpenOptions::new().write(true).create_new(true).mode(0o755).open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+        // Flush data + metadata to disk before close so the inode's
+        // i_writecount drop is fully durable when exec consults it.
+        f.sync_all()?;
+    } // explicit close before rename — drop releases the only write fd.
 
     // Atomic on POSIX. If `dest` already exists it's replaced; old
     // inode hangs around for any process still exec'ing it.
     fs::rename(&tmp, &dest)?;
+
+    // fsync the parent dir so the rename is durable + visible to a
+    // subsequent exec. Without this, Linux can keep the directory
+    // entry change buffered long enough that an exec() finds an inode
+    // the kernel still considers "writer-busy". Best-effort: failure
+    // here doesn't change correctness for tmpfs/in-memory paths.
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+
     Ok(())
 }
 

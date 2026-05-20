@@ -52,6 +52,102 @@ pub fn detect_runtimes(project_root: &Path) -> Vec<Runtime> {
         .collect()
 }
 
+/// How the running `hew` binary was installed. Used by `hew update` to
+/// route to the appropriate platform upgrade tool instead of the
+/// receipt-based in-process updater (which is never wired up because
+/// `Cargo.toml::dist::install-updater = false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSource {
+    /// Under `brew --prefix`, `/opt/homebrew/`, `/usr/local/Cellar/`,
+    /// or `linuxbrew`.
+    Brew,
+    /// Under `$CARGO_HOME/bin/` (or `~/.cargo/bin/`).
+    Cargo,
+    /// In-tree `target/{debug,release}/` build — local dev only.
+    Dev,
+    /// Anything else: curl installer, manual download, package manager
+    /// we don't know about.
+    Unknown,
+}
+
+impl InstallSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Brew => "brew",
+            Self::Cargo => "cargo",
+            Self::Dev => "dev",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify the currently-running `hew` binary by inspecting
+/// [`std::env::current_exe`].
+///
+/// Returns [`InstallSource::Unknown`] when the path can't be resolved
+/// (e.g. exotic symlink chains, sandboxed filesystems) so callers can
+/// fall back to the manual-install hint instead of erroring.
+///
+/// The `HEW_INSTALL_SOURCE` env var overrides detection with one of
+/// `brew` / `cargo` / `dev` / `unknown`. Used by integration tests and
+/// as an escape hatch when path-sniffing misclassifies an exotic setup.
+pub fn detect_install_source() -> InstallSource {
+    if let Some(s) = std::env::var_os("HEW_INSTALL_SOURCE") {
+        return match s.to_string_lossy().as_ref() {
+            "brew" => InstallSource::Brew,
+            "cargo" => InstallSource::Cargo,
+            "dev" => InstallSource::Dev,
+            _ => InstallSource::Unknown,
+        };
+    }
+    match std::env::current_exe() {
+        Ok(p) => classify_exe_path(&p),
+        Err(_) => InstallSource::Unknown,
+    }
+}
+
+/// Testable core of [`detect_install_source`]. Canonicalizes when
+/// possible (handles brew's symlinks from `bin/` → `Cellar/`) but falls
+/// back to the raw path so synthetic test paths still classify.
+pub(crate) fn classify_exe_path(path: &Path) -> InstallSource {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let s = resolved.to_string_lossy();
+
+    if s.contains("/target/debug/") || s.contains("/target/release/") {
+        return InstallSource::Dev;
+    }
+
+    // Brew layouts:
+    //   macOS ARM    : /opt/homebrew/{bin,Cellar}/...
+    //   macOS Intel  : /usr/local/{bin,Cellar}/hew/... (after canonicalize)
+    //   Linuxbrew    : /home/linuxbrew/.linuxbrew/{bin,Cellar}/...
+    //   Custom prefix: matched via `brew --prefix` lookup below.
+    if s.contains("/Cellar/")
+        || s.starts_with("/opt/homebrew/")
+        || s.starts_with("/home/linuxbrew/")
+        || s.starts_with("/usr/local/Cellar/")
+    {
+        return InstallSource::Brew;
+    }
+
+    // Cargo: $CARGO_HOME/bin/ or ~/.cargo/bin/.
+    if let Some(cargo_bin) = cargo_bin_dir()
+        && resolved.starts_with(&cargo_bin)
+    {
+        return InstallSource::Cargo;
+    }
+
+    InstallSource::Unknown
+}
+
+fn cargo_bin_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        return Some(PathBuf::from(home).join("bin"));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".cargo").join("bin"))
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallPlan {
     pub runtime: Runtime,
@@ -843,6 +939,58 @@ pub fn ensure_beads_gitignored(project_root: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_recognizes_brew_layouts() {
+        let cases = [
+            "/opt/homebrew/bin/hew",
+            "/opt/homebrew/Cellar/hew/0.5.0/bin/hew",
+            "/usr/local/Cellar/hew/0.5.0/bin/hew",
+            "/home/linuxbrew/.linuxbrew/bin/hew",
+            "/home/linuxbrew/.linuxbrew/Cellar/hew/0.5.0/bin/hew",
+        ];
+        for path in cases {
+            assert_eq!(
+                classify_exe_path(Path::new(path)),
+                InstallSource::Brew,
+                "expected Brew for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_recognizes_cargo_bin() {
+        // Use CARGO_HOME explicitly so the test isn't HOME-dependent.
+        // SAFETY: tests run single-threaded by default in this crate's
+        // wave; the env-var dance is bounded.
+        let prev = std::env::var_os("CARGO_HOME");
+        unsafe {
+            std::env::set_var("CARGO_HOME", "/tmp/fake-cargo");
+        }
+        assert_eq!(classify_exe_path(Path::new("/tmp/fake-cargo/bin/hew")), InstallSource::Cargo);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CARGO_HOME", v) },
+            None => unsafe { std::env::remove_var("CARGO_HOME") },
+        }
+    }
+
+    #[test]
+    fn classify_recognizes_dev_build() {
+        assert_eq!(
+            classify_exe_path(Path::new("/Users/me/Code/hew/target/debug/hew")),
+            InstallSource::Dev
+        );
+        assert_eq!(
+            classify_exe_path(Path::new("/Users/me/Code/hew/target/release/hew")),
+            InstallSource::Dev
+        );
+    }
+
+    #[test]
+    fn classify_falls_back_to_unknown() {
+        assert_eq!(classify_exe_path(Path::new("/usr/local/bin/hew")), InstallSource::Unknown);
+        assert_eq!(classify_exe_path(Path::new("/some/random/place/hew")), InstallSource::Unknown);
+    }
 
     #[test]
     fn detect_finds_known_markers() {

@@ -6,6 +6,45 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-05-20
+
+Patch release fixing the bare `hew update` path. PR #28 cut 0.5.1 with
+the new `hew next` / `hew ready` subcommands, but users couldn't
+actually upgrade onto it via `hew update` itself — the in-process
+axoupdater was misconfigured for every channel we ship. This release
+fixes that and folds in a long-asked-for UX: skill files now refresh
+automatically after a successful binary upgrade.
+
+### Fixed
+
+- **`hew update` works on every distribution channel** (hew-lv2). The
+  in-process `axoupdater` call required an `install-receipt.json` that
+  cargo-dist never writes (we ship with `install-updater = false`) and
+  that brew / `cargo install` never write either — so the bare
+  `hew update` failed with "The updater isn't properly configured" for
+  every shipped install method. Replaced with explicit routing by
+  `InstallSource` (Brew → `brew upgrade hew`; Cargo → `cargo install
+  --git … --force`; curl-installer / unknown → axoupdater; dev build
+  → refuse with hint). `HEW_INSTALL_SOURCE` env var overrides the
+  auto-detected source.
+- **Skill files auto-refresh after a binary upgrade.** Previously
+  `hew update` upgraded the binary but left every project's
+  `.claude/skills/hew/`, `.cursorrules`, etc. running stale skill
+  bodies until the user remembered to also run `hew update --local`.
+  The bare `hew update` now re-execs the freshly-installed `hew update
+  --local` whenever a runtime marker is detected in cwd. Suppress with
+  `--no-refresh`.
+- **CI stub installer hardened against lingering Linux ETXTBSY.**
+  PR #27 made `install_executable_stub` atomic via tmp+rename, but
+  CI still occasionally hit "Text file busy" on the very next exec.
+  Root cause: post-write chmod dirtied the inode's metadata after the
+  write fd closed, and the kernel could still see the writer-count
+  drop in-flight when exec consulted it. Fix: set the mode at create
+  time (`OpenOptions::mode`), `sync_all()` data + metadata, drop the
+  fd, then rename, then fsync the parent directory. Per-call atomic
+  counter added to the tmp name so two threads sampling identical
+  nanos can no longer collide.
+
 ## [0.5.1] — 2026-05-20
 
 Small follow-up release adding the long-missing `hew ready` and
