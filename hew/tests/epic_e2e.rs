@@ -58,12 +58,22 @@ fn hew_in(dir: &std::path::Path) -> Command {
 }
 
 fn issue_json(id: &str, title: &str, status: &str, reason: Option<&str>) -> String {
+    issue_json_typed(id, title, status, reason, "task")
+}
+
+fn issue_json_typed(
+    id: &str,
+    title: &str,
+    status: &str,
+    reason: Option<&str>,
+    issue_type: &str,
+) -> String {
     let reason_field = match reason {
         Some(r) => format!("\"{r}\""),
         None => "null".into(),
     };
     format!(
-        r#"{{"id":"{id}","title":"{title}","description":"epic body for {id}","status":"{status}","priority":2,"issue_type":"task","closed_at":"","close_reason":{reason_field},"parent":null}}"#
+        r#"{{"id":"{id}","title":"{title}","description":"epic body for {id}","status":"{status}","priority":2,"issue_type":"{issue_type}","closed_at":"","close_reason":{reason_field},"parent":null}}"#
     )
 }
 
@@ -134,15 +144,20 @@ fn tree_walks_two_levels() {
     let tmp = tempfile::tempdir().unwrap();
     write_bd_stub(tmp.path());
     let f = fx(tmp.path());
-    seed(&f, "show", "hew-1", &format!("[{}]", issue_json("hew-1", "root", "open", None)));
-    seed(&f, "show", "hew-1.1", &format!("[{}]", issue_json("hew-1.1", "kid", "open", None)));
-    seed(&f, "show", "hew-1.1.1", &format!("[{}]", issue_json("hew-1.1.1", "grand", "open", None)));
-    seed(&f, "children", "hew-1", &format!("[{}]", issue_json("hew-1.1", "kid", "open", None)));
+    // Use epic-typed intermediate nodes so the leaf-skip heuristic
+    // doesn't prune them. hew-1.1.1 is task-typed (leaf).
+    seed(&f, "show", "hew-1", &epic_show("hew-1", "root"));
+    seed(
+        &f,
+        "children",
+        "hew-1",
+        &format!("[{}]", issue_json_typed("hew-1.1", "kid", "open", None, "epic")),
+    );
     seed(
         &f,
         "children",
         "hew-1.1",
-        &format!("[{}]", issue_json("hew-1.1.1", "grand", "open", None)),
+        &format!("[{}]", issue_json_typed("hew-1.1.1", "grand", "open", None, "task")),
     );
 
     hew_in(tmp.path())
@@ -153,6 +168,48 @@ fn tree_walks_two_levels() {
         .stdout(contains("hew-1"))
         .stdout(contains("hew-1.1"))
         .stdout(predicates::str::contains("hew-1.1.1").not());
+}
+
+#[test]
+fn tree_does_not_query_children_of_leaf_tasks() {
+    // Regression test for hew-ara (GH #21). Before the fix, building the
+    // tree fired `bd children` once per leaf — turning a 7-child epic
+    // into 9 subprocess invocations. Now leaf tasks are pruned at the
+    // `issue_type` check, so only one `bd children` call fires (the
+    // root's). Same goes for the redundant per-node `bd show`.
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let f = fx(tmp.path());
+    let log = tmp.path().join("log");
+
+    seed(&f, "show", "hew-1", &epic_show("hew-1", "root"));
+    // Three task-typed leaves under the root.
+    let kids = format!(
+        "[{},{},{}]",
+        issue_json_typed("hew-1.1", "leaf a", "open", None, "task"),
+        issue_json_typed("hew-1.2", "leaf b", "open", None, "task"),
+        issue_json_typed("hew-1.3", "leaf c", "open", None, "task"),
+    );
+    seed(&f, "children", "hew-1", &kids);
+
+    hew_in(tmp.path())
+        .env("BD_STUB_FIXTURES", &f)
+        .env("BD_STUB_LOG", &log)
+        .args(["epic", "tree", "hew-1"])
+        .assert()
+        .success();
+
+    let recorded = fs::read_to_string(&log).unwrap();
+    let show_calls = recorded.lines().filter(|l| l.starts_with("show ")).count();
+    let children_calls = recorded.lines().filter(|l| l.starts_with("children ")).count();
+
+    // One `show` for the root, one `children` for the root, zero each
+    // for the leaves. 2 calls total instead of the prior 8.
+    assert_eq!(show_calls, 1, "expected exactly 1 bd show call, got {show_calls}:\n{recorded}");
+    assert_eq!(
+        children_calls, 1,
+        "expected exactly 1 bd children call (root only), got {children_calls}:\n{recorded}"
+    );
 }
 
 #[test]

@@ -200,7 +200,16 @@ struct TreeNode {
 }
 
 fn tree(ctx: &Ctx, bd: &dyn BdClient, args: TreeArgs) -> miette::Result<()> {
-    let root = build_tree(bd, &args.id, 0, args.depth)?;
+    // Root node needs an explicit show — the parent's children() call
+    // doesn't exist for the very top of the tree. Every level below
+    // reuses TaskSummary objects returned by children() so each node
+    // costs exactly one bd subprocess invocation (the children query),
+    // not two (show + children).
+    //
+    // Before: O(2N) bd subprocess calls for N nodes. ~5s on a 55-task
+    // graph.  After: O(N) calls — see hew-ara / GH issue #21.
+    let summary = tasks::show(bd, &args.id)?;
+    let root = build_tree_from_summary(bd, &summary, 0, args.depth)?;
     if wants_json(ctx, args.json) {
         emit_json(&root)?;
         return Ok(());
@@ -209,23 +218,34 @@ fn tree(ctx: &Ctx, bd: &dyn BdClient, args: TreeArgs) -> miette::Result<()> {
     Ok(())
 }
 
-fn build_tree(bd: &dyn BdClient, id: &str, depth: u32, max_depth: u32) -> miette::Result<TreeNode> {
-    let summary = tasks::show(bd, id)?;
-    let children = if max_depth != 0 && depth >= max_depth.saturating_sub(1) {
+fn build_tree_from_summary(
+    bd: &dyn BdClient,
+    summary: &TaskSummary,
+    depth: u32,
+    max_depth: u32,
+) -> miette::Result<TreeNode> {
+    let at_max = max_depth != 0 && depth >= max_depth.saturating_sub(1);
+    // Leaf-skip heuristic: non-epic, non-milestone tasks rarely parent
+    // anything. Skipping `children()` on them avoids one bd subprocess
+    // per leaf — the bulk of the remaining latency on wide epics.
+    // If a leaf does have unexpected children, they'll show up the next
+    // time the user runs `hew task children <id>` directly.
+    let can_have_children = matches!(summary.issue_type.as_str(), "epic" | "milestone" | "");
+    let children = if at_max || !can_have_children {
         Vec::new()
     } else {
-        let kids = tasks::children(bd, id)?;
+        let kids = tasks::children(bd, &summary.id)?;
         let mut out = Vec::with_capacity(kids.len());
         for k in kids {
-            out.push(build_tree(bd, &k.id, depth + 1, max_depth)?);
+            out.push(build_tree_from_summary(bd, &k, depth + 1, max_depth)?);
         }
         out
     };
     Ok(TreeNode {
-        id: summary.id,
-        title: summary.title,
-        status: summary.status,
-        issue_type: summary.issue_type,
+        id: summary.id.clone(),
+        title: summary.title.clone(),
+        status: summary.status.clone(),
+        issue_type: summary.issue_type.clone(),
         children,
     })
 }
