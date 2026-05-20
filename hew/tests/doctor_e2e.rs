@@ -1,8 +1,6 @@
 //! `hew doctor` end-to-end.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
 use predicates::str::contains;
@@ -15,12 +13,7 @@ exit 0
 "#;
 
 fn install_bd(dir: &std::path::Path, script: &str) {
-    let path = dir.join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(script.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(dir, "bd", script).unwrap();
 }
 
 fn hew(project: &std::path::Path, stub_dir: &std::path::Path) -> Command {

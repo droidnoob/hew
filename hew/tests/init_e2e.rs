@@ -1,8 +1,6 @@
 //! `hew init` end-to-end against a fake `bd` and an isolated project dir.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -21,12 +19,7 @@ exit 2
 "#;
 
 fn install_stub(dir: &Path, script: &str) {
-    let path = dir.join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(script.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(dir, "bd", script).unwrap();
 }
 
 fn hew_with_stub(project: &Path, stub_dir: &Path) -> Command {
@@ -645,11 +638,7 @@ case "$1" in
 esac
 exit 0
 "#;
-    let git_path = stub_dir.path().join("git");
-    fs::write(&git_path, git_stub).unwrap();
-    let mut perms = fs::metadata(&git_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&git_path, perms).unwrap();
+    hew_core::testing::install_executable_stub(stub_dir.path(), "git", git_stub).unwrap();
 
     let project = tempfile::tempdir().unwrap();
     fs::create_dir(project.path().join(".claude")).unwrap();
@@ -684,11 +673,7 @@ case "$1" in
 esac
 exit 0
 "#;
-    let git_path = stub_dir.path().join("git");
-    fs::write(&git_path, git_stub).unwrap();
-    let mut perms = fs::metadata(&git_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&git_path, perms).unwrap();
+    hew_core::testing::install_executable_stub(stub_dir.path(), "git", git_stub).unwrap();
 
     let project = tempfile::tempdir().unwrap();
     fs::create_dir(project.path().join(".claude")).unwrap();
@@ -708,11 +693,8 @@ fn init_does_not_warn_when_git_present() {
     let stub_dir = tempfile::tempdir().unwrap();
     install_stub(stub_dir.path(), BD_STUB_OK);
     // Drop a git stub that exits 0 on --version so RealGit::is_available() finds it.
-    let git_path = stub_dir.path().join("git");
-    fs::write(&git_path, "#!/bin/sh\nexit 0\n").unwrap();
-    let mut perms = fs::metadata(&git_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&git_path, perms).unwrap();
+    hew_core::testing::install_executable_stub(stub_dir.path(), "git", "#!/bin/sh\nexit 0\n")
+        .unwrap();
 
     let project = tempfile::tempdir().unwrap();
     fs::create_dir(project.path().join(".claude")).unwrap();

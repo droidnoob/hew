@@ -1,9 +1,5 @@
 //! `hew status` end-to-end against a stub `bd`.
 
-use std::fs;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-
 use assert_cmd::Command;
 use predicates::str::contains;
 
@@ -19,12 +15,7 @@ exit 2
 
 fn make_stub() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join("bd");
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(STUB.as_bytes()).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    hew_core::testing::install_executable_stub(tmp.path(), "bd", STUB).unwrap();
     tmp
 }
 
