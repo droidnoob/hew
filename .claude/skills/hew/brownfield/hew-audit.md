@@ -1,4 +1,4 @@
-<!-- hew:version=0.5.1 -->
+<!-- hew:version=0.5.2 -->
 ---
 name: hew-audit
 category: brownfield

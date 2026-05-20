@@ -6,6 +6,15 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-05-20
+
+Patch release fixing the bare `hew update` path. PR #28 cut 0.5.1 with
+the new `hew next` / `hew ready` subcommands, but users couldn't
+actually upgrade onto it via `hew update` itself — the in-process
+axoupdater was misconfigured for every channel we ship. This release
+fixes that and folds in a long-asked-for UX: skill files now refresh
+automatically after a successful binary upgrade.
+
 ### Fixed
 
 - **`hew update` works on every distribution channel** (hew-lv2). The
