@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Memory type — one of: convention, boundary, security, audit,
-    /// decision, status, gotcha, project, milestone, roadmap,
+    /// decision, status, gotcha, feedback, project, milestone, roadmap,
     /// research, dep, factual. The canonical UPPER prefix is prepended
     /// to the body before write.
     #[arg(long = "type", conflicts_with_all = ["raw", "from_file"])]

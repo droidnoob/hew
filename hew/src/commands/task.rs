@@ -35,6 +35,8 @@ pub enum Op {
     Note(NoteArgs),
     /// Search tasks by title / id prefix.
     Search(SearchArgs),
+    /// Edit an existing task's title / description / acceptance.
+    Update(UpdateArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -44,6 +46,11 @@ pub struct ShowArgs {
     /// Emit `TaskSummary` JSON instead of text.
     #[arg(long)]
     pub json: bool,
+    /// Suppress the CHILDREN section even if the task has children.
+    /// Default behavior: show children whenever they exist. Mostly an
+    /// escape hatch for narrow output.
+    #[arg(long)]
+    pub no_children: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -86,6 +93,12 @@ pub struct CloseArgs {
     /// reason. See `/hew:execute` Step 10's deviation handling.
     #[arg(long = "type", value_parser = clap::value_parser!(u8).range(1..=3))]
     pub rule: Option<u8>,
+    /// Bypass `bd`'s blocked-by-open-prereq check. Use when a dep edge
+    /// shouldn't gate this close (e.g., over-conservative planner dep
+    /// that didn't actually block the work). Still emits a regular
+    /// close event; deviation type still recorded via `--type`.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -130,6 +143,23 @@ pub struct NoteArgs {
 }
 
 #[derive(Debug, ClapArgs)]
+pub struct UpdateArgs {
+    pub id: String,
+    /// New title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New description body (inline).
+    #[arg(long, conflicts_with = "description_file")]
+    pub description: Option<String>,
+    /// Read description from a file. Use `-` for stdin (handled by bd).
+    #[arg(long = "description-file", value_name = "PATH")]
+    pub description_file: Option<std::path::PathBuf>,
+    /// New acceptance-criteria text. `bd update --acceptance` underneath.
+    #[arg(long)]
+    pub acceptance: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
 pub struct SearchArgs {
     pub query: String,
     #[arg(long, default_value_t = 20)]
@@ -150,6 +180,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         Op::Children(a) => children(ctx, &bd, a),
         Op::Note(a) => note(ctx, &bd, a),
         Op::Search(a) => search(ctx, &bd, a),
+        Op::Update(a) => update(ctx, &bd, a),
     }
 }
 
@@ -157,12 +188,42 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
 fn show(ctx: &Ctx, bd: &dyn BdClient, args: ShowArgs) -> miette::Result<()> {
     let t = tasks::show(bd, &args.id)?;
+
+    // Fetch children up-front. If the lookup fails or returns empty,
+    // degrade silently — show should never error because the child
+    // lookup hiccupped on a leaf task.
+    let kids: Vec<TaskSummary> = if args.no_children {
+        Vec::new()
+    } else {
+        tasks::children(bd, &args.id).unwrap_or_default()
+    };
+
     if wants_json(ctx, args.json) {
-        emit_json(&t)?;
+        #[derive(serde::Serialize)]
+        struct ShowOutput<'a> {
+            #[serde(flatten)]
+            task: &'a TaskSummary,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            children: &'a Vec<TaskSummary>,
+        }
+        emit_json(&ShowOutput { task: &t, children: &kids })?;
     } else {
         print_task_long(&t);
+        if !kids.is_empty() {
+            println!();
+            print_children_section(&kids);
+        }
     }
     Ok(())
+}
+
+fn print_children_section(kids: &[TaskSummary]) {
+    let total = kids.len();
+    let done = kids.iter().filter(|t| infer_status(t) == "closed").count();
+    println!("  CHILDREN ({done}/{total} complete)");
+    for t in kids {
+        print_task_row(t);
+    }
 }
 
 fn list(ctx: &Ctx, bd: &dyn BdClient, args: ListArgs) -> miette::Result<()> {
@@ -215,9 +276,10 @@ fn close(ctx: &Ctx, bd: &dyn BdClient, args: CloseArgs) -> miette::Result<()> {
         Some(n) => format!("[Rule {n}] {}", args.reason),
         None => args.reason,
     };
-    tasks::close_with_reason(bd, &args.id, &reason)?;
+    tasks::close_with_reason_force(bd, &args.id, &reason, args.force)?;
     if !ctx.quiet {
-        println!("closed {} — {reason}", args.id);
+        let suffix = if args.force { " (forced)" } else { "" };
+        println!("closed {}{suffix} — {reason}", args.id);
     }
     Ok(())
 }
@@ -285,6 +347,28 @@ fn note(ctx: &Ctx, bd: &dyn BdClient, args: NoteArgs) -> miette::Result<()> {
     tasks::note(bd, &args.id, &args.text)?;
     if !ctx.quiet {
         println!("note added to {}", args.id);
+    }
+    Ok(())
+}
+
+fn update(ctx: &Ctx, bd: &dyn BdClient, args: UpdateArgs) -> miette::Result<()> {
+    use hew_core::tasks::{UpdateTaskArgs, update_task};
+
+    let payload = UpdateTaskArgs {
+        title: args.title.as_deref(),
+        description: args.description.as_deref(),
+        description_file: args.description_file.as_deref(),
+        acceptance: args.acceptance.as_deref(),
+    };
+    if payload.is_empty() {
+        return Err(miette::miette!(
+            "no fields to update — pass at least one of --title, --description, --description-file, --acceptance"
+        ));
+    }
+    let changed = update_task(bd, &args.id, &payload)?;
+    if !ctx.quiet {
+        let noun = if changed == 1 { "field" } else { "fields" };
+        println!("updated {} ({changed} {noun})", args.id);
     }
     Ok(())
 }

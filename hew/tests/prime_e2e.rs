@@ -104,8 +104,9 @@ const RESUME_STUB: &str = r#"#!/bin/sh
 case "$1" in
   --version) echo "bd version 1.0.3"; exit 0 ;;
   ready) echo '[]'; exit 0 ;;
-  stats) echo '{"schema_version":1,"summary":{"total_issues":0,"open_issues":0,"closed_issues":0,"ready_issues":0,"blocked_issues":0,"in_progress_issues":0}}'; exit 0 ;;
-  memories) echo '{"ck-old":"CHECKPOINT:2026-05-10T08:00 — earlier work","ck-new":"CHECKPOINT:2026-05-12T14:30 — newer work; in flight: refresh rotation","conv":"CONVENTION:errors — wrap","status-scan":"STATUS:scan:complete — 2026-05-12T07:54:13Z"}'; exit 0 ;;
+  stats) echo '{"schema_version":1,"summary":{"total_issues":1,"open_issues":1,"closed_issues":0,"ready_issues":0,"blocked_issues":0,"in_progress_issues":1}}'; exit 0 ;;
+  list) echo '[{"id":"hew-99z","title":"in-flight task","description":"first line of body","status":"in_progress","priority":1,"issue_type":"feature","assignee":"droidnoob"}]'; exit 0 ;;
+  memories) echo '{"ck-old":"CHECKPOINT:2026-05-10T08:00 — earlier work","ck-new":"CHECKPOINT:2026-05-12T14:30 — newer work; in flight: refresh rotation","conv":"CONVENTION:errors — wrap","dec":"DECISION:errors-as-types","got":"GOTCHA:pipe-deadlock","fb":"FEEDBACK:no-json-piping","status-scan":"STATUS:scan:complete — 2026-05-12T07:54:13Z"}'; exit 0 ;;
 esac
 exit 2
 "#;
@@ -131,6 +132,10 @@ fn prime_resume_emits_skill_agnostic_json() {
         .env("TERM", "dumb")
         .env("HEW_NO_UPDATE_CHECK", "1")
         .env("HEW_NON_INTERACTIVE", "1")
+        // Pin config to defaults so the test isn't sensitive to the
+        // dev machine's `~/.config/hew/config.toml`. A nonexistent path
+        // falls back to `Config::default()` per `config::load_from`.
+        .env("HEW_CONFIG", "/nonexistent/hew-config.toml")
         .env_remove("HEW_LOG")
         .env_remove("CI")
         .args(["prime", "resume", "--json"])
@@ -157,6 +162,30 @@ fn prime_resume_emits_skill_agnostic_json() {
     assert_eq!(parsed["latest_checkpoint"]["key"], "ck-new");
     assert_eq!(parsed["latest_checkpoint"]["timestamp"], "2026-05-12T14:30");
     assert!(parsed["latest_checkpoint"]["body"].as_str().unwrap().contains("refresh rotation"));
+
+    // In-progress task surfaced (claimed task body in the agent's first turn).
+    let claimed = parsed["in_progress"].as_array().expect("in_progress array");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0]["id"], "hew-99z");
+    assert_eq!(claimed[0]["title"], "in-flight task");
+
+    // First-class memory buckets — DECISION/GOTCHA/FEEDBACK no longer
+    // buried in `factual`.
+    assert_eq!(parsed["memories"]["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["memories"]["gotchas"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["memories"]["feedback"].as_array().unwrap().len(), 1);
+    let factual: Vec<&str> = parsed["memories"]["factual"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !factual.iter().any(|s| s.starts_with("DECISION:")
+            || s.starts_with("GOTCHA:")
+            || s.starts_with("FEEDBACK:")),
+        "DECISION/GOTCHA/FEEDBACK must not leak into factual; got: {factual:?}"
+    );
 }
 
 #[test]
@@ -169,6 +198,10 @@ fn prime_resume_pretty_flag_indents_output() {
         .env("TERM", "dumb")
         .env("HEW_NO_UPDATE_CHECK", "1")
         .env("HEW_NON_INTERACTIVE", "1")
+        // Pin config to defaults so the test isn't sensitive to the
+        // dev machine's `~/.config/hew/config.toml`. A nonexistent path
+        // falls back to `Config::default()` per `config::load_from`.
+        .env("HEW_CONFIG", "/nonexistent/hew-config.toml")
         .env_remove("HEW_LOG")
         .env_remove("CI")
         .args(["prime", "resume", "--pretty"])
@@ -194,6 +227,10 @@ fn prime_resume_defaults_to_plaintext() {
         .env("TERM", "dumb")
         .env("HEW_NO_UPDATE_CHECK", "1")
         .env("HEW_NON_INTERACTIVE", "1")
+        // Pin config to defaults so the test isn't sensitive to the
+        // dev machine's `~/.config/hew/config.toml`. A nonexistent path
+        // falls back to `Config::default()` per `config::load_from`.
+        .env("HEW_CONFIG", "/nonexistent/hew-config.toml")
         .env_remove("HEW_LOG")
         .env_remove("CI")
         .args(["prime", "resume"])
@@ -212,6 +249,20 @@ fn prime_resume_defaults_to_plaintext() {
     assert!(text.contains("Phases"), "missing Phases section:\n{text}");
     assert!(text.contains("Tasks"), "missing Tasks section:\n{text}");
     assert!(text.contains("Memories"), "missing Memories section:\n{text}");
+    assert!(
+        text.contains("Project config — read as standing instructions"),
+        "missing project-config section:\n{text}"
+    );
+    // Default branching strategy is `epic`; that line should appear.
+    assert!(text.contains("auto-create a feature branch"), "missing branching line:\n{text}");
+    // In-progress section renders with the claimed task's title + body.
+    assert!(text.contains("Claimed (in-flight)"), "missing in-progress section:\n{text}");
+    assert!(text.contains("hew-99z"), "missing claimed task id:\n{text}");
+    assert!(text.contains("first line of body"), "missing claimed task body:\n{text}");
+    // First-class buckets surface in the counts line.
+    assert!(text.contains("1 DECISION"), "missing DECISION count:\n{text}");
+    assert!(text.contains("1 GOTCHA"), "missing GOTCHA count:\n{text}");
+    assert!(text.contains("1 FEEDBACK"), "missing FEEDBACK count:\n{text}");
     assert!(text.contains("Latest CHECKPOINT"), "missing checkpoint section:\n{text}");
     // CHECKPOINT body content should be surfaced.
     assert!(text.contains("refresh rotation"), "checkpoint body content missing:\n{text}");
