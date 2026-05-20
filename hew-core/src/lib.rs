@@ -23,6 +23,7 @@ pub mod slash;
 pub mod stacks;
 pub mod status;
 pub mod tasks;
+#[cfg(unix)]
 pub mod testing;
 pub mod tty;
 
