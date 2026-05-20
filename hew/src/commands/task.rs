@@ -44,6 +44,11 @@ pub struct ShowArgs {
     /// Emit `TaskSummary` JSON instead of text.
     #[arg(long)]
     pub json: bool,
+    /// Suppress the CHILDREN section even if the task has children.
+    /// Default behavior: show children whenever they exist. Mostly an
+    /// escape hatch for narrow output.
+    #[arg(long)]
+    pub no_children: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -163,12 +168,42 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
 fn show(ctx: &Ctx, bd: &dyn BdClient, args: ShowArgs) -> miette::Result<()> {
     let t = tasks::show(bd, &args.id)?;
+
+    // Fetch children up-front. If the lookup fails or returns empty,
+    // degrade silently — show should never error because the child
+    // lookup hiccupped on a leaf task.
+    let kids: Vec<TaskSummary> = if args.no_children {
+        Vec::new()
+    } else {
+        tasks::children(bd, &args.id).unwrap_or_default()
+    };
+
     if wants_json(ctx, args.json) {
-        emit_json(&t)?;
+        #[derive(serde::Serialize)]
+        struct ShowOutput<'a> {
+            #[serde(flatten)]
+            task: &'a TaskSummary,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            children: &'a Vec<TaskSummary>,
+        }
+        emit_json(&ShowOutput { task: &t, children: &kids })?;
     } else {
         print_task_long(&t);
+        if !kids.is_empty() {
+            println!();
+            print_children_section(&kids);
+        }
     }
     Ok(())
+}
+
+fn print_children_section(kids: &[TaskSummary]) {
+    let total = kids.len();
+    let done = kids.iter().filter(|t| infer_status(t) == "closed").count();
+    println!("  CHILDREN ({done}/{total} complete)");
+    for t in kids {
+        print_task_row(t);
+    }
 }
 
 fn list(ctx: &Ctx, bd: &dyn BdClient, args: ListArgs) -> miette::Result<()> {

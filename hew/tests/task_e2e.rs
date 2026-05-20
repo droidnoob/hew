@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use predicates::str::contains;
 
 const STUB: &str = r#"#!/bin/sh
@@ -89,6 +90,68 @@ fn show_text_includes_title_and_status() {
         .stdout(contains("status:"))
         .stdout(contains("open"))
         .stdout(contains("body for hew-1"));
+}
+
+#[test]
+fn show_appends_children_section_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic L3", "open", ""));
+    let kids = format!(
+        "[{},{}]",
+        issue_json("hew-epic.1", "L3.1 first slice", "closed", "2026-05-12T00:00:00Z"),
+        issue_json("hew-epic.2", "L3.2 second slice", "open", ""),
+    );
+
+    hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic"])
+        .assert()
+        .success()
+        .stdout(contains("CHILDREN (1/2 complete)"))
+        .stdout(contains("hew-epic.1"))
+        .stdout(contains("L3.1 first slice"))
+        .stdout(contains("hew-epic.2"))
+        .stdout(contains("L3.2 second slice"));
+}
+
+#[test]
+fn show_no_children_flag_suppresses_section_even_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic", "open", ""));
+    let kids = format!("[{}]", issue_json("hew-epic.1", "child", "open", ""));
+
+    hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic", "--no-children"])
+        .assert()
+        .success()
+        .stdout(contains("hew-epic"))
+        .stdout(predicates::str::contains("CHILDREN").not());
+}
+
+#[test]
+fn show_json_includes_children_array_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic", "open", ""));
+    let kids = format!("[{}]", issue_json("hew-epic.1", "child", "open", ""));
+
+    let out = hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["id"], "hew-epic");
+    let children = parsed["children"].as_array().expect("children array present");
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], "hew-epic.1");
 }
 
 #[test]
