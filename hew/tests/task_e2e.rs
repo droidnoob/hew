@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use predicates::str::contains;
 
 const STUB: &str = r#"#!/bin/sh
@@ -34,7 +35,7 @@ case "$verb" in
     q)
         printf '%s\n' "$BD_STUB_Q_BODY"
         ;;
-    update|close|reopen|note|forget|dep|recall)
+    update|close|reopen|note|forget|dep|recall|acceptance)
         # Side-effect verbs — empty stdout, log captures argv.
         exit 0
         ;;
@@ -89,6 +90,68 @@ fn show_text_includes_title_and_status() {
         .stdout(contains("status:"))
         .stdout(contains("open"))
         .stdout(contains("body for hew-1"));
+}
+
+#[test]
+fn show_appends_children_section_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic L3", "open", ""));
+    let kids = format!(
+        "[{},{}]",
+        issue_json("hew-epic.1", "L3.1 first slice", "closed", "2026-05-12T00:00:00Z"),
+        issue_json("hew-epic.2", "L3.2 second slice", "open", ""),
+    );
+
+    hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic"])
+        .assert()
+        .success()
+        .stdout(contains("CHILDREN (1/2 complete)"))
+        .stdout(contains("hew-epic.1"))
+        .stdout(contains("L3.1 first slice"))
+        .stdout(contains("hew-epic.2"))
+        .stdout(contains("L3.2 second slice"));
+}
+
+#[test]
+fn show_no_children_flag_suppresses_section_even_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic", "open", ""));
+    let kids = format!("[{}]", issue_json("hew-epic.1", "child", "open", ""));
+
+    hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic", "--no-children"])
+        .assert()
+        .success()
+        .stdout(contains("hew-epic"))
+        .stdout(predicates::str::contains("CHILDREN").not());
+}
+
+#[test]
+fn show_json_includes_children_array_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let body = format!("[{}]", issue_json("hew-epic", "Epic", "open", ""));
+    let kids = format!("[{}]", issue_json("hew-epic.1", "child", "open", ""));
+
+    let out = hew_in(tmp.path())
+        .env("BD_STUB_SHOW_BODY", &body)
+        .env("BD_STUB_CHILDREN_BODY", &kids)
+        .args(["task", "show", "hew-epic", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(parsed["id"], "hew-epic");
+    let children = parsed["children"].as_array().expect("children array present");
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], "hew-epic.1");
 }
 
 #[test]
@@ -353,6 +416,78 @@ fn search_includes_status_all_and_json() {
     assert!(recorded.contains("--status all"), "{recorded}");
 }
 
+// ─── update ─────────────────────────────────────────────────────────────
+
+#[test]
+fn update_passes_title_and_description_to_bd() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args([
+            "task",
+            "update",
+            "hew-1",
+            "--title",
+            "new title",
+            "--description",
+            "rewritten body",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("updated hew-1"))
+        .stdout(contains("2 fields"));
+
+    let recorded = fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("update hew-1"), "{recorded}");
+    assert!(recorded.contains("--title new title"), "{recorded}");
+    assert!(recorded.contains("--description rewritten body"), "{recorded}");
+}
+
+#[test]
+fn update_with_description_file_routes_to_body_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+    let spec = tmp.path().join("spec.md");
+    fs::write(&spec, "new spec body").unwrap();
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args(["task", "update", "hew-1", "--description-file", spec.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let recorded = fs::read_to_string(&log).unwrap();
+    assert!(recorded.contains("--body-file"), "{recorded}");
+    assert!(recorded.contains(spec.to_str().unwrap()), "{recorded}");
+}
+
+#[test]
+fn update_errors_when_no_fields_provided() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+
+    hew_in(tmp.path())
+        .args(["task", "update", "hew-1"])
+        .assert()
+        .failure()
+        .stderr(contains("no fields to update"));
+}
+
+#[test]
+fn update_rejects_description_and_description_file_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+
+    hew_in(tmp.path())
+        .args(["task", "update", "hew-1", "--description", "x", "--description-file", "/tmp/y"])
+        .assert()
+        .failure();
+}
+
 // ─── help ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -372,5 +507,6 @@ fn task_help_lists_all_verbs() {
         .stdout(contains("reopen"))
         .stdout(contains("children"))
         .stdout(contains("note"))
-        .stdout(contains("search"));
+        .stdout(contains("search"))
+        .stdout(contains("update"));
 }

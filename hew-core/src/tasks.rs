@@ -117,6 +117,7 @@ pub const MEMORY_PREFIXES: &[&str] = &[
     "decision",
     "status",
     "gotcha",
+    "feedback",
     "project",
     "milestone",
     "roadmap",
@@ -150,6 +151,7 @@ fn canonical_upper(p: &str) -> &'static str {
         "decision" => "DECISION",
         "status" => "STATUS",
         "gotcha" => "GOTCHA",
+        "feedback" => "FEEDBACK",
         "project" => "PROJECT",
         "milestone" => "MILESTONE",
         "roadmap" => "ROADMAP",
@@ -315,10 +317,87 @@ pub fn claim(bd: &dyn BdClient, id: &str) -> Result<()> {
 
 /// `bd close <id> -r <reason>`. Use [`reopen`] to undo.
 pub fn close_with_reason(bd: &dyn BdClient, id: &str, reason: &str) -> Result<()> {
+    close_with_reason_force(bd, id, reason, false)
+}
+
+/// `bd close <id> -r <reason> [--force]`. When `force` is `true`, the
+/// dep-blocker check inside `bd` is bypassed. Useful when a planner
+/// added an over-conservative dep that didn't actually gate the work
+/// — see GH issue #17.
+pub fn close_with_reason_force(
+    bd: &dyn BdClient,
+    id: &str,
+    reason: &str,
+    force: bool,
+) -> Result<()> {
     let id_os = OsString::from(id);
     let reason_os = OsString::from(reason);
-    bd.run_raw(&[OsStr::new("close"), id_os.as_os_str(), OsStr::new("-r"), reason_os.as_os_str()])?;
+    let mut argv: Vec<&OsStr> =
+        vec![OsStr::new("close"), id_os.as_os_str(), OsStr::new("-r"), reason_os.as_os_str()];
+    if force {
+        argv.push(OsStr::new("--force"));
+    }
+    bd.run_raw(&argv)?;
     Ok(())
+}
+
+/// Mutable fields supported by `hew task update` / [`update_task`].
+/// `None` means "leave unchanged"; `Some` is passed through to the
+/// corresponding `bd update` flag.
+#[derive(Debug, Default, Clone)]
+pub struct UpdateTaskArgs<'a> {
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    /// Path passed to `bd update --body-file`. Mutually exclusive with
+    /// [`description`] at the CLI layer.
+    pub description_file: Option<&'a std::path::Path>,
+    pub acceptance: Option<&'a str>,
+}
+
+impl UpdateTaskArgs<'_> {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.description.is_none()
+            && self.description_file.is_none()
+            && self.acceptance.is_none()
+    }
+}
+
+/// `bd update <id> [--title …] [--description … | --body-file …] [--acceptance …]`.
+/// Edits one or more existing task fields. Returns the requested-field
+/// count so callers can short-circuit on no-op invocations.
+pub fn update_task(bd: &dyn BdClient, id: &str, args: &UpdateTaskArgs<'_>) -> Result<u32> {
+    if args.is_empty() {
+        return Ok(0);
+    }
+    let id_os = OsString::from(id);
+    let mut argv: Vec<OsString> = vec![OsString::from("update"), id_os];
+
+    let mut changed = 0u32;
+    if let Some(t) = args.title {
+        argv.push(OsString::from("--title"));
+        argv.push(OsString::from(t));
+        changed += 1;
+    }
+    if let Some(d) = args.description {
+        argv.push(OsString::from("--description"));
+        argv.push(OsString::from(d));
+        changed += 1;
+    }
+    if let Some(p) = args.description_file {
+        argv.push(OsString::from("--body-file"));
+        argv.push(OsString::from(p));
+        changed += 1;
+    }
+    if let Some(a) = args.acceptance {
+        argv.push(OsString::from("--acceptance"));
+        argv.push(OsString::from(a));
+        changed += 1;
+    }
+
+    let ref_args: Vec<&OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
+    bd.run_raw(&ref_args)?;
+    Ok(changed)
 }
 
 /// `bd reopen <id>` (optionally with `-r <reason>`). Clears `closed_at`
@@ -766,6 +845,65 @@ mod tests {
         close_with_reason(&bd, "t-1", "shipped via abc123").unwrap();
         let argv = bd.last_call();
         assert_eq!(argv, vec!["close", "t-1", "-r", "shipped via abc123"]);
+    }
+
+    #[test]
+    fn close_with_force_appends_force_flag() {
+        let bd = MockBd::new().with("close", "");
+        close_with_reason_force(&bd, "t-1", "dep was bogus", true).unwrap();
+        assert_eq!(bd.last_call(), vec!["close", "t-1", "-r", "dep was bogus", "--force"]);
+    }
+
+    #[test]
+    fn close_without_force_omits_force_flag() {
+        let bd = MockBd::new().with("close", "");
+        close_with_reason_force(&bd, "t-1", "done", false).unwrap();
+        assert_eq!(bd.last_call(), vec!["close", "t-1", "-r", "done"]);
+    }
+
+    #[test]
+    fn update_task_skips_when_no_fields_set() {
+        let bd = MockBd::new();
+        let n = update_task(&bd, "t-1", &UpdateTaskArgs::default()).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(bd.call_count(), 0, "should not shell out for no-op update");
+    }
+
+    #[test]
+    fn update_task_passes_each_field_flag() {
+        let bd = MockBd::new().with("update", "");
+        let n = update_task(
+            &bd,
+            "t-1",
+            &UpdateTaskArgs {
+                title: Some("new title"),
+                description: Some("new body"),
+                description_file: None,
+                acceptance: Some("new accept"),
+            },
+        )
+        .unwrap();
+        assert_eq!(n, 3);
+        let argv = bd.last_call();
+        assert!(argv.starts_with(&["update".to_string(), "t-1".to_string()]));
+        let joined = argv.join(" ");
+        assert!(joined.contains("--title new title"), "{joined}");
+        assert!(joined.contains("--description new body"), "{joined}");
+        assert!(joined.contains("--acceptance new accept"), "{joined}");
+    }
+
+    #[test]
+    fn update_task_routes_description_file_to_body_file_flag() {
+        let bd = MockBd::new().with("update", "");
+        let path = std::path::PathBuf::from("/tmp/spec.md");
+        update_task(
+            &bd,
+            "t-1",
+            &UpdateTaskArgs { description_file: Some(&path), ..Default::default() },
+        )
+        .unwrap();
+        let joined = bd.last_call().join(" ");
+        assert!(joined.contains("--body-file /tmp/spec.md"), "{joined}");
     }
 
     #[test]
