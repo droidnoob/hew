@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::Args as ClapArgs;
 use hew_core::bd::{BdClient, RealBd};
+use hew_core::memories::links::{LinkKind, LinkRow, read_links_with_body_scan};
 use hew_core::tasks;
 use hew_core::{Ctx, OutputMode};
+use serde::Serialize;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -45,6 +48,19 @@ pub struct Args {
     /// With `--export`: write human-readable text instead of JSON.
     #[arg(long, requires = "export")]
     pub plaintext: bool,
+
+    /// Show the LINK: edges (outbound / inbound / dangling) for a
+    /// single memory key. Reads both explicit LINK: rows and
+    /// inline `[[memory-key]]` / `#bd-task` references in memory
+    /// bodies. Text-default per FEEDBACK:no-json-piping; `--json`
+    /// emits a stable `{key, outbound, inbound, dangling_outbound}`
+    /// shape.
+    #[arg(
+        long = "links",
+        value_name = "KEY",
+        conflicts_with_all = ["recall", "forget", "research", "prefix", "grep", "export"]
+    )]
+    pub links: Option<String>,
 }
 
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
@@ -55,6 +71,9 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     }
     if let Some(key) = args.forget.as_deref() {
         return run_forget(ctx, &client, key);
+    }
+    if let Some(key) = args.links.as_deref() {
+        return run_links(ctx, &client, key);
     }
 
     let memories = client.memories()?;
@@ -121,6 +140,98 @@ fn run_recall(ctx: &Ctx, bd: &dyn BdClient, key: &str) -> miette::Result<()> {
             Err(miette::miette!("no memory with key `{key}`"))
         }
     }
+}
+
+/// JSON shape for `hew memories --links --json` — pinned so
+/// downstream consumers (a future wiki/canvas exporter, the link
+/// auditor in ML.8) can rely on it.
+#[derive(Debug, Serialize)]
+struct LinksJson<'a> {
+    key: &'a str,
+    outbound: Vec<OutboundJson<'a>>,
+    inbound: Vec<InboundJson<'a>>,
+    dangling_outbound: Vec<OutboundJson<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct OutboundJson<'a> {
+    kind: &'a str,
+    to: &'a str,
+    /// Only meaningful for memory-kind rows; task-kind always `false`
+    /// (we can't validate task ids from this pure-data layer).
+    dangling: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct InboundJson<'a> {
+    kind: &'a str,
+    from: &'a str,
+}
+
+fn run_links(ctx: &Ctx, bd: &dyn BdClient, key: &str) -> miette::Result<()> {
+    let memories = bd.memories()?;
+    let pairs: Vec<(&str, &str)> = memories.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let idx = read_links_with_body_scan(&pairs, true);
+    let outbound = idx.outbound(key);
+    let inbound = idx.inbound(key);
+
+    // Compute the dangling-outbound subset against the actual memory
+    // set. Task-kind rows are never marked dangling (this module
+    // can't validate bd ids without a bd query — that's deliberately
+    // outside the read-only path).
+    let present: BTreeSet<&str> = pairs.iter().map(|(k, _)| *k).collect();
+    let is_dangling = |row: &LinkRow| -> bool {
+        matches!(row.kind, LinkKind::Memory) && !present.contains(row.to.as_str())
+    };
+    let dangling_rows: Vec<&LinkRow> =
+        outbound.iter().copied().filter(|r| is_dangling(r)).collect();
+
+    if matches!(ctx.output, OutputMode::Json) {
+        let payload = LinksJson {
+            key,
+            outbound: outbound
+                .iter()
+                .map(|r| OutboundJson {
+                    kind: r.kind.as_str(),
+                    to: r.to.as_str(),
+                    dangling: is_dangling(r),
+                })
+                .collect(),
+            inbound: inbound
+                .iter()
+                .map(|r| InboundJson { kind: r.kind.as_str(), from: r.from.as_str() })
+                .collect(),
+            dangling_outbound: dangling_rows
+                .iter()
+                .map(|r| OutboundJson { kind: r.kind.as_str(), to: r.to.as_str(), dangling: true })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return Ok(());
+    }
+
+    // Text-default rendering — no color codes (cli-tty-detect honored
+    // by upstream output layer; we emit plain ASCII so piping stays
+    // clean).
+    println!("Outbound (from {key}):");
+    if outbound.is_empty() {
+        println!("  (none)");
+    } else {
+        for r in &outbound {
+            let marker = if is_dangling(r) { " [DANGLING]" } else { "" };
+            println!("  → {:<7} {}{marker}", format!("{}:", r.kind.as_str()), r.to);
+        }
+    }
+    println!();
+    println!("Inbound (to {key}):");
+    if inbound.is_empty() {
+        println!("  (none)");
+    } else {
+        for r in &inbound {
+            println!("  ← {:<7} {}", format!("{}:", r.kind.as_str()), r.from);
+        }
+    }
+    Ok(())
 }
 
 fn run_forget(ctx: &Ctx, bd: &dyn BdClient, key: &str) -> miette::Result<()> {
