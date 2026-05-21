@@ -1,4 +1,4 @@
-<!-- hew:version=0.5.2 -->
+<!-- hew:version=0.6.0 -->
 ---
 name: hew-security
 category: optional

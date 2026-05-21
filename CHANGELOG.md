@@ -6,6 +6,104 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-22
+
+Ships the **Memory Links epic** end-to-end — sidecar `LINK:` edges
+between memories, with a writer, reader, body-scanner, cascade-aware
+forget, compact exemption, and a remember-time suggestion prompt.
+Plus a handful of independent fixes (`bd init` stealth/skip-agents,
+`hew forget` as a top-level subcommand, gate-syntax + acceptance-flag
+corrections in the decompose skill).
+
+### Added
+
+- **`LINK:` row grammar + parser + index** (hew-f75, hew-bfc).
+  `hew_core::memories::links` exposes a frozen
+  `LINK:<from>->relates_to:(memory|task):<to>` grammar with
+  `parse_link_row` / `format_link_row` / `build_link_row_body`, a
+  bidirectional `LinkIndex` (outbound, inbound, dangling), and a
+  `read_links` builder over a `(key, body)` memory list. Dedupes
+  identical rows surfaced from multiple bodies.
+- **`hew remember --related <KEY>` / `--related-task <ID>`** (hew-utn).
+  Repeatable flags that emit `LINK:` sidecars after the primary
+  write. Require `--key` so the link's `<from>` side is
+  deterministic. Targets are charset-validated front-door — a bad
+  value fails the whole command before any bd write.
+- **`hew memories --links <KEY>` reader** (hew-bhc). Text-default
+  view of a memory's outbound / inbound / dangling edges, with
+  `--json` emitting a stable `{key, outbound, inbound,
+  dangling_outbound}` shape for downstream consumers. Picks up
+  explicit `LINK:` rows AND inline `[[memory-key]]` / `#bd-task`
+  body references in one merged index.
+- **Body-reference scanner** (hew-tcy). `scan_body_refs(from, body)`
+  extracts `[[memory-key]]` and `#prefix-id` references into the
+  same `LinkIndex` as explicit LINK rows. `LinkSource { Explicit,
+  BodyScan }` lets readers distinguish authored from inferred
+  edges; explicit wins on dedupe. Backslash-escape suppresses
+  wikilinks; task refs require a word boundary; trailing sentence
+  punctuation is stripped so `#bd-99.` captures `bd-99` but
+  subtask dots like `hew-a3f8.1` survive.
+- **`hew forget <KEY>` top-level subcommand** (hew-7zi) — ergonomic
+  alias for `hew memories --forget <KEY>`. Then extended (hew-jem)
+  to **cascade-purge outbound LINK: rows** automatically: when a
+  memory dies, sidecars from it die too; inbound rows are
+  deliberately left as dangling so authors notice and rewire.
+  Cascade target list is locked in *before* the primary forget
+  fires, so a step-2 failure doesn't leave orphans.
+  `hew memories --forget` remains the no-cascade escape hatch.
+- **`hew remember --type=link`** (hew-uxf). Joins the canonical
+  type allowlist (14 → 15 prefixes). Bare body gets the `LINK:`
+  prefix prepended; pre-formatted full rows still go through
+  `--raw`.
+- **Interactive "these look related — link any?" prompt at remember
+  time** (hew-3wt). Lexical ranker in `hew_core::memories::suggest`
+  (token overlap + same-prefix bonus, stop-words + short-tokens
+  filtered, top-N with deterministic tie-break) drives an
+  `inquire::MultiSelect`. Selections feed back through the
+  existing `--related` write path. New flags `--no-suggest` and
+  `--suggest-top=<N>` (default 3, `0` = disabled). Silent under
+  `--non-interactive` / CI / non-TTY per
+  `CONVENTION:cli-non-interactive`.
+- **`LINK:` exempted from compaction** (hew-54w). `LINK` joins
+  `STATUS:scan/convention/plan/decompose` in
+  `HARDCODED_EXEMPT_PREFIXES` so compact never destroys the edge
+  graph. Matcher's `starts_with` arm makes bare `LINK` cover every
+  `LINK:*` row.
+- **`hew init --stealth` flag**. Explicit non-interactive opt-in
+  to the existing stealth path (skips the "share the task graph
+  in git?" prompt). Mutually exclusive with `--git-track`.
+
+### Changed
+
+- **`hew init` always passes `--skip-agents` to `bd init`**, and
+  also `--stealth` when `git_track=false`. Stops bd from writing
+  a competing `CLAUDE.md` ("use bd for ALL task tracking" — direct
+  conflict with `FEEDBACK:prefer-hew-over-bd`), an `AGENTS.md`, or
+  a competing SessionStart hook in `.claude/settings.json`, and
+  stops bd from auto-committing beads files when the project
+  isn't tracking `.beads/`. Reorders init: git is now initialised
+  and `git_track` resolved before `bd init` runs.
+- **`hew memories --forget <KEY>`** is now the documented
+  no-cascade path; the new top-level `hew forget` is the curated
+  ergonomic surface that cascades.
+
+### Fixed
+
+- **`hew-decompose` skill body**: Step 5 gate table used
+  `bd create --type=gate --await-type=…` syntax that doesn't exist
+  in bd. Replaced with the real `bd gate create --type=human|timer
+  |gh:pr|gh:run --blocks=<id> --await-id=<x>` form; the `--blocks`
+  flag does the dep wiring inline, dropping the standalone
+  `hew dep add`. Step 7 acceptance comment switched from the stale
+  `bd update --acceptance` to the existing `hew task update
+  --acceptance` wrapper.
+
+### Tests
+
+hew-core test count: 251 (v0.5.2) → 303. New e2e suites for
+`hew forget` (7 tests) and `hew remember --related/--links/
+--no-suggest` (17 tests across remember + memories).
+
 ## [0.5.2] — 2026-05-20
 
 Patch release fixing the bare `hew update` path. PR #28 cut 0.5.1 with
