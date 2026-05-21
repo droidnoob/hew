@@ -113,6 +113,13 @@ pub fn format_link_row(row: &LinkRow) -> String {
     format!("LINK:{}->relates_to:{}:{}", row.from, row.kind.as_str(), row.to)
 }
 
+/// Thin wrapper for callers (the binary's `hew remember --related`
+/// path) that have a `(from, kind, to)` triple but not a built
+/// [`LinkRow`]. Identical to `format_link_row(&LinkRow { from, kind, to })`.
+pub fn build_link_row_body(from: &str, kind: LinkKind, to: &str) -> String {
+    format!("LINK:{}->relates_to:{}:{}", from, kind.as_str(), to)
+}
+
 /// Bidirectional index over a memory set's LINK: rows.
 ///
 /// Built by [`read_links`]. Stores each unique `LinkRow` once in
@@ -480,6 +487,12 @@ mod tests {
         let json = serde_json::to_string(&row).unwrap();
         let back: LinkRow = serde_json::from_str(&json).unwrap();
         assert_eq!(back, row);
+    }
+
+    #[test]
+    fn build_link_row_body_matches_format_link_row() {
+        let row = link("decision-auth", LinkKind::Task, "hew-abc");
+        assert_eq!(build_link_row_body(&row.from, row.kind, &row.to), format_link_row(&row));
     }
 
     #[test]

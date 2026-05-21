@@ -9,6 +9,7 @@ use clap::Args as ClapArgs;
 use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::error::HewError;
+use hew_core::memories::links::{LinkKind, build_link_row_body};
 use hew_core::tasks::{self, MEMORY_PREFIXES, validate_memory_type};
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,25 @@ pub struct Args {
     /// entry (the entry index is included in the error).
     #[arg(long = "from-file", value_name = "PATH")]
     pub from_file: Option<PathBuf>,
+
+    /// Emit a `LINK:<key>->relates_to:memory:<related>` sidecar memory
+    /// after the primary write. Repeatable. Requires `--key` so the
+    /// `<from>` side of the link is deterministic. The related memory
+    /// key must match the LINK row charset (`[a-z0-9._-]+`).
+    #[arg(long = "related", value_name = "KEY", requires = "key", conflicts_with = "from_file")]
+    pub related: Vec<String>,
+
+    /// Emit a `LINK:<key>->relates_to:task:<id>` sidecar memory after
+    /// the primary write. Repeatable. Requires `--key` so the `<from>`
+    /// side of the link is deterministic. The task id must match the
+    /// LINK row charset (`[a-z0-9._-]+`, e.g. `hew-abc` or `hew-abc.1`).
+    #[arg(
+        long = "related-task",
+        value_name = "ID",
+        requires = "key",
+        conflicts_with = "from_file"
+    )]
+    pub related_task: Vec<String>,
 }
 
 /// One entry in a bulk-insert JSON array.
@@ -91,12 +111,82 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         format!("{upper}:{}", body)
     };
 
+    // Validate LINK targets BEFORE the primary write so a malformed
+    // --related / --related-task value fails the whole command
+    // without leaving a stranded primary memory in bd.
+    for v in &args.related {
+        validate_link_target("--related", v)?;
+    }
+    for v in &args.related_task {
+        validate_link_target("--related-task", v)?;
+    }
+
     tasks::remember(&bd, &payload, args.key.as_deref())?;
     if !ctx.quiet {
         match args.key.as_deref() {
             Some(k) => println!("remembered ({k})"),
             None => println!("remembered"),
         }
+    }
+
+    // Sidecar LINK: rows. Primary write fired first per
+    // DECISION:compact-safety (additions-first); a crash between the
+    // primary and the sidecars leaves more memory, not less.
+    if !args.related.is_empty() || !args.related_task.is_empty() {
+        let from = args.key.as_deref().expect(
+            "clap `requires = \"key\"` guarantees --key is set when --related[-task] is used",
+        );
+        write_link_sidecars(&bd, ctx, from, &args.related, &args.related_task)?;
+    }
+    Ok(())
+}
+
+fn write_link_sidecars(
+    bd: &dyn BdClient,
+    ctx: &Ctx,
+    from: &str,
+    related: &[String],
+    related_task: &[String],
+) -> miette::Result<()> {
+    let mut written = 0usize;
+    for to in related {
+        let body = build_link_row_body(from, LinkKind::Memory, to);
+        // No explicit --key: bd auto-derives a slug from the body,
+        // which collapses identical LINK: rows to a single key on
+        // re-write (idempotent at the bd layer).
+        tasks::remember(bd, &body, None)?;
+        written += 1;
+    }
+    for to in related_task {
+        let body = build_link_row_body(from, LinkKind::Task, to);
+        tasks::remember(bd, &body, None)?;
+        written += 1;
+    }
+    if !ctx.quiet && written > 0 {
+        let m = if written == 1 { "memory" } else { "memories" };
+        println!("emitted {written} LINK: sidecar {m}");
+    }
+    Ok(())
+}
+
+/// Reject `--related` / `--related-task` values that can't appear in
+/// the right-hand side of a LINK row. clap rejects empty arg values
+/// when `value_parser` requires them, but we double-check the
+/// character set here so a malformed key fails *before* the primary
+/// write succeeds — turning a "missing edges" failure into a clean
+/// front-door error.
+fn validate_link_target(flag: &str, value: &str) -> miette::Result<()> {
+    if value.is_empty() {
+        return Err(miette::miette!("{flag} requires a non-empty value"));
+    }
+    let ok = value
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'));
+    if !ok {
+        return Err(miette::miette!(
+            "{flag}={value:?} is not a valid LINK target — \
+             must match `[a-z0-9._-]+` (lowercase only, no spaces)"
+        ));
     }
     Ok(())
 }
