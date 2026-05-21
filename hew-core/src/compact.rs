@@ -19,8 +19,9 @@
 //!   `[compacted-from:` suffix is skipped unless `allow_recompact = true`
 //!   (`DECISION:compact-drift-guard`).
 //! - **exempt allowlist**: hardcoded `STATUS:scan/convention/plan/decompose`
-//!   plus user-configured `compact.exempt` keys never touched
-//!   (`DECISION:compact-safety`).
+//!   and every `LINK:*` sidecar row, plus user-configured `compact.exempt`
+//!   keys never touched (`DECISION:compact-safety`,
+//!   `DECISION:memory-link-compact-policy`).
 //!
 //! On success [`apply`] also writes a `STATUS:compact:<prefix>:<iso-ts>`
 //! marker so future runs can show "last compaction" context.
@@ -42,10 +43,19 @@ const PROVENANCE_TAG: &str = "[compacted-from:";
 const COMPACT_KEY_INFIX: &str = "compact";
 
 /// Hardcoded exempt prefixes (in addition to `cfg.compact.exempt`).
-/// These mark phase completion and the loss of any one would corrupt
-/// the `hew prime` routing state.
+///
+/// `STATUS:*` entries mark phase completion and the loss of any one
+/// would corrupt the `hew prime` routing state.
+///
+/// `LINK` matches every `LINK:<from>->relates_to:<kind>:<to>` sidecar
+/// row produced by the Memory Links epic (hew-dko). Per
+/// `DECISION:memory-link-compact-policy`, LINK rows are the cross-
+/// memory edge graph — compacting them would silently destroy the
+/// adjacency before any reader/parser had a chance to consume it. The
+/// matcher below interprets bare `"LINK"` as `"LINK:"` via the
+/// `starts_with` arm, so every well-formed LINK row is covered.
 const HARDCODED_EXEMPT_PREFIXES: &[&str] =
-    &["STATUS:scan", "STATUS:convention", "STATUS:plan", "STATUS:decompose"];
+    &["STATUS:scan", "STATUS:convention", "STATUS:plan", "STATUS:decompose", "LINK"];
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
@@ -607,6 +617,60 @@ mod tests {
         // STATUS:other-thing isn't in the hardcoded list — it should
         // have been forgotten.
         assert_eq!(report.forgotten, vec!["STATUS:other-thing".to_string()]);
+    }
+
+    #[test]
+    fn apply_skips_link_rows() {
+        // Per DECISION:memory-link-compact-policy: LINK: rows are the
+        // memory-edge graph and must survive every compact pass. A
+        // sibling non-exempt key gets forgotten as control.
+        let bd = MockBd::with_memories(&[
+            ("LINK:foo->relates_to:memory:bar", "edge-1"),
+            ("LINK:baz->relates_to:task:hew-abc", "edge-2"),
+            ("LINK:decision-auth->relates_to:task:hew-a3f8.1", "edge-3"),
+            ("regular-memory", "should be forgotten"),
+        ]);
+        let cfg = Config::default();
+        let plan = CompactPlan {
+            prefix: "MIXED".into(),
+            target_clusters: 1,
+            granularity: Granularity::Broad,
+            allow_recompact: false,
+            clusters: vec![Cluster {
+                topic: "anything".into(),
+                source_keys: vec![
+                    "LINK:foo->relates_to:memory:bar".into(),
+                    "LINK:baz->relates_to:task:hew-abc".into(),
+                    "LINK:decision-auth->relates_to:task:hew-a3f8.1".into(),
+                    "regular-memory".into(),
+                ],
+                replacement_bodies: vec!["MIXED:t — merged".into()],
+            }],
+        };
+        let report = apply(&bd, &plan, &cfg, "T").unwrap();
+        assert_eq!(report.exempt_skipped.len(), 3, "all three LINK rows must be exempted");
+        assert!(
+            report.exempt_skipped.iter().all(|k| k.starts_with("LINK:")),
+            "exempt set must be exactly the LINK rows, got: {:?}",
+            report.exempt_skipped
+        );
+        assert_eq!(
+            report.forgotten,
+            vec!["regular-memory".to_string()],
+            "non-exempt key must still be compacted"
+        );
+    }
+
+    #[test]
+    fn is_exempt_matches_link_prefix_but_not_unrelated_keys() {
+        let user: BTreeSet<&str> = BTreeSet::new();
+        assert!(is_exempt("LINK:foo->relates_to:memory:bar", &user));
+        assert!(is_exempt("LINK:x", &user)); // any LINK:* row
+        // Negative controls: nothing that merely *contains* "LINK" or
+        // looks adjacent should be exempted.
+        assert!(!is_exempt("LINKED:foo", &user));
+        assert!(!is_exempt("link-summary", &user));
+        assert!(!is_exempt("CONVENTION:link-format", &user));
     }
 
     #[test]
