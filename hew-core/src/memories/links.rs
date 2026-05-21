@@ -120,6 +120,32 @@ pub fn build_link_row_body(from: &str, kind: LinkKind, to: &str) -> String {
     format!("LINK:{}->relates_to:{}:{}", from, kind.as_str(), to)
 }
 
+/// Return the **memory keys** (the bd identifier used by `bd forget`)
+/// of every sidecar whose body is a LINK row with `row.from == from`.
+///
+/// Used by `hew forget` to cascade-delete outbound edges when their
+/// source memory dies. Inbound rows (`row.to == from`) are
+/// intentionally *not* returned — per the user policy on this epic
+/// they survive as dangling references so authors can notice and
+/// rewire (visible via `hew memories --links <missing-key>`).
+///
+/// Bodies that don't parse as LINK rows are skipped silently —
+/// memory stores routinely mix freeform `CONVENTION:` / `GOTCHA:`
+/// text with LINK sidecars.
+pub fn outbound_link_keys<K, B>(from: &str, memories: &[(K, B)]) -> Vec<String>
+where
+    K: AsRef<str>,
+    B: AsRef<str>,
+{
+    memories
+        .iter()
+        .filter_map(|(k, body)| {
+            let row = parse_link_row(body.as_ref())?;
+            if row.from == from { Some(k.as_ref().to_string()) } else { None }
+        })
+        .collect()
+}
+
 /// Where an indexed link came from.
 ///
 /// `Explicit` = a memory body that *is* a LINK: row (written by
@@ -720,6 +746,46 @@ mod tests {
         let json = serde_json::to_string(&row).unwrap();
         let back: LinkRow = serde_json::from_str(&json).unwrap();
         assert_eq!(back, row);
+    }
+
+    // ──────── outbound_link_keys (ML.6 cascade) ────────
+
+    #[test]
+    fn outbound_link_keys_returns_matching_link_memory_keys() {
+        let mems: Vec<(&str, String)> = vec![
+            ("link-conv-to-decision", link_body("convention-foo", LinkKind::Memory, "decision-a")),
+            ("link-conv-to-task", link_body("convention-foo", LinkKind::Task, "hew-abc")),
+            ("link-other-source", link_body("decision-bar", LinkKind::Memory, "convention-foo")),
+            ("convention-foo", "CONVENTION:body without a link".to_string()),
+            ("decision-a", "DECISION:freeform body".to_string()),
+        ];
+        let keys = outbound_link_keys("convention-foo", &mems);
+        assert_eq!(keys.len(), 2, "got: {keys:?}");
+        assert!(keys.contains(&"link-conv-to-decision".to_string()));
+        assert!(keys.contains(&"link-conv-to-task".to_string()));
+        // The inbound link (from decision-bar) must NOT be returned.
+        assert!(!keys.contains(&"link-other-source".to_string()));
+        // Non-LINK bodies must NOT be returned.
+        assert!(!keys.contains(&"convention-foo".to_string()));
+    }
+
+    #[test]
+    fn outbound_link_keys_empty_when_no_outbound_edges() {
+        let mems: Vec<(&str, String)> = vec![
+            ("link-to-foo", link_body("other-source", LinkKind::Memory, "foo")),
+            ("foo", "CONVENTION:body".to_string()),
+        ];
+        assert!(outbound_link_keys("foo", &mems).is_empty());
+    }
+
+    #[test]
+    fn outbound_link_keys_ignores_malformed_link_bodies() {
+        let mems: Vec<(&str, &str)> = vec![
+            ("bad-link", "LINK:foo->BROKEN:memory:bar"),
+            ("good-link", "LINK:foo->relates_to:memory:bar"),
+        ];
+        let keys = outbound_link_keys("foo", &mems);
+        assert_eq!(keys, vec!["good-link".to_string()]);
     }
 
     #[test]
