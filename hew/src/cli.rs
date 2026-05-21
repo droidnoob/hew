@@ -119,6 +119,11 @@ pub enum Command {
     /// Write a memory with an enforced type allowlist (or --raw to bypass).
     Remember(crate::commands::remember::Args),
 
+    /// Forget a memory by key. Alias for `hew memories --forget <KEY>`;
+    /// later epic work (ML.6 cascade) will extend this surface with
+    /// automatic purge of outbound LINK: rows.
+    Forget(crate::commands::forget::Args),
+
     /// Epic operations: show, tree, close, audit, summary.
     Epic(crate::commands::epic::Args),
 
