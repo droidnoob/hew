@@ -18,6 +18,15 @@ case "$verb" in
         # Used by --recall tests; echoes the stub body.
         printf '%s' "$BD_STUB_RECALL_BODY"
         ;;
+    memories)
+        # ML.9 (hew-3wt) suggestion path queries `bd memories --json`.
+        # Default empty; tests can seed via $BD_STUB_MEMORIES_JSON.
+        if [ -n "$BD_STUB_MEMORIES_JSON" ]; then
+            printf '%s' "$BD_STUB_MEMORIES_JSON"
+        else
+            printf '{}'
+        fi
+        ;;
     *)
         exit 0
         ;;
@@ -285,4 +294,104 @@ fn related_rejects_empty_string_target() {
         .args(["remember", "--type", "gotcha", "body", "--key", "foo", "--related", ""])
         .assert()
         .failure();
+}
+
+// ──────── ML.8: `--type=link` allowlist + ML.9 suggestion silence ────────
+
+#[test]
+fn type_link_writes_with_canonical_upper_prefix() {
+    // ML.8: `link` is now part of the type allowlist (14 → 15).
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args([
+            "remember",
+            "--type",
+            "link",
+            "convention-cli-output->relates_to:memory:decision-review-filing",
+            "--key",
+            "explicit-edge",
+        ])
+        .assert()
+        .success();
+
+    let log_contents = fs::read_to_string(&log).unwrap();
+    assert!(
+        log_contents.contains(
+            "remember LINK:convention-cli-output->relates_to:memory:decision-review-filing"
+        ),
+        "LINK prefix not prepended: {log_contents}"
+    );
+}
+
+#[test]
+fn non_interactive_remember_skips_suggestion_path_silently() {
+    // ML.9: under --non-interactive (which the hew_in helper sets
+    // via HEW_NON_INTERACTIVE=1), the suggestion prompt MUST be
+    // silently skipped — no extra LINK rows written, no prompt
+    // visible, no `bd memories` query result spilling into stdout.
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+
+    // Seed a memory set that *would* surface suggestions if the
+    // ranker ran (JWT body + JWT existing memory).
+    let fixture = r#"{
+        "convention-jwt-shape": "CONVENTION:JWT auth — refresh tokens rotate on use"
+    }"#;
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .env("BD_STUB_MEMORIES_JSON", fixture)
+        .args(["remember", "--type", "gotcha", "JWT refresh body", "--key", "gotcha-jwt"])
+        .assert()
+        .success();
+
+    let log_contents = fs::read_to_string(&log).unwrap();
+    // Exactly one bd remember call — the primary. No LINK sidecars
+    // from auto-suggestion.
+    let remember_count = log_contents.matches("remember ").count();
+    assert_eq!(
+        remember_count, 1,
+        "expected exactly the primary remember in non-interactive mode, got:\n{log_contents}"
+    );
+    assert!(
+        !log_contents.contains("LINK:"),
+        "no LINK sidecars should be auto-written under --non-interactive:\n{log_contents}"
+    );
+}
+
+#[test]
+fn no_suggest_flag_parses_without_key() {
+    // --no-suggest must NOT require --key (it suppresses behavior,
+    // not enables it). Verify clap parses it on a barebones invoke.
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+
+    hew_in(tmp.path())
+        .args(["remember", "--type", "gotcha", "body", "--no-suggest"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn suggest_top_zero_is_equivalent_to_no_suggest() {
+    // --suggest-top=0 hits the same fast-path as --no-suggest: no
+    // bd memories query at all (under interactive mode); under
+    // non-interactive, both paths produce identical behavior.
+    let tmp = tempfile::tempdir().unwrap();
+    write_bd_stub(tmp.path());
+    let log = tmp.path().join("log");
+
+    hew_in(tmp.path())
+        .env("BD_STUB_LOG", &log)
+        .args(["remember", "--type", "gotcha", "body", "--key", "k1", "--suggest-top", "0"])
+        .assert()
+        .success();
+
+    let log_contents = fs::read_to_string(&log).unwrap();
+    assert_eq!(log_contents.matches("remember ").count(), 1);
 }

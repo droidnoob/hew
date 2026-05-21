@@ -10,6 +10,7 @@ use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::error::HewError;
 use hew_core::memories::links::{LinkKind, build_link_row_body};
+use hew_core::memories::suggest::{Suggestion, rank_related};
 use hew_core::tasks::{self, MEMORY_PREFIXES, validate_memory_type};
 use serde::{Deserialize, Serialize};
 
@@ -61,6 +62,25 @@ pub struct Args {
         conflicts_with = "from_file"
     )]
     pub related_task: Vec<String>,
+
+    /// Suppress the interactive "these look related — link any?"
+    /// prompt that fires (in interactive mode) after the body is
+    /// captured but before the primary write. The prompt is already
+    /// suppressed under `--non-interactive` / CI / non-TTY stderr;
+    /// this flag lets an interactive user opt out too.
+    #[arg(long = "no-suggest", conflicts_with = "from_file")]
+    pub no_suggest: bool,
+
+    /// Cap on the number of related-memory suggestions shown by
+    /// the interactive prompt. Default 3. `0` is equivalent to
+    /// `--no-suggest`.
+    #[arg(
+        long = "suggest-top",
+        value_name = "N",
+        default_value_t = 3,
+        conflicts_with = "from_file"
+    )]
+    pub suggest_top: usize,
 }
 
 /// One entry in a bulk-insert JSON array.
@@ -111,10 +131,25 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         format!("{upper}:{}", body)
     };
 
+    // ML.9 suggestion pass — interactive only, opt-out via
+    // --no-suggest. Requires --key (same precondition as --related)
+    // because suggested targets feed into the LINK: write path.
+    // Under --non-interactive / CI / non-TTY this branch is silent
+    // per CONVENTION:cli-non-interactive.
+    let mut related = args.related.clone();
+    if ctx.interactive && !args.no_suggest && args.suggest_top > 0 && args.key.is_some() {
+        let picks = interactive_suggest_picks(&bd, &payload, args.suggest_top, &related)?;
+        for k in picks {
+            if !related.contains(&k) {
+                related.push(k);
+            }
+        }
+    }
+
     // Validate LINK targets BEFORE the primary write so a malformed
     // --related / --related-task value fails the whole command
     // without leaving a stranded primary memory in bd.
-    for v in &args.related {
+    for v in &related {
         validate_link_target("--related", v)?;
     }
     for v in &args.related_task {
@@ -132,13 +167,55 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     // Sidecar LINK: rows. Primary write fired first per
     // DECISION:compact-safety (additions-first); a crash between the
     // primary and the sidecars leaves more memory, not less.
-    if !args.related.is_empty() || !args.related_task.is_empty() {
+    if !related.is_empty() || !args.related_task.is_empty() {
         let from = args.key.as_deref().expect(
             "clap `requires = \"key\"` guarantees --key is set when --related[-task] is used",
         );
-        write_link_sidecars(&bd, ctx, from, &args.related, &args.related_task)?;
+        write_link_sidecars(&bd, ctx, from, &related, &args.related_task)?;
     }
     Ok(())
+}
+
+/// Fetch existing memories, rank candidates against the new body,
+/// and prompt the interactive user to multi-select. Returns the
+/// chosen memory keys (never errors on rank/prompt failure — a
+/// suggestion is a courtesy, not a contract).
+fn interactive_suggest_picks(
+    bd: &dyn BdClient,
+    new_body: &str,
+    top: usize,
+    already_chosen: &[String],
+) -> miette::Result<Vec<String>> {
+    let memories = match bd.memories() {
+        Ok(m) => m,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let pairs: Vec<(&str, &str)> = memories.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut suggestions: Vec<Suggestion> = rank_related(new_body, &pairs, top);
+    // Skip suggestions the user already passed on the command line.
+    suggestions.retain(|s| !already_chosen.iter().any(|c| c == &s.key));
+    if suggestions.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    use inquire::MultiSelect;
+    let labels: Vec<String> =
+        suggestions.iter().map(|s| format!("{}  ({})", s.key, s.reason)).collect();
+    let picked_labels: Vec<String> =
+        match MultiSelect::new("These look related — link any?", labels.clone())
+            .with_help_message("space to toggle, enter to confirm, esc to skip")
+            .prompt()
+        {
+            Ok(picks) => picks,
+            // User pressed Ctrl-C / Esc — treat as "no picks" rather than
+            // failing the whole remember.
+            Err(_) => return Ok(Vec::new()),
+        };
+    let picked: Vec<String> = picked_labels
+        .iter()
+        .filter_map(|l| labels.iter().position(|x| x == l).map(|i| suggestions[i].key.clone()))
+        .collect();
+    Ok(picked)
 }
 
 fn write_link_sidecars(

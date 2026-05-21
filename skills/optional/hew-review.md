@@ -1,4 +1,4 @@
-<!-- hew:version=0.5.2 -->
+<!-- hew:version=0.6.0 -->
 ---
 name: hew-review
 category: optional
@@ -196,6 +196,18 @@ Always reference:
 1. The originating closed task IDs (so the audit trail links back).
 2. The convention/boundary/security memory the finding ties to.
 3. A concrete fix direction — not "needs work" but "do X to Y."
+
+If the finding is a clear-cut breach of one specific `CONVENTION:` /
+`BOUNDARY:` / `SECURITY:` memory, also drop a sidecar LINK row so the
+bug task surfaces in that memory's `hew memories --links` view:
+
+```
+hew remember --type=link --raw "LINK:security-csrf->relates_to:task:hew-xxx.1"
+```
+
+This keeps the graph navigable for a future reviewer who searches the
+memory side first ("what bugs have we filed against `SECURITY:csrf`?")
+without bloating the bug description with cross-references.
 
 ## After filing
 
