@@ -227,21 +227,20 @@ hew dep add hew-X.4 --on hew-X.2
 
 ## Step 5 — place gates for external blockers
 
-`--type=gate` is for anything outside the Beads graph. Never fake a gate
-with a title prefix.
+Gates are for anything outside the Beads graph. Never fake a gate with a
+title prefix. Create the blocked task first, then attach a gate to it.
 
 | Trigger | Command |
 |---------|---------|
-| Wait for PR merge | `bd create --type=gate --title="PR #42 merged" --await-type=gh:pr --await-id=42` |
-| Wait for CI | `bd create --type=gate --title="CI green" --await-type=gh:run --await-id=<run-id>` |
-| Manual approval | `bd create --type=gate --title="Staging approved"` |
-| Timer / cooldown | `bd create --type=gate --title="30m cooldown" --await-type=timer --await-id=30m` |
+| Wait for PR merge | `bd gate create --type=gh:pr --blocks=<task-id> --await-id=42 --reason="PR #42 merge"` |
+| Wait for CI | `bd gate create --type=gh:run --blocks=<task-id> --await-id=<run-id> --reason="CI green"` |
+| Manual approval | `bd gate create --type=human --blocks=<task-id> --reason="Staging approved"` |
+| Timer / cooldown | `bd gate create --type=timer --blocks=<task-id> --timeout=30m` |
 
-Gates use `bd create` directly — `hew task new` is task-shaped and
-doesn't expose `--await-type` / `--await-id` flags yet.
-
-Then `hew dep add <next-task> --on <gate-id>` so the next work blocks
-on the gate.
+Gate creation is a documented hold-out — `hew` has no `gate` wrapper yet
+(`bd gate create` stays the path; `bd gate resolve <id>` closes manual
+gates). Inspect with `bd gate list`. The `--blocks` flag does the
+dependency wiring inline, so no separate `hew dep add` is needed.
 
 ## Step 6 — pick types and priorities
 
@@ -280,7 +279,7 @@ hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Define auth contracts" \
   --description="Why: D-04 + interface-first ordering. What: AuthResponse, RefreshRequest, route paths /login /refresh /logout. Files: app/api/v1/auth/types.py (new)."
 # → hew-a3f8.1
-# (--acceptance lives in bd; surface it via `bd update --acceptance "…"` if needed.)
+# (set acceptance separately with `hew task update <id> --acceptance "…"` when needed.)
 
 hew task new --parent=hew-a3f8 --type=task --priority=1 \
   --title="Implement POST /api/v1/auth/login" \

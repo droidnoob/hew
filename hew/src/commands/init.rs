@@ -17,8 +17,15 @@ pub struct Args {
     pub prefix: Option<String>,
 
     /// Track .beads/ in git (default: false — added to .gitignore).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "stealth")]
     pub git_track: bool,
+
+    /// Stealth: force `.beads/` invisible (no git tracking, no `bd init`
+    /// auto-commit, excluded via `.git/info/exclude`). Skips the interactive
+    /// "share the task graph in git?" prompt. Equivalent to the default
+    /// non-tracked path, but explicit and non-interactive.
+    #[arg(long, conflicts_with = "git_track")]
+    pub stealth: bool,
 
     /// Agent runtime to install for. Defaults to auto-detect.
     #[arg(long, value_enum)]
@@ -177,12 +184,10 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
     let bd = ensure_bd(ctx)?;
-    let beads_pre_existed = project_root.join(".beads").exists();
-    run_bd_init(&bd, &project_root, args.prefix.as_deref())?;
-    if !beads_pre_existed && !ctx.quiet {
-        println!("beads: ✓ task graph initialised in .beads/");
-    }
 
+    // Git must be initialised BEFORE bd init: in non-stealth mode bd
+    // auto-commits beads files; in stealth mode bd writes to
+    // .git/info/exclude. Either way, .git/ has to exist.
     ensure_git(ctx);
     init_git_repo(ctx, &project_root)?;
 
@@ -190,6 +195,12 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     if !git_track {
         let _ = install::ensure_beads_gitignored(&project_root)
             .map_err(|e| miette::miette!("update .gitignore: {e}"))?;
+    }
+
+    let beads_pre_existed = project_root.join(".beads").exists();
+    run_bd_init(&bd, &project_root, args.prefix.as_deref(), git_track)?;
+    if !beads_pre_existed && !ctx.quiet {
+        println!("beads: ✓ task graph initialised in .beads/");
     }
 
     let project_type = resolve_project_type(ctx, &args, &project_root);
@@ -679,6 +690,9 @@ fn resolve_git_track(ctx: &Ctx, args: &Args, project_root: &std::path::Path) -> 
     if args.git_track {
         return true;
     }
+    if args.stealth {
+        return false;
+    }
     if !project_root.join(".git").exists() {
         return false;
     }
@@ -740,11 +754,22 @@ fn run_bd_init(
     bd: &RealBd,
     project_root: &std::path::Path,
     prefix: Option<&str>,
+    git_track: bool,
 ) -> miette::Result<()> {
     if project_root.join(".beads").exists() {
         return Ok(()); // already initialized
     }
-    let mut args: Vec<&OsStr> = vec![OsStr::new("init"), OsStr::new("--non-interactive")];
+    // --skip-agents: hew owns CLAUDE.md / AGENTS.md / .claude/settings.json.
+    //   Without this, bd init writes a competing CLAUDE.md telling agents to
+    //   "use bd for ALL task tracking" — direct conflict with the
+    //   prefer-hew-over-bd contract — and clobbers our SessionStart hook.
+    // --stealth (when !git_track): excludes .beads/ via .git/info/exclude
+    //   and suppresses bd's auto-commit of beads files.
+    let mut args: Vec<&OsStr> =
+        vec![OsStr::new("init"), OsStr::new("--non-interactive"), OsStr::new("--skip-agents")];
+    if !git_track {
+        args.push(OsStr::new("--stealth"));
+    }
     let pfx_os: std::ffi::OsString;
     if let Some(p) = prefix {
         args.push(OsStr::new("--prefix"));
