@@ -7,3 +7,4 @@
 //! [`LinkRow`]: links::LinkRow
 
 pub mod links;
+pub mod suggest;

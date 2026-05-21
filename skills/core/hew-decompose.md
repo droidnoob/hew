@@ -146,6 +146,15 @@ Include:
   `CONVENTION:craft.*` set plus any `DECISION:craft-feature:<plan-id>`
   refinement memory written by hew-plan.
 
+When the description tells the executor to write a memory mid-task (e.g.
+a `DECISION:` captured while implementing), have them attach explicit
+links so future readers can navigate the graph: `hew remember
+--type=decision "..." --key=decision-x --related=convention-y
+--related-task=<this-task-id>`. The link sidecars surface in `hew
+memories --links` and survive compaction (LINK: is exempt). Outbound
+edges die with the source on `hew forget`; inbound edges intentionally
+dangle so the next author notices.
+
 ```
 hew task new --type=task --priority=1 \
   --title="Implement JWT issuance for /api/v1/auth/login" \

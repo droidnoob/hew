@@ -132,6 +132,21 @@ These are factual decision memories (no special prefix beyond `DECISION:`),
 not `CONVENTION:` rules. They explain *why* the codebase looks the way it
 does. Future work can revisit them; current work treats them as settled.
 
+If a decision is anchored to another memory or to the task that produced
+it, tag the relationship with `--related` / `--related-task` so the link
+surfaces in `hew memories --links <key>`:
+
+```
+hew remember --type=decision "auth — JWT with 15min access + 7d refresh; refresh rotates on every use." \
+  --key=decision-auth \
+  --related=convention-jwt-shape \
+  --related-task=hew-a3f8
+```
+
+Each related target becomes a sidecar `LINK:` memory the reader stitches
+into outbound/inbound edges. `--related` requires `--key` so the link's
+`<from>` side is deterministic.
+
 ### Group related decisions under one domain key
 
 When a single plan locks several related calls — e.g. three choices

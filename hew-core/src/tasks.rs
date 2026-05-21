@@ -124,6 +124,12 @@ pub const MEMORY_PREFIXES: &[&str] = &[
     "research",
     "dep",
     "factual",
+    // ML.8 (hew-uxf): `link` joins the allowlist so `hew remember
+    // --type=link --raw "LINK:a->relates_to:memory:b"` works without
+    // --raw escape hatch. Non-raw form prepends `LINK:` to the body
+    // and produces `LINK:<body>` — useful for power-users who pre-
+    // format the row; the curated path stays `hew remember --related`.
+    "link",
 ];
 
 /// Validate a `--type` argument against [`MEMORY_PREFIXES`]. Accepts any
@@ -158,6 +164,7 @@ fn canonical_upper(p: &str) -> &'static str {
         "research" => "RESEARCH",
         "dep" => "DEP",
         "factual" => "FACTUAL",
+        "link" => "LINK",
         _ => unreachable!("checked against MEMORY_PREFIXES"),
     }
 }
