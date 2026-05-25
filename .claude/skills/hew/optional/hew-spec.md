@@ -1,4 +1,4 @@
-<!-- hew:version=0.6.1 -->
+<!-- hew:version=0.7.0 -->
 ---
 name: hew-spec
 category: optional

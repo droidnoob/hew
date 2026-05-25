@@ -38,5 +38,10 @@
       "Bash(git commit:*)",
       "Bash(git checkout:*)"
     ]
+  },
+  "statusLine": {
+    "command": "hew statusline",
+    "hew_managed": true,
+    "type": "command"
   }
 }

@@ -373,6 +373,12 @@ pub fn resume(client: &dyn BdClient) -> Result<ResumeOutput> {
     let in_progress = collect_in_progress(client);
     let git = crate::git::RealGit::discover().ok().and_then(|g| collect_git_state(&g));
 
+    // Self-heal pre-statusline installs. Silent / best-effort — the
+    // SessionStart hook must never break because of a migration misfire.
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = crate::install::auto_migrate_claude_statusline(&cwd);
+    }
+
     Ok(ResumeOutput {
         schema_version: 1,
         project: ProjectInfo { beads_initialized: bd_version.is_some(), bd_version },

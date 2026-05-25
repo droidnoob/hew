@@ -360,6 +360,7 @@ Not slashes, but referenced by skill bodies and worth knowing:
 | `hew uninstall [--runtime=<r>] [--purge]` | Reverse `hew init` |
 | `hew update` | Self-update binary + embedded artifacts |
 | `hew branch new --prefix=<type> --slug=<text>` | Create a conventional branch |
+| `hew statusline [--compact\|--full] [--width=N]` | One-line agent statusline (scope · bar · pct · phase · epic-fraction · user). Auto-wired into Claude Code by `hew init`. |
 
 ---
 

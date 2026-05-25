@@ -24,6 +24,7 @@ pub mod skills;
 pub mod slash;
 pub mod stacks;
 pub mod status;
+pub mod statusline;
 pub mod tasks;
 #[cfg(unix)]
 pub mod testing;

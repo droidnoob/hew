@@ -23,6 +23,7 @@ pub mod schema;
 pub mod skills;
 pub mod slashes;
 pub mod status;
+pub mod statusline;
 pub mod task;
 pub mod uninstall;
 pub mod update;
@@ -58,5 +59,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Compact(a) => compact::run(&ctx, a),
         Command::Ready(a) => next::run_ready(&ctx, a),
         Command::Next(a) => next::run_next(&ctx, a),
+        Command::Statusline(a) => statusline::run(&ctx, a),
     }
 }

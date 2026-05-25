@@ -6,6 +6,67 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-25
+
+Ships **`feat/statusline`** — Claude Code agent statusline showing
+what hew is working on, end-to-end. Auto-wired by `hew init`, and
+self-heals onto installs that predate this release with no `hew
+update` needed.
+
+### Added
+
+- **`hew_core::statusline`** — pure render module. `render(input,
+  format, width)` is a pure function over `(StatuslineInput,
+  StatuslineFormat, width)`; no I/O. Three formats:
+  - `Compact`: `<label> <bar> <pct>%`
+  - `Medium` (default): adds phase + epic-fraction
+  - `Full`: adds `<user> <user-done>/<user-total>`
+  Width clamped to `[1, 80]`; total=0 / done=0 short-circuit to all-
+  empty; done > total saturates to all-filled. `detect_phase` infers
+  `Planning` / `Executing` / `Verifying` from `STATUS:*` markers plus
+  task counts. `pick_scope_label` falls through milestone → epic →
+  `"(no scope)"`. All types derive `Serialize` / `Deserialize` /
+  `JsonSchema`. 17 unit tests cover the documented edge cases.
+- **`hew statusline` subcommand** — thin clap wrapper that owns the
+  side-effects the pure layer can't: stdin drain, `prime::resume`
+  query, env-based `USER` lookup, milestone-memory project label,
+  current-epic discovery (in_progress parent → ready epic fallback).
+  Flags: `--compact` / `--full` (mutually exclusive; default Medium),
+  `--scope=auto|project|milestone|epic`, `--width=N` (default 10,
+  clamped not rejected). Stdout is reserved for the line itself;
+  errors and bd-not-initialized both exit 0 with empty stdout so
+  Claude Code's `statusLine` hook degrades gracefully. 7 e2e tests
+  via a PATH-stubbed bd plus 5 inline tests for the lenient JSON
+  peek + project-label fallback.
+- **`hew init` upserts a top-level `statusLine` block in
+  `.claude/settings.json`** carrying `hew_managed: true`. Mirrors the
+  SessionStart hook pattern: re-install is idempotent, uninstall
+  removes only the hew-owned variant, opt-out works by removing the
+  flag. 5 new install tests cover write, idempotency, user-opt-out
+  preservation on install, hew-owned removal on uninstall, and user-
+  opt-out preservation through the full install / uninstall cycle.
+- **Auto-migration** on `hew prime resume` for installs that predate
+  this release. `install::auto_migrate_claude_statusline(cwd)` runs
+  on every SessionStart; injects the block iff (1) `.claude/settings.json`
+  exists and parses, (2) carries a `hew_managed: true` SessionStart
+  entry (proves it's a hew install), and (3) has no `statusLine` key
+  yet. Silent / fail-closed on every other path — the SessionStart
+  hook must never break because of a self-heal misfire. 5 new tests
+  cover the happy migration, idempotency when block already present,
+  skip-when-not-a-hew-install, missing-settings, and the malformed-
+  JSON safety net.
+
+### Documentation
+
+- New "Statusline" subsection in `CLAUDE.md` covering the three
+  formats, the `hew_managed` discriminator, the graceful-fallback
+  contract, where the pure module lives, and the self-heal path.
+- `README.md` "Daily flow" notes the auto-wired statusline.
+- `CONTRIBUTING.md` notes the `hew_managed: true` pattern for future
+  contributors wiring install plumbing into `.claude/settings.json`.
+- `docs/COMMANDS.md` CLI-only surfaces table gains a `hew statusline`
+  entry.
+
 ## [0.6.1] — 2026-05-25
 
 Fixes **GitHub #40** — `hew prime resume` surfacing a stale
