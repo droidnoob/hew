@@ -33,7 +33,11 @@ tree-sitter-java = { workspace = true, optional = true }
 streaming-iterator = { workspace = true, optional = true }
 
 [features]
-default = []
+# treesitter is on by default so shipped binaries (brew / cargo-dist /
+# `cargo install hew`) include `hew blast` out of the box. Lean local
+# builds: `cargo build --no-default-features`. Supersedes the original
+# DECISION:treesitter-feature-gating (off-by-default) on 2026-05-26.
+default = ["treesitter"]
 treesitter = [
     "dep:tree-sitter",
     "dep:tree-sitter-rust",

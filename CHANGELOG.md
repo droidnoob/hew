@@ -6,6 +6,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-05-26
+
+Tree-sitter on by default. The 0.8.0 release shipped `hew blast` but
+the Homebrew formula and `cargo install hew` produced binaries built
+without `--features treesitter`, so end users hit a "rebuild with
+--features treesitter" error when invoking it.
+
+### Changed
+
+- **`treesitter` feature is now on by default** in `hew-core` and
+  `hew`. Shipped binaries (brew, cargo-dist, `cargo install hew`)
+  include `hew blast` out of the box.
+- Lean local build path preserved: `cargo build --no-default-features`
+  strips every tree-sitter crate. The cfg gates that compile out the
+  blast subcommand under no-features stay in place.
+- `DECISION:treesitter-feature-gating` memory updated to reflect the
+  new default.
+
 ## [0.8.0] — 2026-05-26
 
 Tree-sitter symbol extraction + `hew blast`. Five-slice epic
