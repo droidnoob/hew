@@ -1,4 +1,4 @@
-<!-- hew:version=0.7.0 -->
+<!-- hew:version=0.7.1 -->
 ---
 name: hew-guard
 category: core
