@@ -1,17 +1,20 @@
-//! Tree-sitter symbol extraction (skeleton — TS.1).
+//! Tree-sitter symbol extraction.
 //!
-//! Public surface for diff-driven symbol extraction. The full implementation
-//! lands across TS.2 (diff intersection), TS.3 (per-language extraction), and
-//! TS.4 (integration). This file only nails down the contract types so the
-//! downstream slices can compile against a stable API.
+//! Public surface for diff-driven symbol extraction. TS.1 wired the
+//! Cargo feature, TS.2 (this slice) locks the public types + pure
+//! line-math. Per-language extraction lands in TS.3 (grammars submodule).
 //!
 //! Gating: all tree-sitter crate access lives in the `grammars` submodule
 //! behind `#[cfg(feature = "treesitter")]`. The contract types and the
-//! `diff` line-math helpers compile under default features so TS.2 can be
-//! tested without paying the grammar build cost.
+//! `diff` line-math helpers compile under default features so callers
+//! can be tested without paying the grammar build cost.
 //!
 //! See DECISION:treesitter-feature-gating, DECISION:treesitter-v1-langs,
 //! DECISION:treesitter-capture-convention, DECISION:treesitter-abi-pinning.
+
+use std::ops::Range;
+
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "treesitter")]
 pub mod grammars;
@@ -20,7 +23,8 @@ pub mod diff;
 
 /// V1 supported languages. Exhaustive on purpose — adding a language is a
 /// deliberate code change (DECISION:treesitter-v1-langs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 #[allow(dead_code)]
 pub enum Language {
     Rust,
@@ -33,29 +37,30 @@ pub enum Language {
 
 /// Kind of definition extracted from a source file.
 ///
-/// Mirrors the tree-sitter org `tags.scm` capture convention:
-/// `@definition.{function,method,class,interface,module}`
-/// (DECISION:treesitter-capture-convention).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
+/// TS.2 scope: Function / Method / Class only. The wider capture
+/// convention (DECISION:treesitter-capture-convention) covers
+/// interface + module too; those land in TS.3 when the per-language
+/// extractors decide whether each language emits them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SymbolKind {
     Function,
     Method,
     Class,
-    Interface,
-    Module,
 }
 
-/// A single symbol extracted from source. Line numbers are 1-based and
-/// inclusive on both ends (matches `git diff` line semantics).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
+/// A single symbol extracted from source.
+///
+/// `byte_range` is the half-open span into the source bytes; `line_range`
+/// is the half-open 1-based line span. Both use `Range<_>` (not
+/// `RangeInclusive`) so they compose with `std::ops::Range` and match
+/// tree-sitter's `node.byte_range()` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
-    pub language: Language,
-    pub start_line: u32,
-    pub end_line: u32,
+    pub byte_range: Range<usize>,
+    pub line_range: Range<u32>,
 }
 
 /// Failure modes for tree-sitter operations. Variants will grow as TS.3
