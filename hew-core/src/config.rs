@@ -116,11 +116,17 @@ pub struct CraftConfig {
     /// Soft-warn when the diff adds unused imports / dead code that
     /// language-specific lints surface. Default `true`.
     pub warn_on_unused: bool,
+    /// When true, `hew task close` auto-appends a symbol-level
+    /// changelog (`hew blast`) to the task's notes — so the bd graph
+    /// later answers "which functions / classes did this task move?"
+    /// Requires the binary to be built with `--features treesitter`;
+    /// otherwise the flag is silently ignored. Default `false`.
+    pub symbol_trace: bool,
 }
 
 impl Default for CraftConfig {
     fn default() -> Self {
-        Self { max_function_lines: 0, warn_on_unused: true }
+        Self { max_function_lines: 0, warn_on_unused: true, symbol_trace: false }
     }
 }
 
@@ -296,6 +302,7 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "craft.warn_on_unused" | "craft.warn-on-unused" => {
             Some(cfg.craft.warn_on_unused.to_string())
         }
+        "craft.symbol_trace" | "craft.symbol-trace" => Some(cfg.craft.symbol_trace.to_string()),
         "compact.dry_run_default" | "compact.dry-run-default" => {
             Some(cfg.compact.dry_run_default.to_string())
         }
@@ -398,6 +405,7 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
         "craft.warn_on_unused" | "craft.warn-on-unused" => {
             cfg.craft.warn_on_unused = bool_val(value)?
         }
+        "craft.symbol_trace" | "craft.symbol-trace" => cfg.craft.symbol_trace = bool_val(value)?,
         "compact.dry_run_default" | "compact.dry-run-default" => {
             cfg.compact.dry_run_default = bool_val(value)?
         }
@@ -458,6 +466,7 @@ pub fn keys() -> &'static [&'static str] {
         "testing.require",
         "craft.max_function_lines",
         "craft.warn_on_unused",
+        "craft.symbol_trace",
         "compact.dry_run_default",
         "compact.granularity_default",
         "compact.target_clusters_cap",

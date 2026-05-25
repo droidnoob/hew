@@ -16,8 +16,6 @@
 //! "rebuild with --features treesitter" error.
 
 #[cfg(feature = "treesitter")]
-use std::ffi::OsStr;
-#[cfg(feature = "treesitter")]
 use std::path::PathBuf;
 
 use clap::Args as ClapArgs;
@@ -68,6 +66,9 @@ pub fn run(_ctx: &Ctx, _args: Args) -> miette::Result<()> {
 
 #[cfg(feature = "treesitter")]
 pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
+    use hew_core::blast::{
+        FileEntry, diff_file_set, per_file_diff_ranges, resolve_base, scan_file,
+    };
     use hew_core::git::RealGit;
 
     // --- gather the explicit file list (positional + stdin) ---
@@ -92,7 +93,6 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         ));
     }
 
-    // --- resolve the file set + per-file changed ranges ---
     let mut entries: Vec<FileEntry> = Vec::new();
     let header_base: String;
 
@@ -107,14 +107,14 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
             }
         }
     } else {
-        // diff mode
         let git = RealGit::discover()
             .map_err(|e| miette::miette!("`git` not on PATH or unusable: {e}"))?;
-        let base = resolve_base(&git, args.base.as_deref())?;
+        let base = resolve_base(&git, args.base.as_deref())
+            .map_err(|e| miette::miette!("resolve base: {e}"))?;
         header_base = base.clone();
-        let diff_files = git_diff_file_set(&git, &base)?;
+        let diff_files =
+            diff_file_set(&git, &base).map_err(|e| miette::miette!("git diff: {e}"))?;
 
-        // If explicit files were given, intersect with the diff set.
         let target: Vec<PathBuf> = if explicit.is_empty() {
             diff_files
         } else {
@@ -197,129 +197,24 @@ fn path_matches(path: &std::path::Path, needles: &[String]) -> bool {
     needles.iter().any(|n| s.contains(n.as_str()))
 }
 
-/// Extract symbols from a single file. If `ranges` is `None`, returns
-/// every extracted symbol. If `Some`, returns only the ones that
-/// overlap a range. Returns `None` when the file can't be classified or
-/// can't be read — the caller treats that as "skip silently."
-#[cfg(feature = "treesitter")]
-fn scan_file(file: &std::path::Path, ranges: Option<&[std::ops::Range<u32>]>) -> Option<FileEntry> {
-    use hew_core::treesitter::{detect_language, diff::changed_symbols, extract_symbols};
-    let lang = detect_language(file)?;
-    let source = std::fs::read_to_string(file).ok()?;
-    let symbols = extract_symbols(&source, lang).ok()?;
-    let kept = match ranges {
-        Some(r) => changed_symbols(&symbols, r),
-        None => symbols,
-    };
-    if kept.is_empty() {
-        return None;
-    }
-    Some(FileEntry {
-        path: file.display().to_string(),
-        language: format!("{lang:?}"),
-        symbols: kept,
-    })
-}
-
-#[cfg(feature = "treesitter")]
-fn git_diff_file_set(git: &hew_core::git::RealGit, base: &str) -> miette::Result<Vec<PathBuf>> {
-    use hew_core::git::GitClient;
-    let out = git
-        .run_raw(&[
-            OsStr::new("diff"),
-            OsStr::new("--name-only"),
-            OsStr::new(&format!("{base}...HEAD")),
-        ])
-        .map_err(|e| miette::miette!("git diff --name-only failed: {e}"))?;
-    Ok(out.stdout.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).map(PathBuf::from).collect())
-}
-
-#[cfg(feature = "treesitter")]
-fn per_file_diff_ranges(
-    git: &hew_core::git::RealGit,
-    base: &str,
-    file: &std::path::Path,
-) -> miette::Result<Vec<std::ops::Range<u32>>> {
-    use hew_core::diff_hunks::parse_changed_ranges;
-    use hew_core::git::GitClient;
-    let out = git
-        .run_raw(&[
-            OsStr::new("diff"),
-            OsStr::new("--unified=0"),
-            OsStr::new(&format!("{base}...HEAD")),
-            OsStr::new("--"),
-            file.as_os_str(),
-        ])
-        .map_err(|e| miette::miette!("git diff failed: {e}"))?;
-    Ok(parse_changed_ranges(&out.stdout))
-}
-
-#[cfg(feature = "treesitter")]
-#[derive(Debug, serde::Serialize)]
-struct FileEntry {
-    path: String,
-    language: String,
-    symbols: Vec<hew_core::treesitter::Symbol>,
-}
-
-#[cfg(feature = "treesitter")]
-fn resolve_base(git: &hew_core::git::RealGit, given: Option<&str>) -> miette::Result<String> {
-    use hew_core::git::GitClient;
-    if let Some(g) = given {
-        return Ok(g.to_string());
-    }
-    for candidate in ["main", "master"] {
-        let out =
-            git.run_raw(&[OsStr::new("rev-parse"), OsStr::new("--verify"), OsStr::new(candidate)]);
-        if out.is_ok() {
-            return Ok(candidate.to_string());
-        }
-    }
-    Err(miette::miette!("could not resolve a base ref. Pass --base <ref> explicitly."))
-}
-
 #[cfg(all(test, feature = "treesitter"))]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn path_matches_empty_needle_lets_everything_through() {
-        assert!(path_matches(Path::new("a/b.rs"), &[]));
+        assert!(path_matches(std::path::Path::new("a/b.rs"), &[]));
     }
 
     #[test]
     fn path_matches_any_substring_hits() {
-        assert!(path_matches(Path::new("hew-core/src/treesitter/diff.rs"), &["treesitter".into()]));
-        assert!(!path_matches(Path::new("hew-core/src/install.rs"), &["treesitter".into()]));
-    }
-
-    #[test]
-    fn scan_file_no_diff_returns_all_symbols_for_a_rust_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("sample.rs");
-        std::fs::write(&p, "fn alpha() {}\nstruct Widget;\nimpl Widget { fn beta(&self) {} }\n")
-            .unwrap();
-        let got = scan_file(&p, None).expect("scan_file should find symbols");
-        let names: Vec<&str> = got.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"alpha"));
-        assert!(names.contains(&"Widget"));
-        assert!(names.contains(&"beta"));
-    }
-
-    #[test]
-    fn scan_file_with_narrow_range_returns_only_overlapping() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("sample.rs");
-        // 3 line ranges: alpha 1, Widget 2, impl(beta) 3
-        std::fs::write(&p, "fn alpha() {}\nstruct Widget;\nimpl Widget { fn beta(&self) {} }\n")
-            .unwrap();
-        let all = scan_file(&p, None).expect("baseline scan").symbols;
-        let widget = all.iter().find(|s| s.name == "Widget").expect("Widget should be extracted");
-        let one_range = [widget.line_range.clone()];
-        let scoped = scan_file(&p, Some(&one_range)).expect("scoped scan");
-        let names: Vec<&str> = scoped.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"Widget"));
-        assert!(scoped.symbols.len() < all.len(), "scoped should be a strict subset");
+        assert!(path_matches(
+            std::path::Path::new("hew-core/src/treesitter/diff.rs"),
+            &["treesitter".into()]
+        ));
+        assert!(!path_matches(
+            std::path::Path::new("hew-core/src/install.rs"),
+            &["treesitter".into()]
+        ));
     }
 }

@@ -4,6 +4,8 @@
 //! easy to unit test. The `hew` binary wires presentation on top.
 
 pub mod bd;
+#[cfg(feature = "treesitter")]
+pub mod blast;
 pub mod branch;
 pub mod checkpoint;
 pub mod compact;
