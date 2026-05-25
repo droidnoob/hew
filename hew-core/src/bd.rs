@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::error::{HewError, Result};
+use crate::process::spawn_with_etxtbsy_retry;
 
 /// Soft default timeout for any single `bd` invocation.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -133,7 +134,7 @@ impl RealBd {
         let mut cmd = Command::new(&self.path);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()?;
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)?;
 
         let status = match child.wait_timeout(self.timeout)? {
             Some(s) => s,
@@ -200,7 +201,7 @@ impl RealBd {
         let mut cmd = Command::new(&self.path);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()?;
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)?;
 
         let status = match child.wait_timeout(self.timeout)? {
             Some(s) => s,

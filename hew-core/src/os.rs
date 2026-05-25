@@ -13,6 +13,7 @@ use tracing::debug;
 use wait_timeout::ChildExt;
 
 use crate::error::{HewError, Result};
+use crate::process::spawn_with_etxtbsy_retry;
 
 const BREW_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -137,7 +138,7 @@ fn run_brew_install_git(brew: &std::path::Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
+    let mut child = spawn_with_etxtbsy_retry(&mut cmd)?;
     let status = match child.wait_timeout(BREW_INSTALL_TIMEOUT)? {
         Some(s) => s,
         None => {
