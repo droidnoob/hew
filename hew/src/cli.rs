@@ -148,4 +148,12 @@ pub enum Command {
     /// itself; errors and noise go to stderr. Exits 0 with empty stdout
     /// when bd isn't initialized so the host falls back gracefully.
     Statusline(crate::commands::statusline::Args),
+
+    /// Symbol-level changelog of the current branch vs the base ref.
+    /// Walks `git diff --unified=0 <base>...HEAD`, intersects each
+    /// touched line range with tree-sitter-extracted symbols, and
+    /// prints the symbols whose definitions overlap a diff hunk.
+    ///
+    /// Requires the `treesitter` build feature.
+    Blast(crate::commands::blast::Args),
 }

@@ -88,6 +88,7 @@ pub const OPTIONAL: &[Skill] = &[
     skill!("hew-review", Category::Optional, "optional/hew-review.md"),
     skill!("hew-adversarial-review", Category::Optional, "optional/hew-adversarial-review.md"),
     skill!("hew-compact", Category::Optional, "optional/hew-compact.md"),
+    skill!("hew-blast", Category::Optional, "optional/hew-blast.md"),
 ];
 
 /// All shipped skills, including the SKILL.md index.
@@ -110,16 +111,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ship_one_index_plus_twenty_skills() {
+    fn ship_one_index_plus_twenty_one_skills() {
         let all = all();
-        assert_eq!(all.len(), 1 + 20, "expected SKILL.md + 20 skills, got {}", all.len());
+        assert_eq!(all.len(), 1 + 21, "expected SKILL.md + 21 skills, got {}", all.len());
     }
 
     #[test]
     fn category_counts_match_spec() {
         assert_eq!(CORE.len(), 7);
         assert_eq!(BROWNFIELD.len(), 5);
-        assert_eq!(OPTIONAL.len(), 8);
+        assert_eq!(OPTIONAL.len(), 9);
     }
 
     #[test]

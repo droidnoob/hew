@@ -277,11 +277,46 @@ fn close(ctx: &Ctx, bd: &dyn BdClient, args: CloseArgs) -> miette::Result<()> {
         None => args.reason,
     };
     tasks::close_with_reason_force(bd, &args.id, &reason, args.force)?;
+    maybe_attach_symbol_trace(ctx, bd, &args.id);
     if !ctx.quiet {
         let suffix = if args.force { " (forced)" } else { "" };
         println!("closed {}{suffix} — {reason}", args.id);
     }
     Ok(())
+}
+
+/// When `craft.symbol_trace=true` AND the binary was built with the
+/// `treesitter` feature, run a blast against the branch base and
+/// append the resulting symbol list to the task's notes. Silent
+/// best-effort — never propagates an error from this path; the close
+/// already succeeded and the trace is a nice-to-have.
+fn maybe_attach_symbol_trace(_ctx: &Ctx, _bd: &dyn BdClient, _id: &str) {
+    #[cfg(feature = "treesitter")]
+    {
+        use hew_core::config;
+        let cfg = config::load().unwrap_or_default();
+        if !cfg.craft.symbol_trace {
+            return;
+        }
+        let entries = match hew_core::blast::compute_blast(None) {
+            Ok(e) if !e.is_empty() => e,
+            _ => return,
+        };
+        // We don't have the base name back from compute_blast today —
+        // re-resolve here so the note matches what the user would see
+        // from `hew blast`. Treat any failure as "skip silently."
+        let base = hew_core::git::RealGit::discover()
+            .ok()
+            .and_then(|g| hew_core::blast::resolve_base(&g, None).ok())
+            .unwrap_or_else(|| "base".to_string());
+        let note = hew_core::blast::format_note(&base, &entries);
+        let _ = _bd.run_raw(&[
+            std::ffi::OsStr::new("update"),
+            std::ffi::OsStr::new(_id),
+            std::ffi::OsStr::new("--append-notes"),
+            std::ffi::OsStr::new(&note),
+        ]);
+    }
 }
 
 fn new_task(ctx: &Ctx, bd: &dyn BdClient, args: NewArgs) -> miette::Result<()> {

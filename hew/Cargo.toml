@@ -12,6 +12,13 @@ homepage = "https://github.com/droidnoob/hew"
 name = "hew"
 path = "src/main.rs"
 
+[features]
+default = []
+# Forward to hew-core's treesitter feature so the binary picks up the
+# `hew blast` subcommand. Off by default — keeps cold build time + the
+# 4-way CI matrix unchanged.
+treesitter = ["hew-core/treesitter"]
+
 [dependencies]
 hew-core = { path = "../hew-core" }
 clap = { workspace = true }

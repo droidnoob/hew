@@ -1161,8 +1161,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Claude, tmp.path()).expect("install");
         assert_eq!(plan.runtime, Runtime::Claude);
-        // 1 SKILL.md + 20 skills + 39 slash commands + 1 settings.json = 61 files.
-        assert_eq!(plan.written.len(), 61);
+        // 1 SKILL.md + 21 skills + 40 slash commands + 1 settings.json = 63 files.
+        assert_eq!(plan.written.len(), 63);
 
         let hew_root = tmp.path().join(".claude").join("skills").join("hew");
         assert!(hew_root.join("SKILL.md").exists());
@@ -1239,8 +1239,8 @@ mod tests {
     fn install_codex_writes_per_skill_toml_and_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
         let plan = install(Runtime::Codex, tmp.path()).expect("install");
-        // 20 agent roles + 20 SKILL.md skill files + AGENTS.md = 41 files.
-        assert_eq!(plan.written.len(), 41);
+        // 21 agent roles + 21 SKILL.md skill files + AGENTS.md = 43 files.
+        assert_eq!(plan.written.len(), 43);
         let agents = tmp.path().join(".codex").join("agents");
         assert!(agents.join("hew-execute.toml").exists());
         assert!(agents.join("hew-scan.toml").exists());

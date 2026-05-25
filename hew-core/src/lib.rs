@@ -4,12 +4,15 @@
 //! easy to unit test. The `hew` binary wires presentation on top.
 
 pub mod bd;
+#[cfg(feature = "treesitter")]
+pub mod blast;
 pub mod branch;
 pub mod checkpoint;
 pub mod compact;
 pub mod config;
 pub mod craft;
 pub mod ctx;
+pub mod diff_hunks;
 pub mod doctor;
 pub mod error;
 pub mod git;
@@ -29,6 +32,7 @@ pub mod tasks;
 #[cfg(unix)]
 pub mod testing;
 pub mod time;
+pub mod treesitter;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};

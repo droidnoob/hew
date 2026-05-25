@@ -2,6 +2,7 @@ use hew_core::Ctx;
 
 use crate::cli::{Cli, Command};
 
+pub mod blast;
 pub mod branch;
 pub mod check;
 pub mod checkpoint;
@@ -60,5 +61,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Ready(a) => next::run_ready(&ctx, a),
         Command::Next(a) => next::run_next(&ctx, a),
         Command::Statusline(a) => statusline::run(&ctx, a),
+        Command::Blast(a) => blast::run(&ctx, a),
     }
 }

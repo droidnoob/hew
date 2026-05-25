@@ -3,7 +3,7 @@ resolver = "2"
 members = ["hew-core", "hew"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
@@ -33,6 +33,17 @@ wait-timeout = "0.2"
 axoupdater = { version = "0.10", features = ["blocking"] }
 schemars = "1.2"
 vergen = { version = "9.1", features = ["build", "cargo", "rustc"] }
+
+# tree-sitter (runtime pinned per DECISION:treesitter-abi-pinning; grammars
+# float at minor version below in hew-core).
+tree-sitter = "=0.25.10"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+streaming-iterator = "0.1"
 
 # dev
 assert_cmd = "2.2"
