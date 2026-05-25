@@ -7,13 +7,14 @@
 //! we exit 0 with empty stdout so Claude Code's hook falls back to its
 //! default surface gracefully (this is correct behavior, not an error).
 
+use std::fmt::Write as _;
 use std::io::Read;
 
 use clap::{Args as ClapArgs, ValueEnum};
 use hew_core::Ctx;
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::prime;
-use hew_core::statusline::{EpicSnapshot, StatuslineFormat, StatuslineInput, detect_phase, render};
+use hew_core::statusline::{EpicSnapshot, StatuslineFormat, StatuslineInput, detect_phase};
 use hew_core::tasks;
 
 #[derive(Debug, ClapArgs)]
@@ -49,47 +50,56 @@ pub enum ScopeArg {
 }
 
 pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
-    // Validate early — fail fast on bad width before any bd work.
     let width = args.width.clamp(1, 80);
-
-    // Drain stdin and try to parse it as the Claude Code session JSON.
-    // Empty / malformed / absent stdin must never error — the host
-    // statusLine hook treats a non-zero exit as "fall back".
     let session = read_session_json();
     let colorize = should_colorize();
+
     let claude_prefix =
         if args.bare { None } else { render_claude_prefix(session.as_ref(), colorize) };
 
-    let bd = match RealBd::discover() {
-        Ok(bd) => bd,
-        // No bd on PATH — show only the Claude prefix (if we have one).
-        Err(_) => return emit(claude_prefix.as_deref(), None),
-    };
+    // Context-usage bar — parsed from the Claude transcript stdin
+    // references. The host's previous statusline showed this; bring it
+    // back with an explicit `ctx` label so it can't be confused with
+    // hew's task counters.
+    let ctx_segment = session
+        .as_ref()
+        .and_then(|s| s.get("transcript_path").and_then(|v| v.as_str()))
+        .and_then(read_token_usage)
+        .map(|u| render_token_segment(&u, width, colorize));
 
-    let resume = match prime::resume(&bd) {
-        Ok(r) => r,
-        Err(_) => return emit(claude_prefix.as_deref(), None),
-    };
-    if !resume.project.beads_initialized {
-        return emit(claude_prefix.as_deref(), None);
+    let mut segments: Vec<String> = Vec::new();
+    if let Some(p) = claude_prefix {
+        segments.push(p);
+    }
+    if let Some(c) = ctx_segment {
+        segments.push(c);
     }
 
-    let format = pick_format(&args);
-    let input = build_input(&bd, &resume, args.scope);
-    let hew_segment = render(&input, format, width);
-    emit(claude_prefix.as_deref(), Some(&hew_segment))
+    let hew_segment = match RealBd::discover().and_then(|bd| {
+        let resume = prime::resume(&bd)?;
+        Ok((bd, resume))
+    }) {
+        Ok((bd, resume)) if resume.project.beads_initialized => {
+            let input = build_input(&bd, &resume, args.scope);
+            Some(render_hew_segment(&input, pick_format(&args), colorize))
+        }
+        _ => None,
+    };
+    if let Some(h) = hew_segment {
+        segments.push(h);
+    }
+
+    emit(&segments)
 }
 
-/// Emit the composed statusline. Either or both halves may be absent.
-/// When both are absent we exit 0 with empty stdout — the host falls
-/// back to its own default statusline gracefully.
-fn emit(claude: Option<&str>, hew: Option<&str>) -> miette::Result<()> {
-    match (claude, hew) {
-        (Some(c), Some(h)) => println!("{c} {} {h}", sep_dim()),
-        (Some(c), None) => println!("{c}"),
-        (None, Some(h)) => println!("{h}"),
-        (None, None) => {}
+/// Join non-empty segments with the dim `||` separator. Empty out =
+/// empty stdout = host falls back to default statusline.
+fn emit(segments: &[String]) -> miette::Result<()> {
+    if segments.is_empty() {
+        return Ok(());
     }
+    let sep = format!(" {} ", sep_dim());
+    println!("{}", segments.join(&sep));
     Ok(())
 }
 
@@ -140,6 +150,143 @@ fn render_claude_prefix(session: Option<&serde_json::Value>, colorize: bool) -> 
         (None, Some(c)) => Some(if colorize { format!("\x1b[32m{c}\x1b[0m") } else { c }),
         (None, None) => None,
     }
+}
+
+/// Approximate context-window tokens used, parsed from a Claude Code
+/// transcript JSONL file.
+#[derive(Debug, Clone, Copy)]
+struct TokenUsage {
+    input: u64,
+    cache_creation: u64,
+    cache_read: u64,
+}
+
+impl TokenUsage {
+    fn total(self) -> u64 {
+        self.input + self.cache_creation + self.cache_read
+    }
+}
+
+/// Walk the transcript backward and return the most-recent assistant
+/// message's `usage` block. Returns None on any IO / parse failure —
+/// the statusLine must never break because of a missing transcript.
+///
+/// Reads the entire file. Claude transcripts grow but stay well under
+/// a few MB for typical sessions; we eat the cost to keep the code
+/// simple. Tail-only optimization is the obvious follow-up.
+fn read_token_usage(path: &str) -> Option<TokenUsage> {
+    let body = std::fs::read_to_string(path).ok()?;
+    for line in body.lines().rev() {
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = v.pointer("/message/usage") else {
+            continue;
+        };
+        let pick = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        return Some(TokenUsage {
+            input: pick("input_tokens"),
+            cache_creation: pick("cache_creation_input_tokens"),
+            cache_read: pick("cache_read_input_tokens"),
+        });
+    }
+    None
+}
+
+/// Pick the context window limit. Claude Code exposes 200K standard and
+/// 1M extended; we infer from observed usage rather than parsing the
+/// model id (which doesn't always carry the `[1m]` marker).
+fn infer_context_limit(used: u64) -> u64 {
+    if used > 200_000 { 1_000_000 } else { 200_000 }
+}
+
+/// Render the `ctx ▓▓▓░░ NN%` segment. Color gradient:
+/// - green   < 60%
+/// - yellow  60–84%
+/// - red     ≥ 85%
+fn render_token_segment(usage: &TokenUsage, width: u32, colorize: bool) -> String {
+    let used = usage.total();
+    let limit = infer_context_limit(used);
+    let used_clamped = used.min(limit) as u32;
+    let limit_u32 = limit as u32;
+    let bar = hew_core::statusline::render_bar(used_clamped, limit_u32, width);
+    let pct = if limit == 0 { 0 } else { ((used as f64 / limit as f64) * 100.0).round() as u32 };
+    let color = if !colorize {
+        ""
+    } else if pct < 60 {
+        "\x1b[32m"
+    } else if pct < 85 {
+        "\x1b[33m"
+    } else {
+        "\x1b[31m"
+    };
+    let reset = if colorize { "\x1b[0m" } else { "" };
+    let label_dim_open = if colorize { "\x1b[2m" } else { "" };
+    let label_dim_close = if colorize { "\x1b[0m" } else { "" };
+    let count = humanize_tokens(used);
+    format!(
+        "{label_dim_open}ctx{label_dim_close} {color}{bar}{reset} {color}{pct}%{reset} \
+         {label_dim_open}·{label_dim_close} {color}{count}{reset}",
+    )
+}
+
+/// Render a token count as `847` / `270K` / `1.2M`.
+fn humanize_tokens(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    if n < 1_000_000 {
+        return format!("{}K", n.div_ceil(1_000));
+    }
+    let m = n as f64 / 1_000_000.0;
+    if m >= 10.0 { format!("{m:.0}M") } else { format!("{m:.1}M") }
+}
+
+/// Render the hew segment: `hew: <label> <done>/<total> (<phase>)`. No
+/// bar — the context segment owns the bar real-estate; this segment is
+/// a labeled fraction so the two graphs aren't visually competing.
+fn render_hew_segment(input: &StatuslineInput, format: StatuslineFormat, colorize: bool) -> String {
+    use hew_core::statusline::pick_scope_label;
+    let label = pick_scope_label(input);
+
+    let frac = input.current_epic.as_ref().map(|e| format!(" {}/{}", e.tasks_done, e.tasks_total));
+
+    let phase = match input.phase {
+        hew_core::statusline::Phase::Planning => "planning",
+        hew_core::statusline::Phase::Executing => "executing",
+        hew_core::statusline::Phase::Verifying => "verifying",
+    };
+
+    let label_dim_open = if colorize { "\x1b[2m" } else { "" };
+    let label_dim_close = if colorize { "\x1b[0m" } else { "" };
+    let label_color = if colorize { "\x1b[1;35m" } else { "" }; // magenta for hew
+    let reset = if colorize { "\x1b[0m" } else { "" };
+
+    let mut out = format!(
+        "{label_dim_open}hew{label_dim_close} {label_color}{label}{reset}{}",
+        frac.as_deref().unwrap_or(""),
+    );
+
+    if matches!(format, StatuslineFormat::Medium | StatuslineFormat::Full) {
+        let _ = write!(&mut out, " {label_dim_open}({phase}){label_dim_close}");
+    }
+    if matches!(format, StatuslineFormat::Full)
+        && let Some(user) = input.user.as_deref().filter(|s| !s.is_empty())
+    {
+        let _ = write!(
+            &mut out,
+            " {label_dim_open}·{label_dim_close} {user} {}/{}",
+            input.user_done, input.user_total
+        );
+    }
+    out
 }
 
 /// Shorten a filesystem path to `~/...` when it lives under $HOME.
@@ -401,6 +548,39 @@ mod tests {
         let out = condense_title(t);
         assert!(out.ends_with('…'));
         assert_eq!(out.chars().count(), LABEL_MAX_LEN);
+    }
+
+    #[test]
+    fn humanize_tokens_under_thousand_is_raw() {
+        assert_eq!(humanize_tokens(0), "0");
+        assert_eq!(humanize_tokens(999), "999");
+    }
+
+    #[test]
+    fn humanize_tokens_kilo_range_rounds_up() {
+        assert_eq!(humanize_tokens(1_000), "1K");
+        assert_eq!(humanize_tokens(40_501), "41K");
+        assert_eq!(humanize_tokens(999_999), "1000K");
+    }
+
+    #[test]
+    fn humanize_tokens_mega_range_has_one_decimal() {
+        assert_eq!(humanize_tokens(1_200_000), "1.2M");
+        assert_eq!(humanize_tokens(10_000_000), "10M");
+    }
+
+    #[test]
+    fn infer_context_limit_thresholds() {
+        assert_eq!(infer_context_limit(0), 200_000);
+        assert_eq!(infer_context_limit(200_000), 200_000);
+        assert_eq!(infer_context_limit(200_001), 1_000_000);
+        assert_eq!(infer_context_limit(900_000), 1_000_000);
+    }
+
+    #[test]
+    fn token_usage_total_sums_all_three() {
+        let u = TokenUsage { input: 100, cache_creation: 200, cache_read: 5_000 };
+        assert_eq!(u.total(), 5_300);
     }
 
     #[test]

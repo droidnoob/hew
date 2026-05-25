@@ -71,12 +71,12 @@ fn compact_format_shape() {
         .args(["statusline", "--compact"])
         .assert()
         .success()
-        // `<label> <bar> N%`
-        .stdout(contains("%"))
-        // No phase word — that's medium+.
-        .stdout(contains("executing").not())
-        .stdout(contains("planning").not())
-        .stdout(contains("verifying").not());
+        // Labeled hew segment.
+        .stdout(contains("hew"))
+        // No phase parenthetical in compact.
+        .stdout(contains("(executing)").not())
+        .stdout(contains("(planning)").not())
+        .stdout(contains("(verifying)").not());
 }
 
 #[test]
@@ -88,8 +88,8 @@ fn medium_default_includes_phase() {
         .args(["statusline"])
         .assert()
         .success()
-        // No STATUS markers present in the stub → Planning phase.
-        .stdout(contains("planning"));
+        // No STATUS markers present in the stub → Planning phase, parenthesised.
+        .stdout(contains("(planning)"));
 }
 
 #[test]
@@ -151,8 +151,8 @@ fn composes_with_claude_prefix_when_session_json_on_stdin() {
         .stdout(contains("/tmp/proj"))
         // Composed with the `||` separator.
         .stdout(contains("||"))
-        // hew segment still rendered (percent suffix).
-        .stdout(contains("%"));
+        // Hew segment present.
+        .stdout(contains("hew"));
 }
 
 #[test]
@@ -167,8 +167,39 @@ fn bare_flag_skips_claude_prefix_even_with_session_json() {
         .assert()
         .success()
         .stdout(contains("Opus").not())
-        .stdout(contains("||").not())
-        .stdout(contains("%"));
+        .stdout(contains("hew"));
+}
+
+#[test]
+fn ctx_segment_appears_when_transcript_has_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_stub(tmp.path(), STUB_PRESENT);
+
+    // Synthetic transcript: one assistant message with a usage block.
+    let transcript = tmp.path().join("transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"type":"user","message":{"content":"hi"}}
+{"type":"assistant","message":{"model":"claude-opus-4-7","usage":{"input_tokens":1,"cache_creation_input_tokens":500,"cache_read_input_tokens":40000,"output_tokens":300}}}
+"#,
+    )
+    .unwrap();
+
+    let session = format!(
+        r#"{{"model":{{"display_name":"Opus 4.7"}},"workspace":{{"current_dir":"/tmp/p"}},"transcript_path":"{}"}}"#,
+        transcript.display()
+    );
+
+    hew_in(tmp.path())
+        .env("NO_COLOR", "1")
+        .args(["statusline", "--compact"])
+        .write_stdin(session)
+        .assert()
+        .success()
+        // ctx label, percent, and a humanized token count (40501 → 41K).
+        .stdout(contains("ctx"))
+        .stdout(contains("%"))
+        .stdout(contains("41K"));
 }
 
 #[test]
