@@ -6,6 +6,80 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-26
+
+Tree-sitter symbol extraction + `hew blast`. Five-slice epic
+delivering a feature-gated pure library for diff-driven symbol
+extraction across six languages, plus a new CLI surface that
+consumes it.
+
+### Added
+
+- **`hew_core::treesitter` library** (feature `treesitter`, off by
+  default — `cargo build -p hew --features treesitter` to enable).
+  Parses Rust / Python / TypeScript / JavaScript / Go / Java sources
+  via tree-sitter and extracts `Symbol { name, kind, byte_range,
+  line_range }`. Hand-trimmed `tags.scm` queries per language follow
+  the tree-sitter org capture convention. Dedupe by `byte_range`
+  prefers `Method` > `Function` > `Class`. Error-tolerant — malformed
+  source returns Ok with partial results.
+- **`hew_core::treesitter::diff::changed_symbols`** — pure
+  line-overlap intersection between extracted symbols and a slice
+  of changed line ranges.
+- **`hew_core::diff_hunks::parse_changed_ranges`** — parser for
+  `git diff --unified=0` hunk headers. Pure line math, not feature-
+  gated. Skips zero-count pure-deletion hunks.
+- **`hew blast` subcommand** (feature `treesitter`). Walks
+  `git diff --unified=0 <base>...HEAD` and prints, per file, the
+  symbols whose definitions overlap a hunk. Different from
+  `git diff` — answers "which functions / classes actually changed,"
+  not "which lines moved." Three input modes:
+  - default — scan everything in the diff
+  - positional file args — intersect with the diff set
+  - `--no-diff <files>...` — skip git; emit every symbol in each
+    file (combines with `--stdin` for `git ls-files | hew blast …`)
+  - `--path <substr>` (repeatable) substring filter
+  - `--base <ref>` override
+  - `--json` for machine-readable output
+- **`/hew:blast` slash command + `hew-blast` optional skill body.**
+  Opt-in via `hew config set optional-skills.blast true`.
+- **`craft.symbol_trace` config flag.** When true (and the binary
+  was built with `--features treesitter`), `hew task close` auto-
+  appends a `symbols changed (blast vs <base>): …` block to the
+  task's notes via `bd update --append-notes`. Permanent semantic
+  trail in the bd graph. Silent best-effort; off under default
+  builds. Default `false`.
+- **`ReviewBundle.changed_symbols`** field on `hew review bundle
+  --json`. Per-symbol slices of the diff with `source_slice` so the
+  review skill body can read just the changed regions instead of
+  whole files. Populated when treesitter is enabled; absent under
+  default builds (`serde(skip_serializing_if = "Vec::is_empty")`).
+- **Statusline 1M context fix.** The model id in the transcript
+  reliably carries a `[1m]` suffix on the extended window; the
+  statusline now uses that as the authoritative ceiling instead of
+  the observed-usage heuristic.
+
+### Tests
+
+- 12 unit tests for diff intersection (`treesitter::diff`).
+- 30 unit tests for per-language extraction
+  (`treesitter::grammars`).
+- 7 end-to-end integration tests with per-language fixtures
+  (`hew-core/tests/treesitter_integration.rs`) + one non-gating
+  perf signal (`HEW_TS_BENCH=1` enforces <5ms warm; off otherwise
+  prints).
+- 7 hunk-header parser tests (`diff_hunks`).
+- Statusline `[1m]`-context-suffix tests (3 new).
+
+### Internal
+
+- Three `GOTCHA:test-counts-drift` counts bumped: skills 20 → 21,
+  slashes 39 → 40, install-claude file count 61 → 63, install-codex
+  file count 41 → 43.
+- `hew_core::blast::compute_blast` / `resolve_base` / etc. accept
+  `&dyn GitClient` so library callers (including the review bundle
+  enrichment) can drive the pipeline with a mock or owned client.
+
 ## [0.7.1] — 2026-05-25
 
 Statusline fixes — `hew statusline` was overwriting Claude Code's
