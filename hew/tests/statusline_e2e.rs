@@ -134,6 +134,44 @@ fn tolerates_malformed_json_on_stdin() {
 }
 
 #[test]
+fn composes_with_claude_prefix_when_session_json_on_stdin() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_stub(tmp.path(), STUB_PRESENT);
+
+    hew_in(tmp.path())
+        .env("NO_COLOR", "1")
+        .args(["statusline", "--compact"])
+        .write_stdin(
+            r#"{"model":{"display_name":"Opus 4.7"},"workspace":{"current_dir":"/tmp/proj"}}"#,
+        )
+        .assert()
+        .success()
+        // Claude prefix present.
+        .stdout(contains("Opus 4.7"))
+        .stdout(contains("/tmp/proj"))
+        // Composed with the `||` separator.
+        .stdout(contains("||"))
+        // hew segment still rendered (percent suffix).
+        .stdout(contains("%"));
+}
+
+#[test]
+fn bare_flag_skips_claude_prefix_even_with_session_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_stub(tmp.path(), STUB_PRESENT);
+
+    hew_in(tmp.path())
+        .env("NO_COLOR", "1")
+        .args(["statusline", "--compact", "--bare"])
+        .write_stdin(r#"{"model":{"display_name":"Opus"},"workspace":{"current_dir":"/tmp/x"}}"#)
+        .assert()
+        .success()
+        .stdout(contains("Opus").not())
+        .stdout(contains("||").not())
+        .stdout(contains("%"));
+}
+
+#[test]
 fn width_is_clamped_not_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     write_stub(tmp.path(), STUB_PRESENT);
