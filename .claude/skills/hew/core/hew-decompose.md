@@ -1,4 +1,4 @@
-<!-- hew:version=0.8.0 -->
+<!-- hew:version=0.8.1 -->
 ---
 name: hew-decompose
 category: core

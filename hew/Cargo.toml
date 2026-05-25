@@ -13,10 +13,9 @@ name = "hew"
 path = "src/main.rs"
 
 [features]
-default = []
-# Forward to hew-core's treesitter feature so the binary picks up the
-# `hew blast` subcommand. Off by default — keeps cold build time + the
-# 4-way CI matrix unchanged.
+# treesitter is on by default so the shipped binary includes
+# `hew blast`. Lean build: `cargo build --no-default-features`.
+default = ["treesitter"]
 treesitter = ["hew-core/treesitter"]
 
 [dependencies]
