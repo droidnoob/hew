@@ -10,6 +10,7 @@ pub mod compact;
 pub mod config;
 pub mod craft;
 pub mod ctx;
+pub mod diff_hunks;
 pub mod doctor;
 pub mod error;
 pub mod git;
