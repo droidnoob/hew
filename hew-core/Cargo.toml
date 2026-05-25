@@ -30,6 +30,7 @@ tree-sitter-typescript = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-go = { workspace = true, optional = true }
 tree-sitter-java = { workspace = true, optional = true }
+streaming-iterator = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -41,6 +42,7 @@ treesitter = [
     "dep:tree-sitter-javascript",
     "dep:tree-sitter-go",
     "dep:tree-sitter-java",
+    "dep:streaming-iterator",
 ]
 
 [lib]

@@ -19,13 +19,15 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "treesitter")]
 pub mod grammars;
 
+#[cfg(feature = "treesitter")]
+pub use grammars::{detect_language, extract_symbols};
+
 pub mod diff;
 
 /// V1 supported languages. Exhaustive on purpose — adding a language is a
 /// deliberate code change (DECISION:treesitter-v1-langs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub enum Language {
     Rust,
     Python,
@@ -63,19 +65,20 @@ pub struct Symbol {
     pub line_range: Range<u32>,
 }
 
-/// Failure modes for tree-sitter operations. Variants will grow as TS.3
-/// lands per-language extractors.
+/// Failure modes for tree-sitter operations.
+///
+/// `LanguageNotSupported` is currently unreachable via the `Language` enum
+/// (all six variants are wired), but kept for forward-compat: extension-
+/// based callers that pre-resolve `Option<Language>` may surface it when
+/// adding new langs.
 #[derive(Debug, thiserror::Error)]
-#[allow(dead_code)]
 pub enum TreesitterError {
-    #[error("language not supported: {0:?}")]
-    UnsupportedLanguage(Language),
-    #[error("parse failed for {language:?}: {reason}")]
-    ParseFailed { language: Language, reason: String },
-    #[error("query compilation failed for {language:?}: {reason}")]
-    QueryFailed { language: Language, reason: String },
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("language not supported")]
+    LanguageNotSupported,
+    #[error("parse failed: {message}")]
+    ParseFailed { message: String },
+    #[error("query compilation failed: {message}")]
+    QueryFailed { message: String },
 }
 
 #[cfg(test)]
