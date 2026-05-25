@@ -142,4 +142,10 @@ pub enum Command {
 
     /// Pick the top ready task. Claims by default; `--no-claim` to peek.
     Next(crate::commands::next::NextArgs),
+
+    /// Emit a one-line agent statusline summarizing project state.
+    /// Consumed by Claude Code's `statusLine` hook. Stdout is the line
+    /// itself; errors and noise go to stderr. Exits 0 with empty stdout
+    /// when bd isn't initialized so the host falls back gracefully.
+    Statusline(crate::commands::statusline::Args),
 }
