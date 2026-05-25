@@ -52,3 +52,7 @@ path = "src/lib.rs"
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
+
+[[example]]
+name = "treesitter_scan"
+required-features = ["treesitter"]
