@@ -153,16 +153,19 @@ fn render_claude_prefix(session: Option<&serde_json::Value>, colorize: bool) -> 
 }
 
 /// Approximate context-window tokens used, parsed from a Claude Code
-/// transcript JSONL file.
-#[derive(Debug, Clone, Copy)]
+/// transcript JSONL file. `model` is the `message.model` string when
+/// present — used to detect the `[1m]` suffix that signals an extended
+/// 1M-token context window.
+#[derive(Debug, Clone)]
 struct TokenUsage {
     input: u64,
     cache_creation: u64,
     cache_read: u64,
+    model: Option<String>,
 }
 
 impl TokenUsage {
-    fn total(self) -> u64 {
+    fn total(&self) -> u64 {
         self.input + self.cache_creation + self.cache_read
     }
 }
@@ -191,19 +194,30 @@ fn read_token_usage(path: &str) -> Option<TokenUsage> {
             continue;
         };
         let pick = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let model = v.pointer("/message/model").and_then(|m| m.as_str()).map(|s| s.to_string());
         return Some(TokenUsage {
             input: pick("input_tokens"),
             cache_creation: pick("cache_creation_input_tokens"),
             cache_read: pick("cache_read_input_tokens"),
+            model,
         });
     }
     None
 }
 
 /// Pick the context window limit. Claude Code exposes 200K standard and
-/// 1M extended; we infer from observed usage rather than parsing the
-/// model id (which doesn't always carry the `[1m]` marker).
-fn infer_context_limit(used: u64) -> u64 {
+/// 1M extended.
+///
+/// The model id in the transcript reliably carries a `[1m]` suffix on the
+/// extended window (confirmed 2026-05-25 against Opus 4.6 / 4.7 with the
+/// 1M-context selector). When present, that's authoritative and we use
+/// 1_000_000 directly. Otherwise we fall back to the observed-usage
+/// heuristic: usage above 200K can only have come from the extended
+/// window, so promote the ceiling.
+fn infer_context_limit(used: u64, model: Option<&str>) -> u64 {
+    if model.is_some_and(|m| m.contains("[1m]")) {
+        return 1_000_000;
+    }
     if used > 200_000 { 1_000_000 } else { 200_000 }
 }
 
@@ -213,7 +227,7 @@ fn infer_context_limit(used: u64) -> u64 {
 /// - red     ≥ 85%
 fn render_token_segment(usage: &TokenUsage, width: u32, colorize: bool) -> String {
     let used = usage.total();
-    let limit = infer_context_limit(used);
+    let limit = infer_context_limit(used, usage.model.as_deref());
     let used_clamped = used.min(limit) as u32;
     let limit_u32 = limit as u32;
     let bar = hew_core::statusline::render_bar(used_clamped, limit_u32, width);
@@ -570,16 +584,30 @@ mod tests {
     }
 
     #[test]
-    fn infer_context_limit_thresholds() {
-        assert_eq!(infer_context_limit(0), 200_000);
-        assert_eq!(infer_context_limit(200_000), 200_000);
-        assert_eq!(infer_context_limit(200_001), 1_000_000);
-        assert_eq!(infer_context_limit(900_000), 1_000_000);
+    fn infer_context_limit_thresholds_no_model() {
+        assert_eq!(infer_context_limit(0, None), 200_000);
+        assert_eq!(infer_context_limit(200_000, None), 200_000);
+        assert_eq!(infer_context_limit(200_001, None), 1_000_000);
+        assert_eq!(infer_context_limit(900_000, None), 1_000_000);
+    }
+
+    #[test]
+    fn infer_context_limit_1m_suffix_wins_at_low_usage() {
+        // The [1m] suffix is authoritative — even at 45K we should treat
+        // the ceiling as 1M, not 200K.
+        assert_eq!(infer_context_limit(45_000, Some("claude-opus-4-7[1m]")), 1_000_000);
+        assert_eq!(infer_context_limit(0, Some("claude-opus-4-6[1m]")), 1_000_000);
+    }
+
+    #[test]
+    fn infer_context_limit_no_suffix_stays_200k() {
+        assert_eq!(infer_context_limit(45_000, Some("claude-opus-4-7")), 200_000);
+        assert_eq!(infer_context_limit(45_000, Some("claude-sonnet-4-6")), 200_000);
     }
 
     #[test]
     fn token_usage_total_sums_all_three() {
-        let u = TokenUsage { input: 100, cache_creation: 200, cache_read: 5_000 };
+        let u = TokenUsage { input: 100, cache_creation: 200, cache_read: 5_000, model: None };
         assert_eq!(u.total(), 5_300);
     }
 
