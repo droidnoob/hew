@@ -106,6 +106,30 @@ pub struct ReviewBundle {
     pub epic: Option<EpicMeta>,
     /// The prior `STATUS:review:<ts>` marker, if any.
     pub last_review_at: Option<String>,
+    /// Per-symbol slices of the diff, only populated when the binary
+    /// was built with `--features treesitter`. Skill bodies should
+    /// read these slices first and only widen to the whole file when
+    /// the context they carry is insufficient. Empty Vec when the
+    /// feature is off OR the treesitter pipeline failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_symbols: Vec<ChangedSymbolForReviewRepr>,
+}
+
+/// Bundle-side mirror of `hew_core::blast::ChangedSymbolForReview`.
+/// We re-declare here (rather than re-exporting) so the review crate's
+/// JSON schema is stable across feature-flag combinations: the type
+/// always exists, even when treesitter isn't compiled in.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChangedSymbolForReviewRepr {
+    pub file: String,
+    pub language: String,
+    pub name: String,
+    /// SymbolKind serialized as a kebab-case string (matches the
+    /// treesitter enum's serde shape).
+    pub kind: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub source_slice: String,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -132,6 +156,7 @@ pub fn bundle(bd: &dyn BdClient, git: &dyn GitClient, scope: ReviewScope) -> Res
 
     let (diff_base, diff) = resolve_diff(git, &scope, anchor.as_deref())?;
     let memories = collect_memories(bd)?;
+    let changed_symbols = collect_changed_symbols(git, diff_base.as_deref());
 
     Ok(ReviewBundle {
         scope: ReviewScopeRepr::from(&scope),
@@ -142,7 +167,39 @@ pub fn bundle(bd: &dyn BdClient, git: &dyn GitClient, scope: ReviewScope) -> Res
         memories,
         epic: epic_meta,
         last_review_at,
+        changed_symbols,
     })
+}
+
+/// Feature-gated helper that calls into `hew_core::blast` when
+/// treesitter is built in. Returns an empty Vec otherwise — the field
+/// `serde(skip_serializing_if = "Vec::is_empty")` keeps the JSON shape
+/// identical to pre-BL.4 bundles for default builds.
+#[cfg(feature = "treesitter")]
+fn collect_changed_symbols(
+    git: &dyn GitClient,
+    diff_base: Option<&str>,
+) -> Vec<ChangedSymbolForReviewRepr> {
+    crate::blast::collect_for_review(git, diff_base)
+        .into_iter()
+        .map(|c| ChangedSymbolForReviewRepr {
+            file: c.file,
+            language: c.language,
+            name: c.name,
+            kind: format!("{:?}", c.kind).to_lowercase(),
+            line_start: c.line_start,
+            line_end: c.line_end,
+            source_slice: c.source_slice,
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "treesitter"))]
+fn collect_changed_symbols(
+    _git: &dyn GitClient,
+    _diff_base: Option<&str>,
+) -> Vec<ChangedSymbolForReviewRepr> {
+    Vec::new()
 }
 
 /// Read the most recent `STATUS:review:<ts>` memory, if any. Returns the
@@ -424,7 +481,18 @@ mod tests {
             let body = match first.as_ref() {
                 "rev-list" => self.rev_list_response.clone(),
                 "diff" => self.diff_response.clone(),
-                other => panic!("mock git: unhandled `{other}`"),
+                // Anything else (e.g. `rev-parse` from the BL.4
+                // changed-symbols enrichment under --features
+                // treesitter) returns a non-zero exit. `bundle()`
+                // treats that as "no symbols to enrich" and proceeds
+                // with the legacy bundle shape, which is the
+                // behavior these tests assert.
+                other => {
+                    return Err(HewError::GitNonZero {
+                        code: -1,
+                        stderr: format!("mock git: unhandled `{other}`"),
+                    });
+                }
             };
             Ok(GitOutput { stdout: body, stderr: String::new() })
         }

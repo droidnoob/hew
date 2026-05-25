@@ -57,6 +57,16 @@ short summary, not the full payload) with:
   constraint-bearing memories you must check the diff against.
 - `epic` — populated when scope is `Epic`: id, title, body, child_count.
 - `last_review_at` — prior `STATUS:review:<ts>` marker if any.
+- `changed_symbols` — when the binary was built with `--features
+  treesitter`, this is a per-symbol slice of the diff:
+  `{file, language, name, kind, line_start, line_end, source_slice}`.
+  `source_slice` is the literal bytes of the symbol's definition.
+  **Read these slices first.** They give you the function bodies that
+  actually changed without re-reading whole files; widen to the full
+  file via the `diff` field only when the slice's context is
+  insufficient (call-site analysis, surrounding fields, etc.).
+  Absent under default builds — fall back to scanning the diff
+  directly.
 
 The bundle is the entire input. Don't grep the codebase for more
 context until you've used what's in the bundle — you'll only catch

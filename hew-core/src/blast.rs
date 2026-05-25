@@ -19,7 +19,9 @@ use serde::Serialize;
 use crate::diff_hunks::parse_changed_ranges;
 use crate::error::{HewError, Result};
 use crate::git::{GitClient, RealGit};
-use crate::treesitter::{Symbol, detect_language, diff::changed_symbols, extract_symbols};
+use crate::treesitter::{
+    Symbol, SymbolKind, detect_language, diff::changed_symbols, extract_symbols,
+};
 
 /// A single file's symbol-level changelog entry.
 #[derive(Debug, Clone, Serialize)]
@@ -37,12 +39,19 @@ pub struct FileEntry {
 /// overlapping symbols are silently skipped.
 pub fn compute_blast(base: Option<&str>) -> Result<Vec<FileEntry>> {
     let git = RealGit::discover()?;
-    let base = resolve_base(&git, base)?;
-    let files = diff_file_set(&git, &base)?;
+    compute_blast_with(&git, base)
+}
+
+/// Same as [`compute_blast`] but accepts an externally-managed
+/// [`GitClient`]. Used by callers that already hold one (e.g.
+/// `hew_core::review::bundle` threading a mock through tests).
+pub fn compute_blast_with(git: &dyn GitClient, base: Option<&str>) -> Result<Vec<FileEntry>> {
+    let base = resolve_base(git, base)?;
+    let files = diff_file_set(git, &base)?;
 
     let mut out = Vec::new();
     for file in &files {
-        let ranges = match per_file_diff_ranges(&git, &base, file) {
+        let ranges = match per_file_diff_ranges(git, &base, file) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -54,6 +63,51 @@ pub fn compute_blast(base: Option<&str>) -> Result<Vec<FileEntry>> {
         }
     }
     Ok(out)
+}
+
+/// A single changed symbol with its source bytes attached. The shape
+/// `hew_core::review::bundle` ships to the review skill so the agent
+/// can read just the changed regions instead of whole files.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangedSymbolForReview {
+    pub file: String,
+    pub language: String,
+    pub name: String,
+    pub kind: SymbolKind,
+    pub line_start: u32,
+    pub line_end: u32,
+    /// The literal bytes of the symbol's definition, sliced from the
+    /// file. May be empty if the byte_range is degenerate or the file
+    /// can't be read at bundle time.
+    pub source_slice: String,
+}
+
+/// Like [`compute_blast_with`] but flattens results into one entry per
+/// changed symbol, attaching the source slice for each. Returns an
+/// empty Vec on any error so a misbehaving git can't break the review
+/// bundle — the caller still has the full diff as a fallback.
+pub fn collect_for_review(git: &dyn GitClient, base: Option<&str>) -> Vec<ChangedSymbolForReview> {
+    let entries = match compute_blast_with(git, base) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let source = std::fs::read_to_string(&entry.path).unwrap_or_default();
+        for sym in entry.symbols {
+            let slice = source.get(sym.byte_range.clone()).unwrap_or("").to_string();
+            out.push(ChangedSymbolForReview {
+                file: entry.path.clone(),
+                language: entry.language.clone(),
+                name: sym.name,
+                kind: sym.kind,
+                line_start: sym.line_range.start,
+                line_end: sym.line_range.end.saturating_sub(1),
+                source_slice: slice,
+            });
+        }
+    }
+    out
 }
 
 /// Extract symbols from a single file. If `ranges` is `None`, returns
@@ -81,7 +135,7 @@ pub fn scan_file(file: &Path, ranges: Option<&[std::ops::Range<u32>]>) -> Option
 /// Resolve the base ref. Honors an explicit override; otherwise probes
 /// `main`, then `master`. Errors with [`HewError::GitNonZero`] if
 /// neither exists.
-pub fn resolve_base(git: &RealGit, given: Option<&str>) -> Result<String> {
+pub fn resolve_base(git: &dyn GitClient, given: Option<&str>) -> Result<String> {
     if let Some(g) = given {
         return Ok(g.to_string());
     }
@@ -99,7 +153,7 @@ pub fn resolve_base(git: &RealGit, given: Option<&str>) -> Result<String> {
 }
 
 /// The full list of files in `git diff --name-only <base>...HEAD`.
-pub fn diff_file_set(git: &RealGit, base: &str) -> Result<Vec<PathBuf>> {
+pub fn diff_file_set(git: &dyn GitClient, base: &str) -> Result<Vec<PathBuf>> {
     let out = git.run_raw(&[
         OsStr::new("diff"),
         OsStr::new("--name-only"),
@@ -111,7 +165,7 @@ pub fn diff_file_set(git: &RealGit, base: &str) -> Result<Vec<PathBuf>> {
 /// Parse the `+` side of every hunk header in `git diff --unified=0
 /// <base>...HEAD -- <file>`.
 pub fn per_file_diff_ranges(
-    git: &RealGit,
+    git: &dyn GitClient,
     base: &str,
     file: &Path,
 ) -> Result<Vec<std::ops::Range<u32>>> {
