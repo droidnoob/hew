@@ -1,4 +1,4 @@
-<!-- hew:version=0.6.0 -->
+<!-- hew:version=0.6.1 -->
 ---
 name: hew-scan
 category: brownfield

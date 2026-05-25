@@ -6,6 +6,58 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-25
+
+Fixes **GitHub #40** — `hew prime resume` surfacing a stale
+`CHECKPOINT:` instead of the newest one. Root cause was on the
+*write* side: the `hew-checkpoint` skill body told the agent to
+roll the row by hand with `hew remember --raw "CHECKPOINT:…" --key
+…`, which made it easy to produce a body without an ISO timestamp
+directly after the `CHECKPOINT:` prefix. Such bodies sorted
+lexicographically below well-formed newer entries in
+`prime::latest_checkpoint`, silently shadowing them.
+
+### Added
+
+- **`hew checkpoint "<body>"` subcommand.** One-shot helper that
+  auto-prepends `CHECKPOINT:<ISO-8601-now> — `, auto-generates a
+  `checkpoint-<sanitised-iso>` key, and writes through the same path
+  as `hew remember`. Supports `--key` override, `--timestamp`
+  override (for back-dating / tests), and `--related` / `--related-task`
+  for emitting `LINK:` sidecars in the same call. Body shapes already
+  containing a well-formed `CHECKPOINT:<ISO>` prefix pass through
+  verbatim; malformed prefixes are rewritten to the canonical shape.
+- **`hew_core::checkpoint`** — pure `build_checkpoint_key` /
+  `build_checkpoint_body` helpers covering the three input shapes
+  (no prefix, broken prefix, well-formed). Eight unit tests pin the
+  rewrite behaviour, including the exact bug shape from #40.
+- **`hew_core::time`** — promoted the ISO-8601 formatter (previously
+  duplicated in `hew/src/commands/compact.rs`) into a shared module
+  with a `looks_like_iso_date` recogniser used by both the new
+  checkpoint helper and the prime resume hardening.
+
+### Changed
+
+- **`hew_core::prime::latest_checkpoint`** now treats a non-ISO first
+  token as "no timestamp" (instead of using whatever lex-sorts there).
+  A malformed legacy checkpoint can no longer shadow a newer
+  well-formed one in `hew prime resume`. Regression test pins the
+  exact bug shape.
+- **`skills/core/hew-checkpoint.md`** rewritten to lead with `hew
+  checkpoint "<body>"`. The previous `hew remember --raw
+  "CHECKPOINT:…" --key …` instructions (and the worked example using
+  them) are gone; an explicit "do not hand-roll the shape" anti-pattern
+  is now called out.
+- **`commands/checkpoint.md`** mirrors the skill rewrite.
+
+### Fixed
+
+- **GitHub #40** — `hew prime resume` surfaces stale CHECKPOINT
+  instead of newest. Closed by the combination of the new
+  `hew checkpoint` subcommand (write-side fix), the
+  `latest_checkpoint` recogniser tightening (defense-in-depth), and
+  the skill-body rewrite (no longer recommends the foot-gunny path).
+
 ## [0.6.0] — 2026-05-22
 
 Ships the **Memory Links epic** end-to-end — sidecar `LINK:` edges
