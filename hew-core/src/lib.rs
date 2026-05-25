@@ -5,6 +5,7 @@
 
 pub mod bd;
 pub mod branch;
+pub mod checkpoint;
 pub mod compact;
 pub mod config;
 pub mod craft;
@@ -26,6 +27,7 @@ pub mod status;
 pub mod tasks;
 #[cfg(unix)]
 pub mod testing;
+pub mod time;
 pub mod tty;
 
 pub use ctx::{Ctx, OutputMode};

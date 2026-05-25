@@ -317,14 +317,26 @@ pub fn build(client: &dyn BdClient, skill_name: &str) -> Result<PrimeOutput> {
 /// Find the most-recent `CHECKPOINT:` memory by parsing the ISO-8601
 /// timestamp out of the value prefix. ISO-8601 strings sort
 /// lexicographically, so a string max gives chronological max.
+///
+/// Defense-in-depth: a body whose first whitespace-token doesn't look
+/// like an ISO date is treated as having no timestamp (sorts last),
+/// so a malformed checkpoint (e.g. `CHECKPOINT:practice-svc — …`
+/// from GitHub #40) can't shadow a properly-shaped newer one. The
+/// canonical fix is on the write side — `hew checkpoint` always
+/// emits the right shape — but the resume path stays robust either
+/// way.
 pub fn latest_checkpoint(memories: &BTreeMap<String, String>) -> Option<Checkpoint> {
     memories
         .iter()
         .filter(|(_, v)| v.trim_start().starts_with("CHECKPOINT:"))
         .map(|(k, v)| {
             let rest = v.trim_start().strip_prefix("CHECKPOINT:").unwrap_or("");
-            let timestamp =
-                rest.split_whitespace().next().filter(|s| !s.is_empty()).map(|s| s.to_string());
+            let timestamp = rest
+                .split_whitespace()
+                .next()
+                .filter(|s| !s.is_empty())
+                .filter(|s| crate::time::looks_like_iso_date(s))
+                .map(|s| s.to_string());
             Checkpoint { key: k.clone(), timestamp, body: v.clone() }
         })
         .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
@@ -942,6 +954,23 @@ mod tests {
         let m = map(&[("ck", "CHECKPOINT:")]);
         let c = latest_checkpoint(&m).expect("checkpoint present");
         assert!(c.timestamp.is_none());
+    }
+
+    // Regression for GitHub issue #40: a malformed CHECKPOINT body
+    // (no ISO timestamp after the prefix) was sorting *above* a
+    // properly-formed newer one, because its non-ISO first token
+    // ("practice-svc-l3.2-checkpoint-…") lex-sorted with whatever
+    // shape was present. The recogniser now treats non-ISO tokens
+    // as "no timestamp" so the malformed entry sorts last.
+    #[test]
+    fn latest_checkpoint_ignores_non_iso_first_token() {
+        let m = map(&[
+            ("malformed", "CHECKPOINT:practice-svc-l3.2 — newer in wall-clock but mis-shaped"),
+            ("good", "CHECKPOINT:2026-05-20T08:00:00Z — properly shaped"),
+        ]);
+        let c = latest_checkpoint(&m).expect("checkpoint present");
+        assert_eq!(c.key, "good", "well-formed checkpoint must beat malformed one");
+        assert_eq!(c.timestamp.as_deref(), Some("2026-05-20T08:00:00Z"));
     }
 
     fn instr(c: &ConfigInstructions) -> String {

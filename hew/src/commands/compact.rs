@@ -18,6 +18,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::compact::{self, CompactPlan};
 use hew_core::config;
+#[cfg(test)]
+use hew_core::time::iso_from_unix;
+use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, OutputMode};
 
 #[derive(Debug, ClapArgs)]
@@ -219,42 +222,6 @@ fn run_list_prefixes(ctx: &Ctx) -> miette::Result<()> {
         println!("{} memories across {} prefixes", total, counts.len());
     }
     Ok(())
-}
-
-/// Format `SystemTime::now()` as `YYYY-MM-DDTHH:MM:SSZ`. Avoids
-/// pulling chrono into the dep tree for a single timestamp emit.
-fn iso_now_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    iso_from_unix(secs)
-}
-
-/// Convert a Unix timestamp (seconds since epoch) into an ISO-8601
-/// UTC string. Algorithm: civil_from_days from Howard Hinnant's
-/// public-domain date-calendar code, restated for the Gregorian
-/// proleptic calendar — handles every year hew will plausibly see.
-fn iso_from_unix(secs: i64) -> String {
-    let days = secs.div_euclid(86_400);
-    let sod = secs.rem_euclid(86_400);
-    let hour = sod / 3600;
-    let minute = (sod % 3600) / 60;
-    let second = sod % 60;
-
-    // Shift so day 0 is 0000-03-01 (Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146_096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y_shift = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y_shift + 1 } else { y_shift };
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Group memories by their top-level prefix (everything before the

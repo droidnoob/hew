@@ -119,6 +119,12 @@ pub enum Command {
     /// Write a memory with an enforced type allowlist (or --raw to bypass).
     Remember(crate::commands::remember::Args),
 
+    /// Write a canonical `CHECKPOINT:<ISO> — <body>` memory in one shot.
+    /// Auto-generates the timestamp + key so `hew prime resume` always
+    /// finds the newest. Replaces the foot-gunny `hew remember --raw
+    /// "CHECKPOINT:…" --key …` flow the skill used to recommend.
+    Checkpoint(crate::commands::checkpoint::Args),
+
     /// Forget a memory by key. Alias for `hew memories --forget <KEY>`;
     /// later epic work (ML.6 cascade) will extend this surface with
     /// automatic purge of outbound LINK: rows.

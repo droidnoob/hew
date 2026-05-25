@@ -4,6 +4,7 @@ use crate::cli::{Cli, Command};
 
 pub mod branch;
 pub mod check;
+pub mod checkpoint;
 pub mod compact;
 pub mod completions;
 pub mod config;
@@ -51,6 +52,7 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Task(a) => task::run(&ctx, a),
         Command::Dep(a) => dep::run(&ctx, a),
         Command::Remember(a) => remember::run(&ctx, a),
+        Command::Checkpoint(a) => checkpoint::run(&ctx, a),
         Command::Forget(a) => forget::run(&ctx, a),
         Command::Epic(a) => epic::run(&ctx, a),
         Command::Compact(a) => compact::run(&ctx, a),
