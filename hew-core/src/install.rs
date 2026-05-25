@@ -503,6 +503,53 @@ fn remove_claude_session_hook(claude_dir: &Path) -> Result<Option<PathBuf>> {
 /// uninstall stay symmetric.
 const STATUSLINE_COMMAND: &str = "hew statusline";
 
+/// Self-heal for users who installed hew before the statusLine block
+/// shipped. Detects a hew-managed Claude install (settings.json with a
+/// `hew_managed: true` SessionStart entry) that's missing the
+/// `statusLine` key, and inserts it. Called from [`crate::prime::resume`]
+/// on every SessionStart so existing users pick up the new wiring at
+/// their next /clear or shell — no `hew update` required.
+///
+/// Returns `Ok(true)` when a migration write happened. Silent / fail-
+/// closed on any unexpected JSON shape: the SessionStart hook must
+/// never break because of a self-heal misfire.
+pub fn auto_migrate_claude_statusline(root: &Path) -> Result<bool> {
+    let claude_dir = root.join(".claude");
+    let settings = claude_dir.join("settings.json");
+    if !settings.exists() {
+        return Ok(false);
+    }
+    let body = fs::read_to_string(&settings)?;
+    if body.trim().is_empty() {
+        return Ok(false);
+    }
+    let value: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let Some(root_obj) = value.as_object() else {
+        return Ok(false);
+    };
+
+    let has_hew_hook = root_obj
+        .get("hooks")
+        .and_then(|h| h.get("SessionStart"))
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().any(|e| e.get(HEW_MANAGED_FLAG).and_then(|f| f.as_bool()).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if !has_hew_hook {
+        return Ok(false);
+    }
+    if root_obj.contains_key("statusLine") {
+        return Ok(false);
+    }
+
+    upsert_claude_statusline(&claude_dir)?;
+    Ok(true)
+}
+
 /// Inject (or replace) the hew-managed `statusLine` block at the top of
 /// `<claude_dir>/settings.json`. If the user has a non-hew-managed
 /// `statusLine` already (no `hew_managed: true` discriminator), it's
@@ -1525,6 +1572,90 @@ mod tests {
             let v = parse_settings(&settings);
             assert!(v.get("statusLine").is_none(), "hew-managed statusLine removed");
         }
+    }
+
+    #[test]
+    fn auto_migrate_adds_statusline_to_pre_existing_hew_install() {
+        // Simulate a pre-SL.3 install: hew_managed SessionStart hook
+        // present, but no `statusLine` key.
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "hooks": {
+                "SessionStart": [
+                    { "hew_managed": true, "matcher": "startup", "hooks": [
+                        { "type": "command", "command": "hew prime resume" }
+                    ]}
+                ]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        let migrated = auto_migrate_claude_statusline(tmp.path()).unwrap();
+        assert!(migrated, "should have migrated");
+        let v = parse_settings(&claude.join("settings.json"));
+        assert_eq!(v["statusLine"]["command"], "hew statusline");
+        assert_eq!(v["statusLine"]["hew_managed"], true);
+    }
+
+    #[test]
+    fn auto_migrate_is_idempotent_when_statusline_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        install(Runtime::Claude, tmp.path()).unwrap();
+        let settings = tmp.path().join(".claude").join("settings.json");
+        let before = fs::read_to_string(&settings).unwrap();
+
+        let migrated = auto_migrate_claude_statusline(tmp.path()).unwrap();
+        assert!(!migrated, "no migration needed");
+        let after = fs::read_to_string(&settings).unwrap();
+        assert_eq!(before, after, "file unchanged");
+    }
+
+    #[test]
+    fn auto_migrate_skips_when_no_hew_hook() {
+        // User has settings.json but no hew SessionStart hook — not a
+        // hew install. Migration must NOT inject anything.
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        let pre = serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [
+                    { "matcher": "startup", "hooks": [
+                        { "type": "command", "command": "echo user-only" }
+                    ]}
+                ]
+            }
+        });
+        fs::write(claude.join("settings.json"), serde_json::to_string_pretty(&pre).unwrap())
+            .unwrap();
+
+        let migrated = auto_migrate_claude_statusline(tmp.path()).unwrap();
+        assert!(!migrated);
+        let v = parse_settings(&claude.join("settings.json"));
+        assert!(v.get("statusLine").is_none(), "user content untouched");
+    }
+
+    #[test]
+    fn auto_migrate_skips_when_no_settings_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let migrated = auto_migrate_claude_statusline(tmp.path()).unwrap();
+        assert!(!migrated);
+    }
+
+    #[test]
+    fn auto_migrate_skips_on_malformed_json() {
+        // Self-heal must be fail-closed: never break the SessionStart
+        // hook because of a malformed settings.json.
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        fs::create_dir_all(&claude).unwrap();
+        fs::write(claude.join("settings.json"), "{ not json at all").unwrap();
+        let migrated = auto_migrate_claude_statusline(tmp.path()).unwrap();
+        assert!(!migrated);
     }
 
     #[test]

@@ -111,6 +111,8 @@ Width is clamp `[1, 80]`; stdin from Claude Code is drained tolerantly; bd-not-i
 
 Other runtimes (Cursor / Codex / Windsurf) wire the command through their own statusline configs — point them at `hew statusline` directly.
 
+Existing Claude installs that predate the statusLine block self-heal on the next session: `hew prime resume` (the SessionStart hook) calls `install::auto_migrate_claude_statusline`, which adds the block iff the file shows a hew-managed SessionStart hook and no `statusLine` key yet. Silent / best-effort by design — the hook must never break because of a self-heal misfire.
+
 ---
 
 ## Hard-won gotchas
