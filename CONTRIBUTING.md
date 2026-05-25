@@ -148,6 +148,12 @@ captures — useful to read those too (`bd memories`).
 3. The drift test (`hew-core/tests/skills.rs`) will fail if the file
    exists but the registry hasn't been updated, and vice versa.
 
+If you're touching install plumbing (e.g. wiring something else into
+`.claude/settings.json` alongside the SessionStart hook, allowlist, and
+statusLine block), follow the same `hew_managed: true` discriminator
+pattern so re-install stays idempotent and uninstall stays symmetric.
+Add the matching install/uninstall test pair in `hew-core::install::tests`.
+
 ## Releases
 
 Releases are cut by tagging `vX.Y.Z` on `main`. Before the first real

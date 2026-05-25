@@ -97,6 +97,20 @@ If you're picking up where someone left off, start with `hew prime resume` (whic
 2. Register in `hew_core::skills::CORE/BROWNFIELD/OPTIONAL` or `hew_core::slash::ALL`.
 3. **Bump three hardcoded test counts** (see `GOTCHA:test-counts-drift` below). The drift tests will fail otherwise.
 
+### Statusline
+
+`hew statusline` emits a one-line agent statusline (scope label, progress bar, percent, phase, epic-fraction, optional user). It's auto-wired into Claude Code by `hew init --runtime=claude`, which upserts a top-level `statusLine` block into `.claude/settings.json` with the same `hew_managed: true` discriminator the SessionStart hook uses — re-install is idempotent, uninstall is symmetric, and a user can opt out by removing the flag.
+
+Formats:
+
+- `hew statusline --compact` — `<label> <bar> <pct>%`
+- `hew statusline` — adds phase + epic-fraction (default)
+- `hew statusline --full` — adds `<user> N/M`
+
+Width is clamp `[1, 80]`; stdin from Claude Code is drained tolerantly; bd-not-initialized exits 0 with empty stdout so the host falls back gracefully. The pure render lives in `hew_core::statusline`; the CLI side-effects in `hew/src/commands/statusline.rs`.
+
+Other runtimes (Cursor / Codex / Windsurf) wire the command through their own statusline configs — point them at `hew statusline` directly.
+
 ---
 
 ## Hard-won gotchas

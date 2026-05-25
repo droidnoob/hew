@@ -209,6 +209,8 @@ Open your agent (Claude Code, Cursor, etc.) and route on intent — skills auto-
 /hew:auto       Run plan → decompose → execute → verify autonomously
 ```
 
+On Claude Code the agent statusline shows what hew is working on (scope, progress bar, phase, epic fraction) — auto-wired by `hew init --runtime=claude`. See `hew statusline --help` for `--compact` / `--full` / `--width` overrides.
+
 ---
 
 ## Commands
