@@ -5,7 +5,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use tracing::debug;
@@ -14,6 +14,33 @@ use wait_timeout::ChildExt;
 use crate::error::{HewError, Result};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Spawn a `Command`, retrying on `ExecutableFileBusy` (Linux `ETXTBSY`).
+///
+/// Background: when parallel threads each write+exec their own stub
+/// binary (the test harness pattern), one thread's writable fd to its
+/// stub temp file leaks into another thread's child via `fork()` even
+/// when the fd is `O_CLOEXEC` — `O_CLOEXEC` only fires on `exec`, not
+/// `fork`. The kernel then sees an outstanding writer on the inode and
+/// the child's `exec` trips `ETXTBSY` (errno 26). Same race can happen
+/// in production any time `hew init` rewrites bundled artifacts during
+/// concurrent reads. Exponential backoff up to ~150ms total handles the
+/// transient window without callers needing to care.
+fn spawn_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Child> {
+    use std::io::ErrorKind;
+    let mut delay_ms = 5u64;
+    for _ in 0..5 {
+        match cmd.spawn() {
+            Ok(c) => return Ok(c),
+            Err(e) if e.kind() == ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                delay_ms *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    cmd.spawn()
+}
 
 #[derive(Debug, Clone)]
 pub struct GitOutput {
@@ -78,7 +105,7 @@ impl RealGit {
         let mut cmd = Command::new(&self.path);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()?;
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)?;
 
         let status = match child.wait_timeout(self.timeout)? {
             Some(s) => s,
@@ -128,7 +155,7 @@ impl RealGit {
         let mut cmd = Command::new(&self.path);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn()?;
+        let mut child = spawn_with_etxtbsy_retry(&mut cmd)?;
 
         let status = match child.wait_timeout(self.timeout)? {
             Some(s) => s,

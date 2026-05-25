@@ -6,6 +6,54 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-25
+
+Statusline fixes — `hew statusline` was overwriting Claude Code's
+default bottom-bar instead of composing with it, and the scope label
+was overflowing the truncation point. The previously-shown
+context-usage indicator is now back as its own clearly-labeled
+segment.
+
+### Changed
+
+- **Composes with Claude Code's default line.** The CLI now reads the
+  session JSON it gets on stdin and renders a Claude-style prefix
+  (`<model> | <cwd>` with ANSI color: cyan model, green cwd) ahead of
+  the hew segment, separated by `||`. New `--bare` flag emits just
+  the hew segment. `NO_COLOR` honored.
+- **Scope label condensed.** `condense_title` splits an epic/milestone
+  title on the first em-dash (matching the milestone-body convention)
+  and truncates the head to 28 chars with an ellipsis. Stops the
+  90-char epic descriptions from blowing past Claude Code's
+  truncation point.
+
+### Added
+
+- **Context-usage segment** (`ctx <bar> <pct>% · <used-tokens>`).
+  Parses `transcript_path` out of the stdin session JSON, walks the
+  JSONL backward to the most-recent `type=assistant` message, and
+  sums `input_tokens + cache_creation_input_tokens +
+  cache_read_input_tokens` as "context used". Renders a color-
+  gradient bar:
+  - green   < 60%
+  - yellow  60–84%
+  - red     ≥ 85%
+  Context limit inferred from observed usage (200K standard, 1M
+  extended). Token count humanized as `847` / `41K` / `1.2M`.
+  Best-effort: any IO / parse failure → segment skipped, statusline
+  keeps working.
+- **Hew segment is now bar-free.** `hew <label> N/M [(phase)]` —
+  label-based so the two graphs (context bar vs. epic counter) aren't
+  visually competing.
+
+### Tests
+
+- 8 new inline (humanize_tokens, infer_context_limit, claude prefix
+  render with/without colors, condense_title em-dash strip +
+  ellipsis truncation, TokenUsage::total).
+- 3 new e2e (compose with session JSON, --bare skips prefix, ctx
+  segment appears when transcript carries a usage block).
+
 ## [0.7.0] — 2026-05-25
 
 Ships **`feat/statusline`** — Claude Code agent statusline showing
