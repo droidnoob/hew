@@ -19,6 +19,30 @@ wait-timeout = { workspace = true }
 tracing = { workspace = true }
 toml = "0.9"
 
+# Optional tree-sitter stack — pulled in by the `treesitter` feature.
+# Default builds compile zero tree-sitter crates so the existing 4-way CI
+# matrix and cold-build budget stay untouched. Runtime pinned per
+# DECISION:treesitter-abi-pinning; grammars float at minor version.
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+
+[features]
+default = []
+treesitter = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-java",
+]
+
 [lib]
 name = "hew_core"
 path = "src/lib.rs"
