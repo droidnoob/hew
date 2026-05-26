@@ -22,6 +22,7 @@ pub mod memories;
 pub mod notify;
 pub mod os;
 pub mod prime;
+pub(crate) mod process;
 pub mod review;
 pub mod skills;
 pub mod slash;
