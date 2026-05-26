@@ -124,6 +124,10 @@ pub const MEMORY_PREFIXES: &[&str] = &[
     "research",
     "dep",
     "factual",
+    // hew-qia: `deferred` joins the allowlist so the loop's
+    // decision-resolution flow can file unresolved topics
+    // (`DEFERRED:<topic>`) for operator review without `--raw`.
+    "deferred",
     // ML.8 (hew-uxf): `link` joins the allowlist so `hew remember
     // --type=link --raw "LINK:a->relates_to:memory:b"` works without
     // --raw escape hatch. Non-raw form prepends `LINK:` to the body
@@ -164,6 +168,7 @@ fn canonical_upper(p: &str) -> &'static str {
         "research" => "RESEARCH",
         "dep" => "DEP",
         "factual" => "FACTUAL",
+        "deferred" => "DEFERRED",
         "link" => "LINK",
         _ => unreachable!("checked against MEMORY_PREFIXES"),
     }
@@ -1056,5 +1061,15 @@ mod tests {
     #[test]
     fn validate_memory_type_trims_whitespace() {
         assert_eq!(validate_memory_type("  decision\n").unwrap(), "DECISION");
+    }
+
+    #[test]
+    fn validate_memory_type_accepts_deferred() {
+        // hew-qia: the decision-resolution loop files DEFERRED:<topic>
+        // memories without --raw. Guards against accidental removal
+        // from MEMORY_PREFIXES.
+        assert!(MEMORY_PREFIXES.contains(&"deferred"));
+        assert_eq!(validate_memory_type("deferred").unwrap(), "DEFERRED");
+        assert_eq!(validate_memory_type("DEFERRED").unwrap(), "DEFERRED");
     }
 }

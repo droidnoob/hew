@@ -13,6 +13,7 @@ pub mod compact;
 pub mod config;
 pub mod craft;
 pub mod ctx;
+pub mod decide;
 pub mod diff_hunks;
 pub mod doctor;
 pub mod error;
