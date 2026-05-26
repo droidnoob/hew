@@ -207,7 +207,31 @@ Open your agent (Claude Code, Cursor, etc.) and route on intent — skills auto-
 /hew:verify     End-to-end verification after a batch closes
 /hew:quick      Fast mode — one task, no plan overhead
 /hew:auto       Run plan → decompose → execute → verify autonomously
+/hew:loop       Drive the autonomous outer loop (process-level)
 ```
+
+For long autonomous runs that survive a single chat session — drain the
+ready queue across many tasks while you do something else — use
+`hew loop run` directly:
+
+```sh
+hew loop run --until-empty            # drain everything ready
+hew loop run --max-iter 5             # bounded
+hew loop run --unattended             # auto-resolve DEFERRED: memories
+hew loop list                         # recent runs
+hew loop logs --tail 5                # last 5 iters of latest run
+hew loop cancel                       # touch stop-file on latest run
+```
+
+Each iter is a fresh `claude -p` subprocess; the skill body + memory
+primer prefix is byte-stable across iters so the prompt cache hits.
+Per-iter test + lint runs as a backpressure gate — a failing iter is
+rolled back via `git reset --hard <pre-iter-sha>`. Ctrl+C produces
+`stop_reason: cancelled`; the in-flight iter finishes cleanly. End of
+run prints a coloured summary with the cache hit rate, token breakdown,
+sparkline of per-iter spend, and the symbols the run touched.
+
+Full guide: [`docs/LOOP.md`](./docs/LOOP.md).
 
 On Claude Code the agent statusline shows what hew is working on (scope, progress bar, phase, epic fraction) — auto-wired by `hew init --runtime=claude`. See `hew statusline --help` for `--compact` / `--full` / `--width` overrides.
 
@@ -227,11 +251,12 @@ A brief table of the most-used slashes. Full reference: [`docs/COMMANDS.md`](./d
 | `/hew:verify` | Batch-level end-to-end verification |
 | `/hew:ship` | Create a PR and prepare for merge after verify passes |
 | `/hew:auto` | Run plan → decompose → execute → verify autonomously |
+| `/hew:loop` | Drive the autonomous outer loop (process-level, drains the ready queue) |
 | `/hew:checkpoint` | Save rich session state before `/clear` |
 | `/hew:status` | Human-readable project state |
 | `/hew:compact` | Reduce a noisy memory prefix from N entries to ~K canonical ones |
 
-**39 total slashes** covering:
+**40 total slashes** covering:
 
 - Brownfield onboarding — `/hew:scan`, `/hew:convention`, `/hew:audit`, `/hew:boundary`, `/hew:migrate`
 - Reviews — `/hew:review`, `/hew:adversarial-review`

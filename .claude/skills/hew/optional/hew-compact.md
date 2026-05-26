@@ -1,4 +1,4 @@
-<!-- hew:version=0.8.1 -->
+<!-- hew:version=0.9.0 -->
 ---
 name: hew-compact
 category: optional
