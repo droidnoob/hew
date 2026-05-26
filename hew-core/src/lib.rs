@@ -24,6 +24,7 @@ pub mod notify;
 pub mod os;
 pub mod prime;
 pub(crate) mod process;
+pub mod research_gate;
 pub mod review;
 pub mod runner;
 pub mod skills;
