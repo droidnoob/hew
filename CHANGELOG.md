@@ -6,6 +6,113 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-26
+
+The "loop runner" release. `hew loop run` is now a fully wired
+autonomous outer harness against real `claude -p`, exercised
+end-to-end on a toy CRUD project and instrumented with cache-hit
+tracking, symbol-level changelog, and a coloured end-of-run summary.
+
+### Added
+
+- **`hew loop` — process-level outer harness.** A new subcommand
+  group that drains the bd ready queue by spawning fresh `claude -p`
+  subprocesses, with hard caps on iters, tokens, and wall clock.
+  Per-iter outcome, token spend, prefix hash, decisions / deferred
+  ids, stderr tail, and (when treesitter is on) the symbol-level
+  changelog get atomically logged to `.hew/loop/<run-id>/iter-NNN.json`.
+  - `hew loop run` — drive the loop until a stop fires.
+  - `hew loop list` — recent runs + state.
+  - `hew loop logs --tail N` — pretty-print iter rows for a run.
+  - `hew loop cancel` — touch the stop-file of a running loop.
+- **Backpressure gate.** `cargo test` + `cargo clippy` run after each
+  non-error iter. On `Verdict::Fail` the loop runs `git reset --hard
+  <pre-iter-sha>` to revert the iter's commits, overrides the outcome
+  to `BackpressureFail`, and files a `STATUS:loop-iter-failed:<run>:
+  <iter>:<iso>` memory.
+- **SIGINT → clean stop.** A `ctrlc` handler flips the shared
+  `CancelFlag` so Ctrl+C produces `StopReason::Cancelled` in
+  `run.json` (the in-flight iter finishes; no orphaned subprocess).
+- **`--unattended` flag + decision-resolution flow.** Walks memory →
+  code → research and files either `DECISION:<topic>` or
+  `DEFERRED:<topic>` depending on provenance. When `--unattended` is
+  on, the loop polls bd for new `DEFERRED:` memories the agent filed
+  during an iter and tries to resolve them via prior art
+  (case-insensitive memory match + `git grep -n -i -F` for code
+  citations).
+- **Out-of-band closure detection.** If an iter's task disappears
+  from `bd.ready()` after the spawn, the outcome is promoted to
+  `Closed` even when the agent closed via the Bash tool (whose stdout
+  doesn't propagate into the model's final reply text).
+- **Rich end-of-loop summary, auto-shown after every run.** Small
+  magenta "hew" ASCII banner, outcome breakdown (colour-coded:
+  green=closed, yellow=no_close, red=backpressure_fail), token split
+  (input / output / cache_read / cache_create with percentages),
+  cache-stability line computed from prompt_prefix_hash run-length,
+  decisions / deferred counters, 8-block Unicode sparkline of
+  per-iter token spend, symbols touched. `NO_COLOR` strips the ANSI.
+- **`hew blast` as a first-class signal in two surfaces.**
+  - **Loop iter logs** gain `symbols_touched: Vec<String>` populated
+    from `blast::compute_blast_with(pre_iter_sha)` after each
+    non-error iter. End-of-run summary aggregates the symbol set
+    deduped across the run.
+  - **`hew status`** gains a "Since last close" section listing the
+    working-tree symbol delta against the default base (upstream →
+    main → master). Top-8 + `…(+N more)` footer.
+  - **`hew-execute` skill body** Step 6 close-checklist now nudges
+    the agent to run `hew blast` pre-close to confirm the symbol
+    delta matches task scope.
+- **`/hew:loop` slash** wires the loop into Claude Code.
+- **`docs/LOOP.md`** — full design + troubleshooting guide, plus a
+  "First real run" section capturing the 2026-05-26 E2E with three
+  real-claude runs (artifacts under `examples/loop-runs/2026-05-26/`).
+- **`DEFERRED:` joins the memory-prefix allowlist** (14th prefix) so
+  the loop can file unresolved topics for operator review via
+  `hew remember --type=deferred`.
+- **`hew_core::time::parse_iso_utc`** — strict reverse of
+  `iso_from_unix`, used by the loop summary for wall-clock duration.
+
+### Changed
+
+- **`/hew:auto` slash body** rewritten as a thin pointer at
+  `hew loop run --until-empty`. The in-conversation walk is still
+  reachable via `/hew:work`.
+- **`hew prime <skill>` defaults to text.** `--json` now gates the
+  JSON shape for every skill (previously hard-coded JSON except for
+  `resume`). Aligns with `FEEDBACK:no-json-piping` — text is the
+  agent-facing contract. `--pretty` still implies `--json`.
+- **Prompt cache invariant fixed.** The per-iter primer used to live
+  inside the cacheable prefix passed to `prompt::assemble`, so
+  `prompt_prefix_hash` changed every iter and the Anthropic prompt
+  cache missed every spawn. The primer is now captured once at run
+  start via `bd.prime_raw()` and held byte-stable across the run;
+  per-iter task fields moved into the task brief (tail). Cache hit
+  rate is now observable in the rich summary.
+
+### Removed
+
+- **`--research-budget` flag + `research_gate` module.** The flag
+  was wired but never consumed — real `claude -p` agents do their
+  own web search inside the spawn, never round-tripping a request
+  to the loop. -277 lines net. If a future runtime exposes a
+  loop-mediated research hook, a typed budget can be re-added at
+  that point.
+
+### Internal
+
+- New crate modules: `hew_core::loop_summary`, plus the deletion of
+  `hew_core::research_gate`.
+- `RuntimeSpawner` trait + `ClaudeSpawner` (production) +
+  `MockSpawner` (tests). `GateRunner` trait + `CargoGateRunner`
+  (production) + `StaticGateRunner` (tests). Both injectable into
+  `run_loop_with` so the integration tests under
+  `hew/tests/loop_backpressure.rs` exercise the rollback,
+  unattended-resolve, out-of-band-close, and prefix-hash-invariant
+  paths against a tempdir git repo without burning real API tokens.
+- Captured live `claude -p --output-format json` fixture at
+  `hew-core/tests/fixtures/claude-output.json` (redacted); unit test
+  parses it to catch field-name drift.
+
 ## [0.8.1] — 2026-05-26
 
 Tree-sitter on by default. The 0.8.0 release shipped `hew blast` but

@@ -1,5 +1,6 @@
 .planning/
 .beads/
+.hew/loop/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

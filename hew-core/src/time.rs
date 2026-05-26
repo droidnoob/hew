@@ -36,6 +36,51 @@ pub fn iso_from_unix(secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+/// Parse a strict `YYYY-MM-DDTHH:MM:SSZ` string back into Unix
+/// seconds. Returns `None` on any deviation from that shape — this is
+/// the inverse of [`iso_from_unix`], not a tolerant general parser.
+pub fn parse_iso_utc(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let parse = |start: usize, end: usize| -> Option<i64> {
+        std::str::from_utf8(&b[start..end]).ok()?.parse().ok()
+    };
+    let year: i64 = parse(0, 4)?;
+    let month: i64 = parse(5, 7)?;
+    let day: i64 = parse(8, 10)?;
+    let hour: i64 = parse(11, 13)?;
+    let minute: i64 = parse(14, 16)?;
+    let second: i64 = parse(17, 19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..24).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..60).contains(&second)
+    {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil. Inverse of the civil_from_days
+    // used by iso_from_unix above. Same Gregorian proleptic calendar.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let m = month as u64;
+    let d = day as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
 /// True if the leading token looks like an ISO-8601 date — four ASCII
 /// digits, a `-`, and at least one more ASCII digit. Used by callers
 /// that need to distinguish a real `CHECKPOINT:<iso>` shape from a
@@ -79,6 +124,28 @@ mod tests {
         assert_eq!(b[7], b'-');
         assert_eq!(b[10], b'T');
         assert_eq!(b[19], b'Z');
+    }
+
+    #[test]
+    fn parse_iso_utc_round_trips_known_values() {
+        assert_eq!(parse_iso_utc("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_utc("2024-01-01T00:00:00Z"), Some(1_704_067_200));
+        assert_eq!(parse_iso_utc("2024-02-29T00:00:00Z"), Some(1_709_164_800));
+        // Round-trip through iso_from_unix.
+        for secs in [0, 1, 1_704_067_200, 1_709_164_800, 1_900_000_000] {
+            assert_eq!(parse_iso_utc(&iso_from_unix(secs)), Some(secs));
+        }
+    }
+
+    #[test]
+    fn parse_iso_utc_rejects_malformed() {
+        assert!(parse_iso_utc("").is_none());
+        assert!(parse_iso_utc("2024-01-01").is_none());
+        assert!(parse_iso_utc("2024-01-01T00:00:00").is_none());
+        assert!(parse_iso_utc("2024/01/01T00:00:00Z").is_none());
+        assert!(parse_iso_utc("2024-13-01T00:00:00Z").is_none());
+        assert!(parse_iso_utc("2024-01-32T00:00:00Z").is_none());
+        assert!(parse_iso_utc("2024-01-01T25:00:00Z").is_none());
     }
 
     #[test]

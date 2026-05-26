@@ -156,4 +156,9 @@ pub enum Command {
     ///
     /// Requires the `treesitter` build feature.
     Blast(crate::commands::blast::Args),
+
+    /// Autonomous outer loop: `hew loop run` drives the queue; `hew
+    /// loop cancel` / `logs` / `list` inspect or stop running and
+    /// completed runs.
+    Loop(crate::commands::loop_cmd::LoopCmd),
 }

@@ -411,6 +411,50 @@ the binary via `CARGO_PKG_VERSION`.
 - **Don't fan out memory categorization**; keep additions in
   `prime::categorize()`.
 
+## Loop runner — `hew loop`
+
+The autonomous outer harness, added in 0.9.0. Process-level loop that
+drains the bd ready queue across many tasks without staying in one
+chat session. Architecturally:
+
+- **Per-iter spawn.** Each iter is a fresh `claude -p` subprocess
+  invoked via `hew_core::runtime::ClaudeSpawner` (the
+  `RuntimeSpawner` trait — `MockSpawner` for tests). Why fresh: no
+  context bloat across iters, prompt cache hits are observable, and
+  Ctrl+C never strands an in-memory state machine.
+- **Cache-disciplined prompt.** `hew_core::prompt::assemble(skill_body,
+  primer, task)` produces a byte-stable prefix (skill body + primer
+  captured once at run start via `bd.prime_raw()`) plus a per-iter
+  tail (task brief). The Anthropic prompt cache hits the prefix
+  across iters; `prompt_prefix_hash` is logged so cache stability is
+  observable.
+- **Backpressure gate.** `hew_core::backpressure::evaluate` is pure;
+  `hew::commands::loop_cmd::CargoGateRunner` shells `cargo test` +
+  `cargo clippy`. On `Verdict::Fail` the runner runs `git reset
+  --hard <pre-iter-sha>` and files a `STATUS:loop-iter-failed`
+  memory.
+- **Stop-signal precedence.** `hew_core::stop_signals::Collector`
+  gathers CancelFlag (SIGINT), stop-file, wall clock, token budget;
+  `hew_core::runner::StopSignals::evaluate` applies precedence
+  rules to produce a `StopReason`.
+- **Decision resolution.** `hew_core::decide::resolve` walks
+  memory → code → research; under `--unattended` the loop polls
+  bd for new `DEFERRED:` memories after each iter and converts
+  them to `DECISION:` via `BdDecisionContext`.
+- **Per-run logs.** Atomic temp-file-then-rename writes under
+  `.hew/loop/<run-id>/run.json` + `iter-NNN.json`. `IterLog` shape
+  in `hew_core::loop_log`; aggregate Summary in
+  `hew_core::loop_summary` (rendered post-run).
+
+The CLI layer in `hew/src/commands/loop_cmd.rs` is a thin wiring
+shim: `run_loop_with(ctx, args, bd, spawner, gate, project_root)` is
+the testable inner — `hew/tests/loop_backpressure.rs` exercises the
+rollback, unattended-resolve, out-of-band-closure-detection, and
+prefix-hash-invariant paths against a tempdir git repo without
+burning real API tokens.
+
+Full design + troubleshooting in [`docs/LOOP.md`](./docs/LOOP.md).
+
 ## Open questions / future shape
 
 - Multi-agent: Beads supports concurrent claims (`bd update --claim`

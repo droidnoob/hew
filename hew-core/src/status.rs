@@ -20,6 +20,11 @@ pub struct StatusReport {
     pub phases: Vec<PhaseLine>,
     pub memory_counts: MemoryCounts,
     pub conventions: Vec<String>,
+    /// `<path>:<symbol-name>` strings for what the working tree has
+    /// touched relative to the upstream / `main` base (whatever
+    /// `hew blast` would resolve). Empty when treesitter is off, no
+    /// repo, or no diff against the base.
+    pub recent_symbols: Vec<String>,
 }
 
 pub struct PhaseLine {
@@ -96,7 +101,33 @@ pub fn build(client: &dyn BdClient) -> Result<StatusReport> {
         phases,
         memory_counts,
         conventions,
+        recent_symbols: compute_recent_symbols(),
     })
+}
+
+/// Symbols touched in the working tree relative to the default base
+/// (`hew blast` semantics — upstream, then `main`, then `master`).
+/// Best-effort: any error along the path returns an empty vec so
+/// `hew status` never breaks on a fresh repo with no upstream.
+#[cfg(feature = "treesitter")]
+fn compute_recent_symbols() -> Vec<String> {
+    let Ok(git) = crate::git::RealGit::discover() else { return Vec::new() };
+    let entries = match crate::blast::compute_blast_with(&git, None) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        for sym in entry.symbols {
+            out.push(format!("{}:{}", entry.path, sym.name));
+        }
+    }
+    out
+}
+
+#[cfg(not(feature = "treesitter"))]
+fn compute_recent_symbols() -> Vec<String> {
+    Vec::new()
 }
 
 pub fn render_text(r: &StatusReport) -> String {
@@ -153,6 +184,19 @@ pub fn render_text(r: &StatusReport) -> String {
         let _ = writeln!(s);
         let _ = writeln!(s, "  Conventions: {}", r.conventions.join(", "));
     }
+
+    if !r.recent_symbols.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "Since last close");
+        let _ = writeln!(s, "──────────────────────────────────");
+        let total = r.recent_symbols.len();
+        for line in r.recent_symbols.iter().take(8) {
+            let _ = writeln!(s, "  • {line}");
+        }
+        if total > 8 {
+            let _ = writeln!(s, "  …(+{} more)", total - 8);
+        }
+    }
     s
 }
 
@@ -175,6 +219,7 @@ mod tests {
                 .collect(),
             memory_counts: MemoryCounts::default(),
             conventions: vec![],
+            recent_symbols: vec![],
         }
     }
 
@@ -200,6 +245,30 @@ mod tests {
         let text = render_text(&r);
         assert!(text.contains("✓ scan"));
         assert!(text.contains("2026-05-11T14:30:00"));
+    }
+
+    #[test]
+    fn render_omits_since_last_close_when_no_symbols() {
+        let r = empty_report();
+        let text = render_text(&r);
+        assert!(
+            !text.contains("Since last close"),
+            "empty recent_symbols should suppress the section: {text}",
+        );
+    }
+
+    #[test]
+    fn render_shows_since_last_close_with_truncation_footer() {
+        let mut r = empty_report();
+        for i in 0..12 {
+            r.recent_symbols.push(format!("src/file_{i}.rs:fn_{i}"));
+        }
+        let text = render_text(&r);
+        assert!(text.contains("Since last close"));
+        assert!(text.contains("src/file_0.rs:fn_0"));
+        assert!(text.contains("src/file_7.rs:fn_7"));
+        assert!(!text.contains("src/file_8.rs:fn_8"), "truncate at 8");
+        assert!(text.contains("…(+4 more)"));
     }
 
     #[test]

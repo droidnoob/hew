@@ -10,13 +10,13 @@ pub struct Args {
     /// for SessionStart hooks.
     pub skill: String,
 
-    /// Pretty-print the JSON output. Default is compact. Implies `--json`.
+    /// Pretty-print the JSON output. Implies `--json`.
     #[arg(long)]
     pub pretty: bool,
 
     /// Emit JSON instead of plaintext. Plaintext is the default for
-    /// `resume`; other skills always emit JSON (this flag is a no-op
-    /// for them, kept for forward-compat).
+    /// every skill including `resume` — FEEDBACK:no-json-piping makes
+    /// the text shape the agent-facing contract.
     #[arg(long)]
     pub json: bool,
 }
@@ -40,13 +40,17 @@ pub fn run(_ctx: &Ctx, args: Args) -> miette::Result<()> {
         }
     } else {
         let output = prime::build(&client, &args.skill)?;
-        let s = if args.pretty {
-            serde_json::to_string_pretty(&output)
+        if want_json {
+            let s = if args.pretty {
+                serde_json::to_string_pretty(&output)
+            } else {
+                serde_json::to_string(&output)
+            }
+            .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
+            println!("{s}");
         } else {
-            serde_json::to_string(&output)
+            print!("{}", prime::render_prime_text(&output));
         }
-        .map_err(|e| miette::miette!("serialize prime output: {e}"))?;
-        println!("{s}");
     }
     Ok(())
 }

@@ -46,6 +46,35 @@ impl Skill {
         let rest = inner.strip_prefix("hew:version=")?;
         Some(rest.trim())
     }
+
+    /// Parse the optional `tools: [A, B, Bash(cargo:*)]` line in the
+    /// frontmatter. Returns `None` when absent (caller falls back to
+    /// the global default — see [`crate::allowed_tools::for_skill`]).
+    pub fn declared_tools(&self) -> Option<Vec<String>> {
+        let fm = frontmatter(self.body)?;
+        let line = fm.lines().map(str::trim).find(|l| l.starts_with("tools:"))?;
+        let rest = line.strip_prefix("tools:")?.trim();
+        let inside = rest.strip_prefix('[')?.strip_suffix(']')?;
+        let items: Vec<String> =
+            inside.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        if items.is_empty() { None } else { Some(items) }
+    }
+}
+
+/// Extract the YAML frontmatter block (between the first two `---`
+/// delimiters), skipping the leading `<!-- hew:version=... -->` line.
+fn frontmatter(body: &str) -> Option<&str> {
+    // Skip a leading `<!-- ... -->` version comment if present.
+    let rest = if body.trim_start().starts_with("<!--") {
+        body.split_once('\n').map(|(_, r)| r).unwrap_or("")
+    } else {
+        body
+    };
+    // First non-empty line must be `---`.
+    let trimmed = rest.trim_start_matches(|c: char| c == '\n' || c == '\r' || c.is_whitespace());
+    let after_open = trimmed.strip_prefix("---\n").or_else(|| trimmed.strip_prefix("---\r\n"))?;
+    let close_offset = after_open.find("\n---")?;
+    Some(&after_open[..close_offset])
 }
 
 macro_rules! skill {
@@ -171,5 +200,53 @@ mod tests {
     fn index_is_special_category() {
         assert_eq!(INDEX.category, Category::Index);
         assert_eq!(INDEX.name, "SKILL");
+    }
+
+    fn synth(extra_fm: &str) -> Skill {
+        // Leak strings to satisfy `&'static str`; only used in tests.
+        let body = format!(
+            "<!-- hew:version=0.0.0 -->\n---\nname: synth\ncategory: core\n{extra_fm}\n---\n\n# body\n"
+        );
+        Skill {
+            name: "synth",
+            relative_path: "synth.md",
+            category: Category::Core,
+            body: Box::leak(body.into_boxed_str()),
+        }
+    }
+
+    #[test]
+    fn declared_tools_returns_none_when_absent() {
+        let s = synth("");
+        assert!(s.declared_tools().is_none());
+    }
+
+    #[test]
+    fn declared_tools_parses_inline_list() {
+        let s = synth("tools: [Read, Edit, Bash(cargo:*)]");
+        let tools = s.declared_tools().expect("declared");
+        assert_eq!(tools, vec!["Read", "Edit", "Bash(cargo:*)"]);
+    }
+
+    #[test]
+    fn declared_tools_handles_whitespace() {
+        let s = synth("tools:   [  Read ,   Edit  ,Bash(git:*)  ]");
+        let tools = s.declared_tools().expect("declared");
+        assert_eq!(tools, vec!["Read", "Edit", "Bash(git:*)"]);
+    }
+
+    #[test]
+    fn declared_tools_empty_brackets_treated_as_none() {
+        let s = synth("tools: []");
+        assert!(s.declared_tools().is_none());
+    }
+
+    #[test]
+    fn every_shipped_skill_frontmatter_parses() {
+        // Smoke: every shipped skill either declares tools or doesn't,
+        // but the call must not panic on any real body.
+        for s in all() {
+            let _ = s.declared_tools();
+        }
     }
 }

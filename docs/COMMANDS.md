@@ -40,10 +40,25 @@ Fast mode: one task, no plan/decompose overhead.
 
 ### `/hew:auto`
 
-Run plan → decompose → execute → verify autonomously.
+Run plan → decompose → execute → verify autonomously. Now a thin
+pointer at `hew loop run --until-empty` — the in-conversation walk is
+still reachable via `/hew:work`.
 
-- Skill: chains `hew-plan` → `hew-decompose` → `hew-execute` (loop) → `hew-verify`
 - Use when: you trust the agent to drive end-to-end without pause
+
+### `/hew:loop`
+
+Drive the autonomous outer loop at the process level. Each iter is a
+fresh `claude -p` subprocess; cache-disciplined prompt prefix keeps
+Anthropic's cache warm; per-iter test + lint runs as a backpressure
+gate (failed iters → `git reset --hard`); Ctrl+C produces clean
+`stop_reason: cancelled`; coloured summary at end.
+
+- CLI: `hew loop run [--max-iter N] [--until-empty] [--unattended] [--budget-tokens N] [--budget-wall 30m] [--dry-run]`
+- Inspect: `hew loop list`, `hew loop logs --tail 5`
+- Cancel: `hew loop cancel` (or Ctrl+C in the running shell)
+- Use when: draining many ready tasks across one long run that
+  survives chat-session limits. Full guide: [`docs/LOOP.md`](./LOOP.md).
 
 ### `/hew:status`
 
