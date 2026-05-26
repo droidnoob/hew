@@ -24,6 +24,7 @@ pub mod os;
 pub mod prime;
 pub(crate) mod process;
 pub mod review;
+pub mod runner;
 pub mod skills;
 pub mod slash;
 pub mod stacks;
