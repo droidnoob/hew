@@ -132,6 +132,36 @@ itself becomes cacheable for iter+1.
 
 ---
 
+## First real run
+
+The first end-to-end exercise of `hew loop run` against a live
+`claude -p` (claude 2.1.150) drove a toy todo crate to three closes
+on 2026-05-26. Captured under
+`examples/loop-runs/2026-05-26/hew-loop-crud-runs.tar.gz` — contains
+the `.hew/loop/<run-id>/` directories from three runs:
+
+- **run 1** (1 iter): added `Todo` struct + tests. iter outcome
+  `no_close` — pre-fix detect-marker miss; **hew-7tp** filed and
+  fixed in the same session via out-of-band `bd.ready()` diff.
+- **run 2** (2 iters): added `TodoStore` + CRUD tests, then the
+  `todo add/list/done/rm` CLI. Both iters `outcome=closed` with the
+  new detector. ~1.7M tokens combined; the project compiled clean and
+  11 unit tests passed.
+- **run 3** (1 iter): forced lint failure (deliberate
+  `clippy::useless_vec` planted in `main.rs`); iter rolled back to
+  the pre-iter sha, `outcome=backpressure_fail`, and a
+  `STATUS:loop-iter-failed:` memory landed in bd.
+
+Outstanding bugs discovered by the run:
+
+- **hew-7tp** (closed) — agent-via-Bash closes weren't detected.
+- **hew-2dx** (open) — the per-iter primer lives inside the cacheable
+  prefix, so `prompt_prefix_hash` changes every iter and the
+  Anthropic prompt cache misses. Fix is a structural move of the
+  primer into the tail.
+
+---
+
 ## Related
 
 - `commands/loop.md` — the `/hew:loop` slash body.
