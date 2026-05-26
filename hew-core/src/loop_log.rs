@@ -68,6 +68,12 @@ pub struct IterLog {
     pub deferred: Vec<String>,
     pub tool_calls: Vec<String>,
     pub stderr_tail: Option<String>,
+    /// Symbols the iter actually touched, as `<file>:<symbol-name>`
+    /// strings. Populated from `hew_core::blast::compute_blast_with`
+    /// against the pre-iter sha when the `treesitter` feature is
+    /// enabled and the iter produced commits; empty otherwise.
+    #[serde(default)]
+    pub symbols_touched: Vec<String>,
 }
 
 impl IterLog {
@@ -77,6 +83,7 @@ impl IterLog {
         it: &Iter,
         prompt_prefix_hash: Option<String>,
         tool_calls: Vec<String>,
+        symbols_touched: Vec<String>,
     ) -> Self {
         Self {
             number: it.number,
@@ -90,6 +97,7 @@ impl IterLog {
             deferred: it.deferred.clone(),
             tool_calls,
             stderr_tail: it.stderr_tail.clone(),
+            symbols_touched,
         }
     }
 }
@@ -258,7 +266,7 @@ mod tests {
         it.cost = TokenSpend { input: 5, output: 6, cache_read: 7, cache_create: 8 };
         it.decisions.push("mem-d1".into());
         it.deferred.push("mem-q1".into());
-        let log = IterLog::from_iter(&it, Some("abc123".into()), vec!["Read".into()]);
+        let log = IterLog::from_iter(&it, Some("abc123".into()), vec!["Read".into()], Vec::new());
         assert_eq!(log.number, 3);
         assert_eq!(log.task_id.as_deref(), Some("hew-abc"));
         assert_eq!(log.outcome.as_deref(), Some("closed"));

@@ -91,6 +91,50 @@ fn git_head_sha(project_root: &Path) -> miette::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Symbol-level changelog of one iter, rendered as `<path>:<sym>`
+/// strings for the iter log. Returns an empty vec under any of:
+/// - `treesitter` feature disabled (compile-time fallback);
+/// - rollback iter (outcome was a backpressure_fail / runtime_error);
+/// - missing pre-iter sha (e.g. no git repo);
+/// - blast computation returned an error (best-effort observability).
+#[cfg(feature = "treesitter")]
+fn compute_iter_symbols(
+    _project_root: &Path,
+    pre_iter_sha: Option<&str>,
+    outcome: &IterOutcome,
+) -> Vec<String> {
+    if matches!(outcome, IterOutcome::BackpressureFail | IterOutcome::RuntimeError) {
+        return Vec::new();
+    }
+    let Some(sha) = pre_iter_sha else {
+        return Vec::new();
+    };
+    let Ok(git) = hew_core::git::RealGit::discover() else {
+        return Vec::new();
+    };
+    let entries = match hew_core::blast::compute_blast_with(&git, Some(sha)) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        for sym in entry.symbols {
+            out.push(format!("{}:{}", entry.path, sym.name));
+        }
+    }
+    out
+}
+
+/// Stub: feature-disabled builds never compute symbols.
+#[cfg(not(feature = "treesitter"))]
+fn compute_iter_symbols(
+    _project_root: &Path,
+    _pre_iter_sha: Option<&str>,
+    _outcome: &IterOutcome,
+) -> Vec<String> {
+    Vec::new()
+}
+
 /// `git reset --hard <sha>` in `project_root`. Used to revert an iter's
 /// commits when the backpressure gate fails.
 fn git_reset_hard(project_root: &Path, sha: &str) -> miette::Result<()> {
@@ -530,7 +574,13 @@ pub fn run_loop_with(
         iter.stderr_tail = stderr_tail;
 
         let prefix_hash_hex = Some(format!("{:016x}", assembled.prefix_hash));
-        let log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new());
+        // Symbol-level changelog of the iter: blast against the
+        // pre-iter sha when treesitter is compiled in and the iter
+        // actually produced commits. Best-effort: any error in the
+        // blast path collapses to an empty list — we never let an
+        // observability signal block iter logging.
+        let symbols_touched = compute_iter_symbols(project_root, pre_iter_sha.as_deref(), &outcome);
+        let log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
         write_json_atomic(&iter_log_path(&dir, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);

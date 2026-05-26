@@ -379,6 +379,17 @@ pre-close sanity checks:
 If guard fails, **fix and re-run guard** before close. The task stays open
 until guard is clean.
 
+**Then sanity-check what you actually changed.** Before closing, run:
+
+```
+hew blast
+```
+
+This prints a symbol-level diff of the working tree against `main`
+(or your upstream). Confirm the list matches the task scope — if it
+includes functions you didn't mean to touch, you probably need to
+split the change or revert the noise before closing.
+
 ## Step 7 — close with a useful reason
 
 ```

@@ -33,6 +33,9 @@ pub struct Summary {
     /// sparkline.
     pub per_iter_tokens: Vec<u64>,
     pub stop_reason: Option<StopReason>,
+    /// All symbols the run touched across every iter, deduplicated.
+    /// Empty when treesitter is off or no commits were made.
+    pub symbols_touched: Vec<String>,
 }
 
 /// Build a [`Summary`] from the run + its iter logs. `iter_logs` is
@@ -69,6 +72,15 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         deferred += log.deferred.len() as u32;
     }
 
+    let mut symbols_touched: Vec<String> = Vec::new();
+    for log in iter_logs {
+        for s in &log.symbols_touched {
+            if !symbols_touched.contains(s) {
+                symbols_touched.push(s.clone());
+            }
+        }
+    }
+
     let cache_stable_from = iter_logs.windows(2).enumerate().find_map(|(i, pair)| {
         match (&pair[0].prompt_prefix_hash, &pair[1].prompt_prefix_hash) {
             (Some(a), Some(b)) if a == b => Some((i + 2) as u32),
@@ -87,6 +99,7 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         deferred,
         per_iter_tokens,
         stop_reason: run.stop_reason,
+        symbols_touched,
     }
 }
 
@@ -181,6 +194,18 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
         );
     }
 
+    // Symbols touched across the run (top 8 + footer).
+    if !summary.symbols_touched.is_empty() {
+        let total = summary.symbols_touched.len();
+        let shown: Vec<&str> = summary.symbols_touched.iter().take(8).map(String::as_str).collect();
+        let footer = if total > 8 {
+            format!(" {dim}…(+{} more){reset}", total - 8)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(s, "  {bold}symbols{reset}:   {}{footer}", shown.join(", "));
+    }
+
     // Sparkline (skip when only one iter).
     if summary.per_iter_tokens.len() >= 2 {
         let spark = sparkline(&summary.per_iter_tokens);
@@ -258,6 +283,16 @@ mod tests {
     }
 
     fn iter_log(n: u32, label: &str, prefix: Option<&str>, tokens: TokenSpend) -> IterLog {
+        iter_log_with_symbols(n, label, prefix, tokens, Vec::new())
+    }
+
+    fn iter_log_with_symbols(
+        n: u32,
+        label: &str,
+        prefix: Option<&str>,
+        tokens: TokenSpend,
+        symbols_touched: Vec<String>,
+    ) -> IterLog {
         IterLog {
             number: n,
             task_id: None,
@@ -270,6 +305,7 @@ mod tests {
             deferred: Vec::new(),
             tool_calls: Vec::new(),
             stderr_tail: None,
+            symbols_touched,
         }
     }
 
@@ -443,6 +479,68 @@ mod tests {
         assert!(txt.contains("per-iter:"));
         // Logs path.
         assert!(txt.contains("/tmp/loop-test"));
+    }
+
+    #[test]
+    fn summarize_dedupes_symbols_across_iters() {
+        let logs = vec![
+            iter_log_with_symbols(
+                1,
+                "closed",
+                Some("h1"),
+                TokenSpend::default(),
+                vec!["src/a.rs:foo".into(), "src/a.rs:bar".into()],
+            ),
+            iter_log_with_symbols(
+                2,
+                "closed",
+                Some("h2"),
+                TokenSpend::default(),
+                vec!["src/a.rs:bar".into(), "src/b.rs:baz".into()],
+            ),
+        ];
+        let iters = vec![
+            iter(
+                1,
+                "2026-05-26T00:00:00Z",
+                "2026-05-26T00:00:05Z",
+                IterOutcome::Closed,
+                TokenSpend::default(),
+            ),
+            iter(
+                2,
+                "2026-05-26T00:00:05Z",
+                "2026-05-26T00:00:10Z",
+                IterOutcome::Closed,
+                TokenSpend::default(),
+            ),
+        ];
+        let run = run_with(iters);
+        let sum = summarize(&run, &logs);
+        assert_eq!(sum.symbols_touched, vec!["src/a.rs:foo", "src/a.rs:bar", "src/b.rs:baz"],);
+    }
+
+    #[test]
+    fn render_symbols_row_appears_with_touched_list() {
+        let logs = vec![iter_log_with_symbols(
+            1,
+            "closed",
+            Some("h1"),
+            TokenSpend::default(),
+            vec!["src/x.rs:fn_a".into(), "src/y.rs:fn_b".into()],
+        )];
+        let run = run_with(vec![iter(
+            1,
+            "2026-05-26T00:00:00Z",
+            "2026-05-26T00:00:05Z",
+            IterOutcome::Closed,
+            TokenSpend::default(),
+        )]);
+        let sum = summarize(&run, &logs);
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("symbols:"), "missing symbols row:\n{txt}");
+        assert!(txt.contains("src/x.rs:fn_a"));
+        assert!(txt.contains("src/y.rs:fn_b"));
     }
 
     #[test]
