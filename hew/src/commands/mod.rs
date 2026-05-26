@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod epic;
 pub mod forget;
 pub mod init;
+pub mod loop_cmd;
 pub mod manpage;
 pub mod memories;
 pub mod next;
@@ -62,5 +63,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Next(a) => next::run_next(&ctx, a),
         Command::Statusline(a) => statusline::run(&ctx, a),
         Command::Blast(a) => blast::run(&ctx, a),
+        Command::Loop(a) => loop_cmd::run(&ctx, a),
     }
 }
