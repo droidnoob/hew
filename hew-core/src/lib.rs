@@ -32,6 +32,7 @@ pub mod slash;
 pub mod stacks;
 pub mod status;
 pub mod statusline;
+pub mod stop_signals;
 pub mod tasks;
 #[cfg(unix)]
 pub mod testing;
