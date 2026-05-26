@@ -803,6 +803,138 @@ pub fn render_resume_text(out: &ResumeOutput) -> String {
     s
 }
 
+/// Pretty-print a [`PrimeOutput`] as labeled sections, mirroring
+/// [`render_resume_text`]. The skill body is intentionally elided from
+/// the rendered text — it can be many KB and agents that need the body
+/// already load it from the skill index. Pass `--json` for the full
+/// JSON shape including `skill_instructions`.
+pub fn render_prime_text(out: &PrimeOutput) -> String {
+    use std::fmt::Write;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "hew prime {}", out.skill);
+    let _ = writeln!(s, "──────────────────────────────────");
+    match out.project.bd_version.as_deref() {
+        Some(v) => {
+            let _ = writeln!(s, "  bd:        v{v}");
+        }
+        None => {
+            let _ = writeln!(s, "  bd:        not detected");
+        }
+    }
+    if let Some(u) = &out.update_available {
+        let _ = writeln!(s, "  update:    {} → {} ({})", u.current, u.latest, u.message);
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Prerequisites");
+    let _ = writeln!(s, "──────────────────────────────────");
+    if out.prerequisites.met {
+        let _ = writeln!(s, "  ✓ all prerequisites met");
+    } else {
+        let _ = writeln!(s, "  ✗ missing: {}", out.prerequisites.missing.join(", "));
+    }
+    let _ = writeln!(s);
+
+    let known_phases = ["scan", "convention", "audit", "boundary", "plan", "decompose", "verify"];
+    let _ = writeln!(s, "Phases");
+    let _ = writeln!(s, "──────────────────────────────────");
+    for name in known_phases {
+        let entry = out.status.get(name);
+        let complete = entry.map(|e| e.complete).unwrap_or(false);
+        let ts = entry.and_then(|e| e.timestamp.as_deref()).unwrap_or("");
+        let mark = if complete { "✓" } else { "○" };
+        let _ = writeln!(s, "  {mark} {:<10}  {ts}", name);
+    }
+    let mut extras: Vec<(&String, &StatusEntry)> =
+        out.status.iter().filter(|(k, _)| !known_phases.contains(&k.as_str())).collect();
+    extras.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, entry) in extras {
+        let mark = if entry.complete { "✓" } else { "○" };
+        let ts = entry.timestamp.as_deref().unwrap_or("");
+        let _ = writeln!(s, "  {mark} {:<10}  {ts}", name);
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Tasks");
+    let _ = writeln!(s, "──────────────────────────────────");
+    let _ = writeln!(
+        s,
+        "  {} total │ {} done │ {} in progress │ {} ready │ {} blocked",
+        out.tasks.total, out.tasks.done, out.tasks.in_progress, out.tasks.ready, out.tasks.blocked,
+    );
+    if !out.tasks.ready_list.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "  Next up:");
+        for t in out.tasks.ready_list.iter().take(5) {
+            let _ = writeln!(s, "    • [P{}] {} {}", t.priority, t.id, t.title);
+        }
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Memories");
+    let _ = writeln!(s, "──────────────────────────────────");
+    let m = &out.memories;
+    let _ = writeln!(
+        s,
+        "  {} CONVENTION │ {} BOUNDARY │ {} AUDIT │ {} SECURITY │ {} MIGRATION │ {} DEP │ {} factual",
+        m.conventions.len(),
+        m.boundaries.len(),
+        m.audit.len(),
+        m.security.len(),
+        m.migration.len(),
+        m.dep.len(),
+        m.factual.len(),
+    );
+    if !m.decisions.is_empty() || !m.gotchas.is_empty() || !m.feedback.is_empty() {
+        let _ = writeln!(
+            s,
+            "  {} DECISION │ {} GOTCHA │ {} FEEDBACK",
+            m.decisions.len(),
+            m.gotchas.len(),
+            m.feedback.len(),
+        );
+    }
+    if !m.project.is_empty()
+        || !m.milestone.is_empty()
+        || !m.roadmap.is_empty()
+        || !m.research.is_empty()
+    {
+        let _ = writeln!(
+            s,
+            "  {} PROJECT │ {} MILESTONE │ {} ROADMAP │ {} RESEARCH",
+            m.project.len(),
+            m.milestone.len(),
+            m.roadmap.len(),
+            m.research.len(),
+        );
+    }
+
+    let labels: Vec<String> = m
+        .conventions
+        .iter()
+        .filter_map(|line| {
+            let after = line.trim().strip_prefix("CONVENTION:")?;
+            let label = after.split('—').next()?.trim();
+            if label.is_empty() { None } else { Some(label.to_string()) }
+        })
+        .collect();
+    if !labels.is_empty() {
+        let _ = writeln!(s);
+        let _ = writeln!(s, "  Conventions: {}", labels.join(", "));
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Skill instructions");
+    let _ = writeln!(s, "──────────────────────────────────");
+    let _ = writeln!(
+        s,
+        "  (skill body elided — {} bytes; pass --json to include verbatim)",
+        out.skill_instructions.len(),
+    );
+    s
+}
+
 fn resolve_skill(name: &str) -> Result<Skill> {
     // Accept `execute`, `hew-execute`, or the canonical name.
     if let Some(s) = skills::find(name) {

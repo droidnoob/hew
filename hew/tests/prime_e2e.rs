@@ -27,7 +27,7 @@ fn prime_emits_valid_json_to_stdout() {
         .env("PATH", stub_dir.path())
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
-        .args(["prime", "execute"])
+        .args(["prime", "execute", "--json"])
         .assert()
         .success()
         .get_output()
@@ -43,6 +43,33 @@ fn prime_emits_valid_json_to_stdout() {
     assert_eq!(parsed["tasks"]["ready"], 1);
     assert_eq!(parsed["memories"]["conventions"].as_array().unwrap().len(), 1);
     assert!(parsed["skill_instructions"].as_str().unwrap().contains("hew-execute"));
+}
+
+#[test]
+fn prime_defaults_to_plaintext_for_non_resume_skills() {
+    let stub_dir = make_stub_dir();
+    let out = Command::cargo_bin("hew")
+        .unwrap()
+        .env("PATH", stub_dir.path())
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .args(["prime", "execute"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        serde_json::from_str::<serde_json::Value>(text.trim()).is_err(),
+        "default `prime execute` must be plaintext, got JSON:\n{text}"
+    );
+    assert!(text.contains("hew prime hew-execute"), "missing header:\n{text}");
+    assert!(text.contains("Prerequisites"), "missing Prerequisites section:\n{text}");
+    assert!(text.contains("Phases"), "missing Phases section:\n{text}");
+    assert!(text.contains("Tasks"), "missing Tasks section:\n{text}");
+    assert!(text.contains("Memories"), "missing Memories section:\n{text}");
+    assert!(text.contains("Skill instructions"), "missing skill body section:\n{text}");
 }
 
 #[test]
