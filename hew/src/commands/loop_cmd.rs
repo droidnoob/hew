@@ -13,10 +13,11 @@
 //! the ready queue and writes its iter log. SIGINT handling and the
 //! `--interactive` ask-file flow are stubbed pending hew-bif.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args as ClapArgs, Subcommand};
+use hew_core::backpressure::{self, GateCheck, Verdict};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::loop_log::{
     IterLog, LOOP_ROOT, RunLog, iter_log_path, new_run_id, run_dir, run_log_path, stop_file_path,
@@ -28,6 +29,80 @@ use hew_core::runtime::{ClaudeSpawner, RuntimeSpawner};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
+
+/// Runs the per-iter test+lint commands. Production wires the cargo
+/// invocations; tests inject a [`StaticGateRunner`] with a canned
+/// `GateCheck`.
+pub trait GateRunner {
+    fn run_gate(&self, project_root: &Path) -> GateCheck;
+}
+
+/// Production gate runner: `cargo test --quiet` + `cargo clippy
+/// --all-targets -- -D warnings`. v1 leaves the craft signals unset
+/// (false) — a follow-up task will wire them from `hew_core::config`.
+#[derive(Debug, Default)]
+pub struct CargoGateRunner;
+
+impl GateRunner for CargoGateRunner {
+    fn run_gate(&self, project_root: &Path) -> GateCheck {
+        let tests_passed = std::process::Command::new("cargo")
+            .args(["test", "--quiet"])
+            .current_dir(project_root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let lint_passed = std::process::Command::new("cargo")
+            .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+            .current_dir(project_root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        GateCheck { tests_passed, lint_passed, ..Default::default() }
+    }
+}
+
+/// Test-only gate runner that always returns a canned [`GateCheck`].
+#[derive(Debug, Clone)]
+pub struct StaticGateRunner(pub GateCheck);
+
+impl GateRunner for StaticGateRunner {
+    fn run_gate(&self, _project_root: &Path) -> GateCheck {
+        self.0.clone()
+    }
+}
+
+/// Capture `git rev-parse HEAD` for the worktree at `project_root`.
+fn git_head_sha(project_root: &Path) -> miette::Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| miette::miette!("git rev-parse: {e}"))?;
+    if !out.status.success() {
+        return Err(miette::miette!(
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `git reset --hard <sha>` in `project_root`. Used to revert an iter's
+/// commits when the backpressure gate fails.
+fn git_reset_hard(project_root: &Path, sha: &str) -> miette::Result<()> {
+    let out = std::process::Command::new("git")
+        .args(["reset", "--hard", sha])
+        .current_dir(project_root)
+        .output()
+        .map_err(|e| miette::miette!("git reset: {e}"))?;
+    if !out.status.success() {
+        return Err(miette::miette!(
+            "git reset --hard {sha} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, ClapArgs)]
 pub struct LoopCmd {
@@ -148,6 +223,23 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
+    let spawner: Option<Box<dyn RuntimeSpawner>> =
+        if args.dry_run { None } else { Some(Box::new(ClaudeSpawner::from_env())) };
+    let gate = CargoGateRunner;
+    run_loop_with(ctx, args, &bd, spawner.as_deref(), &gate, &project_root)
+}
+
+/// Testable inner. Production [`run_loop`] resolves `bd`, the spawner,
+/// the gate runner and the project root; tests construct mocks and call
+/// this directly. Returns the same `miette::Result` as `run_loop`.
+pub fn run_loop_with(
+    ctx: &Ctx,
+    args: Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    gate: &dyn GateRunner,
+    project_root: &Path,
+) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
 
@@ -162,8 +254,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     };
 
     let run_id = new_run_id();
-    let dir =
-        run_dir(&project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
+    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
     let stop_path = args.stop_file.unwrap_or_else(|| stop_file_path(&dir));
     let collector = Collector::new(stop_path);
     let mut run_state = Run::new(run_id.clone(), iso_now_utc(), cfg.clone());
@@ -174,9 +265,6 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
             eprintln!("(--dry-run: no subprocess, no git ops)");
         }
     }
-
-    let spawner: Option<ClaudeSpawner> =
-        if args.dry_run { None } else { Some(ClaudeSpawner::from_env()) };
 
     let allowed = allowed_tools::for_skill(&args.skill);
     let mut last_outcome: Option<IterOutcome> = None;
@@ -202,6 +290,26 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         let mut iter = Iter::new(iter_number, &started_at);
         iter.task_id = Some(task.id.clone());
 
+        // Capture pre-iter HEAD before the agent runs so the
+        // backpressure gate can revert iter commits on Fail. Skipped
+        // under `--dry-run` (no commits) and tolerated as None when
+        // there's no git repo at `project_root`.
+        let pre_iter_sha: Option<String> = if args.dry_run {
+            None
+        } else {
+            match git_head_sha(project_root) {
+                Ok(sha) => Some(sha),
+                Err(e) => {
+                    if !ctx.quiet {
+                        eprintln!(
+                            "iter {iter_number} skipping rollback capture (no git HEAD): {e}"
+                        );
+                    }
+                    None
+                }
+            }
+        };
+
         let primer_text = format!(
             "task: {}\ntitle: {}\npriority: P{}\nstatus: {}\n",
             task.id, task.title, task.priority, task.status
@@ -217,7 +325,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
             );
         }
 
-        let (outcome, tokens, stderr_tail) = if let Some(s) = spawner.as_ref() {
+        let (mut outcome, tokens, mut stderr_tail) = if let Some(s) = spawner {
             match s.spawn(&assembled, &allowed) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
@@ -239,6 +347,55 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         } else {
             (IterOutcome::NoClose, Default::default(), None)
         };
+
+        // Backpressure gate: run tests + lint after a non-error spawn,
+        // skip under `--dry-run`. Pure verdict logic lives in
+        // `hew_core::backpressure::evaluate`; this layer reverts the
+        // worktree to `pre_iter_sha` and files a STATUS memory on Fail.
+        if !args.dry_run && !matches!(outcome, IterOutcome::RuntimeError) {
+            let check = gate.run_gate(project_root);
+            let verdict = backpressure::evaluate(&check, args.strict);
+            match verdict {
+                Verdict::Pass => {}
+                Verdict::WarnOnly(reasons) => {
+                    if !ctx.quiet {
+                        eprintln!("iter {iter_number} gate warnings: {}", reasons.join("; "));
+                    }
+                }
+                Verdict::Fail(reasons) => {
+                    if !ctx.quiet {
+                        eprintln!("iter {iter_number} gate FAIL: {}", reasons.join("; "));
+                    }
+                    if let Some(sha) = pre_iter_sha.as_deref() {
+                        if let Err(e) = git_reset_hard(project_root, sha) {
+                            eprintln!("iter {iter_number} rollback to {sha} failed: {e}");
+                        } else if !ctx.quiet {
+                            eprintln!("iter {iter_number} rolled back to {sha}");
+                        }
+                    }
+                    let reasons_joined = reasons.join("; ");
+                    let memory_body = format!(
+                        "STATUS:loop-iter-failed:{}:{}:{}\nreasons: {}",
+                        run_id,
+                        iter_number,
+                        iso_now_utc(),
+                        reasons_joined,
+                    );
+                    if let Err(e) = bd.remember(&memory_body)
+                        && !ctx.quiet
+                    {
+                        eprintln!(
+                            "iter {iter_number} failed to record STATUS:loop-iter-failed memory: {e}"
+                        );
+                    }
+                    outcome = IterOutcome::BackpressureFail;
+                    stderr_tail = Some(match stderr_tail {
+                        Some(t) if !t.is_empty() => format!("{t}\ngate-fail: {reasons_joined}"),
+                        _ => format!("gate-fail: {reasons_joined}"),
+                    });
+                }
+            }
+        }
 
         iter.outcome = Some(outcome);
         iter.cost = tokens;
