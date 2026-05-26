@@ -6,6 +6,36 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`hew loop` — process-level outer harness.** A new subcommand
+  group that drains the bd ready queue by spawning fresh `claude -p`
+  subprocesses, with hard caps on iters, tokens, and wall clock.
+  Cache-disciplined prompt assembler keeps the skill body + memory
+  primer byte-stable across iters so Anthropic's prompt cache hits;
+  per-iter outcome, token spend, and prefix hash get atomically
+  logged to `.hew/loop/<run-id>/iter-NNN.json`.
+  - `hew loop run` — drive the loop until a stop fires.
+  - `hew loop list` — recent runs + state.
+  - `hew loop logs --tail N` — pretty-print iter rows for a run.
+  - `hew loop cancel` — touch the stop-file of a running loop.
+  - Backpressure gate runs project tests + lint per iter and reverts
+    failed iters under `--strict` (default on).
+  - Decision-resolution flow walks memory → code → research and
+    files either `DECISION:<topic>` or `DEFERRED:<topic>` depending
+    on provenance.
+- **`/hew:loop` slash** wires the loop into Claude Code.
+- **`docs/LOOP.md`** — full design + troubleshooting guide.
+- **`DEFERRED:` joins the memory-prefix allowlist** (14th prefix) so
+  the loop can file unresolved topics for operator review via
+  `hew remember --type=deferred`.
+
+### Changed
+
+- **`/hew:auto` slash body** rewritten as a thin pointer at
+  `hew loop run --until-empty`. The in-conversation walk is still
+  reachable via `/hew:work`.
+
 ## [0.8.1] — 2026-05-26
 
 Tree-sitter on by default. The 0.8.0 release shipped `hew blast` but

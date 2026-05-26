@@ -97,6 +97,25 @@ If you're picking up where someone left off, start with `hew prime resume` (whic
 2. Register in `hew_core::skills::CORE/BROWNFIELD/OPTIONAL` or `hew_core::slash::ALL`.
 3. **Bump three hardcoded test counts** (see `GOTCHA:test-counts-drift` below). The drift tests will fail otherwise.
 
+### Running the loop
+
+For long autonomous runs, drive `hew loop` instead of staying in one chat session:
+
+```sh
+hew loop run --until-empty            # drain the ready queue
+hew loop run --max-iter 5 --strict    # bounded run, craft = fail
+hew loop run --budget-tokens 200000   # cap cumulative tokens
+hew loop run --dry-run --max-iter 1   # prompt-assemble smoke (no spawn)
+
+hew loop list                         # recent runs + state
+hew loop logs --tail 5                # last 5 iters of latest run
+hew loop cancel                       # touch stop-file on latest run
+```
+
+Each iter is a fresh `claude -p` subprocess; the skill body + memory primer prefix is byte-stable across iters so the prompt cache hits (check `prompt_prefix_hash` in `.hew/loop/<run-id>/iter-NNN.json`).
+
+`/hew:auto` now points at `hew loop run --until-empty`. The in-conversation walk is still reachable via `/hew:work`. Full guide: [docs/LOOP.md](./docs/LOOP.md).
+
 ### Statusline
 
 `hew statusline` emits a one-line agent statusline (scope label, progress bar, percent, phase, epic-fraction, optional user). It's auto-wired into Claude Code by `hew init --runtime=claude`, which upserts a top-level `statusLine` block into `.claude/settings.json` with the same `hew_managed: true` discriminator the SessionStart hook uses — re-install is idempotent, uninstall is symmetric, and a user can opt out by removing the flag.
