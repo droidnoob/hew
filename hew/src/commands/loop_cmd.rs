@@ -10,8 +10,12 @@
 //! exercises prompt assembly + iter logging). Real spawn requires the
 //! Claude Code CLI on PATH (or `HEW_LOOP_CLAUDE_BIN`); when present, a
 //! plain `hew loop --max-iter 1` runs one real iter against the top of
-//! the ready queue and writes its iter log. SIGINT handling and the
-//! `--interactive` ask-file flow are stubbed pending hew-bif.
+//! the ready queue and writes its iter log. Ctrl+C installs a `ctrlc`
+//! handler that flips the shared `CancelFlag` → next snapshot →
+//! `StopReason::Cancelled` (the currently-running iter completes
+//! cleanly because we use `Command::output()` and don't kill the
+//! child; a follow-up will wire `Child::kill()` for fast abort). The
+//! `--interactive` ask-file flow is still stubbed pending hew-cyk.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -259,6 +263,16 @@ pub fn run_loop_with(
     let collector = Collector::new(stop_path);
     let mut run_state = Run::new(run_id.clone(), iso_now_utc(), cfg.clone());
 
+    // Install (or refresh) the SIGINT handler so Ctrl+C flips the
+    // shared CancelFlag instead of killing the loop process mid-iter.
+    // `ctrlc::set_handler` is process-global and refuses a second
+    // install; we silently ignore that case so back-to-back loop runs
+    // (e.g. integration tests) still work.
+    {
+        let flag = collector.cancel.clone();
+        let _ = ctrlc::set_handler(move || flag.cancel());
+    }
+
     if !ctx.quiet {
         eprintln!("hew loop {} — run-dir={}", &run_id, dir.display());
         if args.dry_run {
@@ -352,7 +366,11 @@ pub fn run_loop_with(
         // skip under `--dry-run`. Pure verdict logic lives in
         // `hew_core::backpressure::evaluate`; this layer reverts the
         // worktree to `pre_iter_sha` and files a STATUS memory on Fail.
-        if !args.dry_run && !matches!(outcome, IterOutcome::RuntimeError) {
+        // Skip the gate entirely if the user pressed Ctrl+C while the
+        // spawn was running — no point burning a `cargo test` cycle on
+        // a run we're about to abort.
+        let cancelled_mid_iter = collector.cancel.is_cancelled();
+        if !args.dry_run && !matches!(outcome, IterOutcome::RuntimeError) && !cancelled_mid_iter {
             let check = gate.run_gate(project_root);
             let verdict = backpressure::evaluate(&check, args.strict);
             match verdict {
