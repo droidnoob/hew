@@ -26,6 +26,10 @@ pub struct RunConfig {
     pub strict: bool,
     /// Allow ask-files to interrupt the loop for operator input.
     pub interactive: bool,
+    /// Resolve `DEFERRED:` memories the agent files during an iter by
+    /// running `decide::resolve` after the iter completes. Mutually
+    /// exclusive with `interactive`.
+    pub unattended: bool,
 }
 
 impl Default for RunConfig {
@@ -38,6 +42,7 @@ impl Default for RunConfig {
             research_budget: ResearchBudget::default(),
             strict: true,
             interactive: false,
+            unattended: false,
         }
     }
 }

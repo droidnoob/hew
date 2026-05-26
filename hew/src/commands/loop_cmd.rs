@@ -194,10 +194,18 @@ pub struct Args {
     pub strict: bool,
 
     /// Pause on ask-files for operator input. Default off; the v1 wiring
-    /// is stubbed (hew-bif) — passing `--interactive` is honored in the
-    /// run config but doesn't yet drive any prompts.
-    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    /// is stubbed (hew-cyk) — passing `--interactive` is honored in the
+    /// run config but doesn't yet drive any prompts. Mutually exclusive
+    /// with `--unattended`.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, conflicts_with = "unattended")]
     pub interactive: bool,
+
+    /// Resolve any new `DEFERRED:<topic>` memory the agent files during
+    /// an iter by running `decide::resolve` after the iter completes.
+    /// Matches → `DECISION:` memory; misses → leave the DEFERRED for
+    /// operator review. Mutually exclusive with `--interactive`.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    pub unattended: bool,
 
     /// Runtime to drive. Only `claude` is wired in v1.
     #[arg(long, default_value = "claude")]
@@ -255,6 +263,7 @@ pub fn run_loop_with(
         research_budget: args.research_budget,
         strict: args.strict,
         interactive: args.interactive,
+        unattended: args.unattended,
     };
 
     let run_id = new_run_id();
@@ -303,6 +312,15 @@ pub fn run_loop_with(
         let started_at = iso_now_utc();
         let mut iter = Iter::new(iter_number, &started_at);
         iter.task_id = Some(task.id.clone());
+
+        // Snapshot the memory set so the post-iter DEFERRED-resolution
+        // pass can identify which entries the agent filed *during this
+        // iter*. Only collected when `--unattended` is active.
+        let pre_iter_memory_ids: std::collections::BTreeSet<String> = if args.unattended {
+            bd.memories().map(|m| m.keys().cloned().collect()).unwrap_or_default()
+        } else {
+            std::collections::BTreeSet::new()
+        };
 
         // Capture pre-iter HEAD before the agent runs so the
         // backpressure gate can revert iter commits on Fail. Skipped
@@ -411,6 +429,62 @@ pub fn run_loop_with(
                         Some(t) if !t.is_empty() => format!("{t}\ngate-fail: {reasons_joined}"),
                         _ => format!("gate-fail: {reasons_joined}"),
                     });
+                }
+            }
+        }
+
+        // Unattended decision-resolution: convert any new DEFERRED
+        // memories the agent filed during this iter into DECISIONs
+        // when `decide::resolve` finds prior art (memory / code).
+        // Pure research-driven resolution is not yet wired (see
+        // `BdDecisionContext::run_research`), so topics that only
+        // depend on web research stay deferred and the operator sees
+        // the existing DEFERRED on next review.
+        if args.unattended
+            && !args.dry_run
+            && !matches!(outcome, IterOutcome::RuntimeError)
+            && let Ok(after) = bd.memories()
+        {
+            for (id, body) in after.iter() {
+                if pre_iter_memory_ids.contains(id) {
+                    continue;
+                }
+                if !body.trim_start().starts_with("DEFERRED:") {
+                    continue;
+                }
+                let Some(topic) = hew_core::decide::extract_deferred_topic(body) else {
+                    continue;
+                };
+                let mut dctx =
+                    hew_core::decide::BdDecisionContext::new(bd, project_root.to_path_buf());
+                let resolution = hew_core::decide::resolve(&topic, &mut dctx);
+                match resolution {
+                    hew_core::decide::Resolution::Memory(hit) => {
+                        let decision = format!(
+                            "DECISION:{topic} — resolved from prior memory {} ({})",
+                            hit.id,
+                            hit.body.trim().chars().take(120).collect::<String>(),
+                        );
+                        let _ = bd.remember(&decision);
+                        iter.decisions.push(topic.clone());
+                    }
+                    hew_core::decide::Resolution::Code(citations) => {
+                        let cite = citations
+                            .first()
+                            .map(|c| format!("{}:{}", c.file, c.line))
+                            .unwrap_or_else(|| "(no citation)".to_string());
+                        let decision =
+                            format!("DECISION:{topic} — resolved from prior art at {cite}",);
+                        let _ = bd.remember(&decision);
+                        iter.decisions.push(topic.clone());
+                    }
+                    hew_core::decide::Resolution::Decided { decision_body, .. } => {
+                        let _ = bd.remember(&decision_body);
+                        iter.decisions.push(topic.clone());
+                    }
+                    hew_core::decide::Resolution::Deferred { .. } => {
+                        iter.deferred.push(id.clone());
+                    }
                 }
             }
         }
