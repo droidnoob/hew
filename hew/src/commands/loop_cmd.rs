@@ -28,7 +28,7 @@ use hew_core::loop_log::{
     write_json_atomic,
 };
 use hew_core::prompt;
-use hew_core::runner::{Iter, IterOutcome, ResearchBudget, Run, RunConfig};
+use hew_core::runner::{Iter, IterOutcome, Run, RunConfig};
 use hew_core::runtime::{ClaudeSpawner, RuntimeSpawner};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
@@ -185,10 +185,6 @@ pub struct Args {
     #[arg(long, value_parser = parse_duration)]
     pub budget_wall: Option<Duration>,
 
-    /// Research budget per iter, formatted `<web>+<fetch>` (default `5+3`).
-    #[arg(long, value_parser = parse_research_budget, default_value = "5+3")]
-    pub research_budget: ResearchBudget,
-
     /// Promote craft warnings to failures. Default on; `--no-strict` opts out.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub strict: bool,
@@ -260,7 +256,6 @@ pub fn run_loop_with(
         stop_on_ready_empty: args.until_empty,
         budget_tokens: args.budget_tokens,
         budget_wall: args.budget_wall,
-        research_budget: args.research_budget,
         strict: args.strict,
         interactive: args.interactive,
         unattended: args.unattended,
@@ -787,23 +782,6 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
     }
 }
 
-fn parse_research_budget(s: &str) -> Result<ResearchBudget, String> {
-    let mut parts = s.splitn(2, '+');
-    let web: u32 = parts
-        .next()
-        .ok_or_else(|| "expected <web>+<fetch>".to_string())?
-        .trim()
-        .parse()
-        .map_err(|e| format!("invalid web budget: {e}"))?;
-    let fetch: u32 = parts
-        .next()
-        .ok_or_else(|| "expected <web>+<fetch>".to_string())?
-        .trim()
-        .parse()
-        .map_err(|e| format!("invalid fetch budget: {e}"))?;
-    Ok(ResearchBudget { web, fetch })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,25 +798,5 @@ mod tests {
         assert!(parse_duration("5d").is_err());
         assert!(parse_duration("").is_err());
         assert!(parse_duration("xs").is_err());
-    }
-
-    #[test]
-    fn parse_research_budget_defaults_5_plus_3() {
-        let rb = parse_research_budget("5+3").unwrap();
-        assert_eq!(rb.web, 5);
-        assert_eq!(rb.fetch, 3);
-    }
-
-    #[test]
-    fn parse_research_budget_custom() {
-        let rb = parse_research_budget("10+0").unwrap();
-        assert_eq!(rb.web, 10);
-        assert_eq!(rb.fetch, 0);
-    }
-
-    #[test]
-    fn parse_research_budget_rejects_malformed() {
-        assert!(parse_research_budget("5").is_err());
-        assert!(parse_research_budget("a+b").is_err());
     }
 }

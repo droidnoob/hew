@@ -37,7 +37,6 @@ Use the in-conversation flow (`/hew:auto`, `/hew:work`) when:
 --strict        = on    craft warnings (testing, lint) promote to fail
 --interactive   = off   no ask-file pauses
 --runtime       = claude  only claude is wired in v1
---research-budget = 5+3 web searches + fetches per iter
 ```
 
 Override via CLI flags; see `hew loop run --help` for the full list.

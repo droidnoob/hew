@@ -20,8 +20,6 @@ pub struct RunConfig {
     pub budget_tokens: Option<u64>,
     /// Wall-clock budget for the whole run. `None` = unlimited.
     pub budget_wall: Option<Duration>,
-    /// Research budget per iter (web searches + fetches). Default 5+3.
-    pub research_budget: ResearchBudget,
     /// Promote craft.testing + craft.lint warnings to failures.
     pub strict: bool,
     /// Allow ask-files to interrupt the loop for operator input.
@@ -39,23 +37,10 @@ impl Default for RunConfig {
             stop_on_ready_empty: true,
             budget_tokens: None,
             budget_wall: None,
-            research_budget: ResearchBudget::default(),
             strict: true,
             interactive: false,
             unattended: false,
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ResearchBudget {
-    pub web: u32,
-    pub fetch: u32,
-}
-
-impl Default for ResearchBudget {
-    fn default() -> Self {
-        Self { web: 5, fetch: 3 }
     }
 }
 
@@ -158,7 +143,6 @@ pub struct Iter {
     pub ended_at: Option<String>,
     pub outcome: Option<IterOutcome>,
     pub cost: TokenSpend,
-    pub research_spent: ResearchSpend,
     /// Decisions resolved during this iter (memory ids of DECISION: entries).
     pub decisions: Vec<String>,
     /// Topics deferred for operator review (memory ids of DEFERRED: entries).
@@ -176,7 +160,6 @@ impl Iter {
             ended_at: None,
             outcome: None,
             cost: TokenSpend::default(),
-            research_spent: ResearchSpend::default(),
             decisions: Vec::new(),
             deferred: Vec::new(),
             stderr_tail: None,
@@ -196,12 +179,6 @@ impl TokenSpend {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_create
     }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResearchSpend {
-    pub web: u32,
-    pub fetch: u32,
 }
 
 /// Aggregate state for one `hew loop` invocation.
@@ -250,8 +227,6 @@ mod tests {
         assert!(c.strict);
         assert!(c.stop_on_ready_empty);
         assert!(!c.interactive);
-        assert_eq!(c.research_budget.web, 5);
-        assert_eq!(c.research_budget.fetch, 3);
     }
 
     #[test]

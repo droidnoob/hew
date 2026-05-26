@@ -114,7 +114,6 @@ fn args_one_iter() -> Args {
         until_empty: false,
         budget_tokens: None,
         budget_wall: None,
-        research_budget: hew_core::runner::ResearchBudget { web: 5, fetch: 3 },
         strict: true,
         interactive: false,
         unattended: false,
