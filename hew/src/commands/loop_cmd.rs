@@ -286,6 +286,7 @@ pub fn run_loop_with(
 
     let allowed = allowed_tools::for_skill(&args.skill);
     let mut last_outcome: Option<IterOutcome> = None;
+    let mut iter_logs: Vec<IterLog> = Vec::new();
 
     // Freeze the bd prime payload once at run start: this is the
     // cacheable per-run primer the agent sees on every iter. New
@@ -532,6 +533,7 @@ pub fn run_loop_with(
         let log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new());
         write_json_atomic(&iter_log_path(&dir, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
+        iter_logs.push(log);
 
         last_outcome = Some(outcome);
         run_state.iters.push(iter);
@@ -546,21 +548,17 @@ pub fn run_loop_with(
     write_json_atomic(&run_log_path(&dir), &summary)
         .map_err(|e| miette::miette!("write final run log: {e}"))?;
 
-    print_summary(ctx, &run_state, &dir);
+    print_summary(ctx, &run_state, &iter_logs, &dir);
     Ok(())
 }
 
-fn print_summary(ctx: &Ctx, run: &Run, dir: &std::path::Path) {
+fn print_summary(ctx: &Ctx, run: &Run, iter_logs: &[IterLog], dir: &std::path::Path) {
     if ctx.quiet {
         return;
     }
-    let stop = run.stop_reason.map(|r| format!("{r:?}")).unwrap_or_else(|| "(none)".to_string());
-    println!("hew loop summary");
-    println!("  run-id: {}", run.id);
-    println!("  iters:  {}", run.iters.len());
-    println!("  tokens: {}", run.cumulative_tokens());
-    println!("  stop:   {stop}");
-    println!("  logs:   {}", dir.display());
+    let summary = hew_core::loop_summary::summarize(run, iter_logs);
+    let colorize = std::env::var_os("NO_COLOR").is_none();
+    print!("{}", hew_core::loop_summary::render(&summary, &dir.display().to_string(), colorize),);
 }
 
 fn loop_root(project_root: &std::path::Path) -> PathBuf {
