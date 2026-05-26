@@ -41,34 +41,33 @@ pub trait GateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck;
 }
 
-/// Production gate runner. Detects the project's language via sentinel
-/// files (Cargo.toml / pyproject.toml / go.mod / package.json) and runs
-/// the matching `(test, lint)` pair. Unknown stack → skip-pass (both
-/// signals `true`) with a stderr breadcrumb; the loop should not fail
-/// just because we don't have a gate to run.
+/// Production gate runner. Reads `(test, lint)` from project-authored
+/// signals (`Makefile`, `justfile`, `package.json` scripts) — see
+/// [`hew_core::gate`]. No signals → no gate; the agent runs whatever
+/// checks it wants directly inside the iter via Bash, which is the
+/// correct default given we'd otherwise be guessing.
 ///
 /// Spawn errors are split: `ErrorKind::NotFound` (tool not installed)
 /// degrades to skip-pass with a breadcrumb; any other error or a
-/// non-zero exit fails the gate normally. This keeps `hew loop` usable
-/// in mixed environments (e.g. Python repo without `ruff` installed)
-/// without silently masking real test/lint regressions.
+/// non-zero exit fails the gate normally.
 #[derive(Debug, Default)]
 pub struct AutoGateRunner;
 
 /// Kept as a thin alias so any external callers wiring the production
-/// runner by name still compile. The behavior is now language-aware.
+/// runner by name still compile. The behavior no longer hardcodes
+/// cargo — see [`AutoGateRunner`] / [`hew_core::gate`].
 pub type CargoGateRunner = AutoGateRunner;
 
 impl GateRunner for AutoGateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck {
-        let Some(spec) = hew_core::gate::detect(project_root) else {
+        let spec = hew_core::gate::detect(project_root);
+        if !spec.has_any() {
             eprintln!(
-                "hew loop: no recognized project stack at {} — gate skipped",
+                "hew loop: no gate signals (Makefile/justfile/package.json) at {} — gate skipped",
                 project_root.display()
             );
             return GateCheck { tests_passed: true, lint_passed: true, ..Default::default() };
-        };
-
+        }
         let tests_passed = run_gate_step("test", &spec.test_cmd, project_root);
         let lint_passed = run_gate_step("lint", &spec.lint_cmd, project_root);
         GateCheck { tests_passed, lint_passed, ..Default::default() }
