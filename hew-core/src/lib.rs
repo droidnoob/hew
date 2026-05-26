@@ -30,6 +30,7 @@ pub mod prompt;
 pub mod research_gate;
 pub mod review;
 pub mod runner;
+pub mod runtime;
 pub mod skills;
 pub mod slash;
 pub mod stacks;
