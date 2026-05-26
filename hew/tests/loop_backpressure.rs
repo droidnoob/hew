@@ -444,6 +444,96 @@ impl RuntimeSpawner for SilentlyClosingSpawner {
     }
 }
 
+/// Spawner that closes whichever ready task is at the front of the
+/// queue. Used to drive a multi-iter loop where each iter promotes
+/// the next task.
+#[derive(Debug)]
+struct DrainingSpawner {
+    bd: std::sync::Arc<MutableReadyBd>,
+}
+
+impl RuntimeSpawner for DrainingSpawner {
+    fn spawn(
+        &self,
+        _prompt: &AssembledPrompt,
+        _allowed_tools: &[String],
+    ) -> hew_core::error::Result<SpawnOutcome> {
+        let head = self.bd.ready.lock().unwrap().first().map(|t| t.id.clone());
+        if let Some(id) = head {
+            self.bd.remove_ready(&id);
+        }
+        Ok(SpawnOutcome {
+            success: true,
+            closed_task: None,
+            tokens: TokenSpend { input: 1, output: 1, cache_read: 0, cache_create: 0 },
+            stderr_tail: String::new(),
+            raw_text: "done".into(),
+        })
+    }
+}
+
+#[test]
+fn prompt_prefix_hash_is_stable_across_iters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = MutableReadyBd::with(vec![
+        ReadyTask {
+            id: "hew-one".into(),
+            title: "first".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        },
+        ReadyTask {
+            id: "hew-two".into(),
+            title: "second".into(),
+            description: String::new(),
+            priority: 2,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        },
+    ]);
+    let spawner = DrainingSpawner { bd: bd.clone() };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_one_iter();
+    args.max_iter = Some(2);
+
+    run_loop_with(&ctx(), args, &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+
+    let runs_root = repo.join(".hew/loop");
+    let run_id = std::fs::read_dir(&runs_root)
+        .expect("loop runs dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.starts_with("loop-"))
+        .expect("run-id dir");
+    let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
+    let log1: IterLog = serde_json::from_str(
+        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+    )
+    .expect("parse");
+    let log2: IterLog = serde_json::from_str(
+        &std::fs::read_to_string(iter_log_path(&dir, 2)).expect("read iter-002.json"),
+    )
+    .expect("parse");
+    let h1 = log1.prompt_prefix_hash.as_deref().expect("iter-001 has prefix hash");
+    let h2 = log2.prompt_prefix_hash.as_deref().expect("iter-002 has prefix hash");
+    assert_eq!(
+        h1, h2,
+        "prefix_hash must be byte-stable across iters — got {h1} vs {h2}; per-iter content leaked into the cacheable prefix",
+    );
+}
+
 #[test]
 fn out_of_band_closure_promotes_no_close_to_closed() {
     let tmp = tempfile::tempdir().expect("tempdir");

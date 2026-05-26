@@ -292,6 +292,17 @@ pub fn run_loop_with(
     let allowed = allowed_tools::for_skill(&args.skill);
     let mut last_outcome: Option<IterOutcome> = None;
 
+    // Freeze the bd prime payload once at run start: this is the
+    // cacheable per-run primer the agent sees on every iter. New
+    // memories filed mid-run (STATUS:loop-iter-failed, DECISIONs from
+    // unattended resolution, etc.) deliberately don't appear in the
+    // prompt until the next `hew loop run` invocation — the trade-off
+    // is agent-stale-by-up-to-one-run for a byte-stable prompt prefix
+    // that the Anthropic prompt cache can hit across iters. Agents can
+    // always shell `hew memories --prefix=…` inside a spawn if they
+    // need fresh state.
+    let primer_text = bd.prime_raw().unwrap_or_default();
+
     loop {
         let ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
         let signals = collector.snapshot(&run_state, ready.len() as u32, last_outcome);
@@ -353,12 +364,12 @@ pub fn run_loop_with(
             }
         };
 
-        let primer_text = format!(
-            "task: {}\ntitle: {}\npriority: P{}\nstatus: {}\n",
-            task.id, task.title, task.priority, task.status
+        // Per-iter task fields live in the *tail* — they change every
+        // iter and must not invalidate the cacheable prefix.
+        let task_brief = format!(
+            "Current task: {} ({}, P{}, status={}).\n\nDrive `{}` to close per the {} skill body.",
+            task.id, task.title, task.priority, task.status, task.id, args.skill,
         );
-        let task_brief =
-            format!("Drive task `{}` to close per the {} skill body.", task.id, args.skill);
         let assembled = prompt::assemble(skill.body, &primer_text, &task_brief);
 
         if !ctx.quiet {
