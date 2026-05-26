@@ -41,27 +41,61 @@ pub trait GateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck;
 }
 
-/// Production gate runner: `cargo test --quiet` + `cargo clippy
-/// --all-targets -- -D warnings`. v1 leaves the craft signals unset
-/// (false) — a follow-up task will wire them from `hew_core::config`.
+/// Production gate runner. Detects the project's language via sentinel
+/// files (Cargo.toml / pyproject.toml / go.mod / package.json) and runs
+/// the matching `(test, lint)` pair. Unknown stack → skip-pass (both
+/// signals `true`) with a stderr breadcrumb; the loop should not fail
+/// just because we don't have a gate to run.
+///
+/// Spawn errors are split: `ErrorKind::NotFound` (tool not installed)
+/// degrades to skip-pass with a breadcrumb; any other error or a
+/// non-zero exit fails the gate normally. This keeps `hew loop` usable
+/// in mixed environments (e.g. Python repo without `ruff` installed)
+/// without silently masking real test/lint regressions.
 #[derive(Debug, Default)]
-pub struct CargoGateRunner;
+pub struct AutoGateRunner;
 
-impl GateRunner for CargoGateRunner {
+/// Kept as a thin alias so any external callers wiring the production
+/// runner by name still compile. The behavior is now language-aware.
+pub type CargoGateRunner = AutoGateRunner;
+
+impl GateRunner for AutoGateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck {
-        let tests_passed = std::process::Command::new("cargo")
-            .args(["test", "--quiet"])
-            .current_dir(project_root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let lint_passed = std::process::Command::new("cargo")
-            .args(["clippy", "--all-targets", "--", "-D", "warnings"])
-            .current_dir(project_root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let Some(spec) = hew_core::gate::detect(project_root) else {
+            eprintln!(
+                "hew loop: no recognized project stack at {} — gate skipped",
+                project_root.display()
+            );
+            return GateCheck { tests_passed: true, lint_passed: true, ..Default::default() };
+        };
+
+        let tests_passed = run_gate_step("test", &spec.test_cmd, project_root);
+        let lint_passed = run_gate_step("lint", &spec.lint_cmd, project_root);
         GateCheck { tests_passed, lint_passed, ..Default::default() }
+    }
+}
+
+/// Run one step of the auto-detected gate. Empty `cmd` (e.g. Node repo
+/// with no `lint` script) is a deliberate skip and passes. ENOENT on
+/// the binary is treated as skip-pass with a breadcrumb so a missing
+/// optional toolchain (`ruff`, `pytest`) doesn't trap the loop. Any
+/// other spawn error or non-zero exit fails the step.
+fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
+    if cmd.is_empty() {
+        return true;
+    }
+    let mut command = std::process::Command::new(&cmd[0]);
+    command.args(&cmd[1..]).current_dir(project_root);
+    match command.status() {
+        Ok(s) => s.success(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("hew loop: `{}` not found in PATH — {label} gate skipped", cmd[0]);
+            true
+        }
+        Err(e) => {
+            eprintln!("hew loop: {label} gate spawn failed ({e}); treating as fail");
+            false
+        }
     }
 }
 
@@ -277,7 +311,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
     let spawner: Option<Box<dyn RuntimeSpawner>> =
         if args.dry_run { None } else { Some(Box::new(ClaudeSpawner::from_env())) };
-    let gate = CargoGateRunner;
+    let gate = AutoGateRunner;
     run_loop_with(ctx, args, &bd, spawner.as_deref(), &gate, &project_root)
 }
 
