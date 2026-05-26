@@ -371,6 +371,123 @@ fn without_unattended_deferred_is_left_alone() {
     );
 }
 
+/// Bd whose ready set is mutable. Used to simulate `hew task close`
+/// happening inside the spawn — the task disappears from `ready()`
+/// after the spawner mutates the inner Vec.
+#[derive(Debug)]
+struct MutableReadyBd {
+    ready: std::sync::Mutex<Vec<ReadyTask>>,
+    remembered: std::sync::Mutex<Vec<String>>,
+}
+
+impl MutableReadyBd {
+    fn with(ready: Vec<ReadyTask>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            ready: std::sync::Mutex::new(ready),
+            remembered: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+    fn remove_ready(&self, id: &str) {
+        self.ready.lock().unwrap().retain(|t| t.id != id);
+    }
+}
+
+impl BdClient for MutableReadyBd {
+    fn version(&self) -> HewResult<BdVersion> {
+        Ok(BdVersion { raw: "test 1.0.0".into(), semver: "1.0.0".into() })
+    }
+    fn ready(&self) -> HewResult<Vec<ReadyTask>> {
+        Ok(self.ready.lock().unwrap().clone())
+    }
+    fn stats(&self) -> HewResult<StatsSummary> {
+        Ok(StatsSummary::default())
+    }
+    fn prime_raw(&self) -> HewResult<String> {
+        Ok(String::new())
+    }
+    fn memories(&self) -> HewResult<BTreeMap<String, String>> {
+        Ok(BTreeMap::new())
+    }
+    fn remember(&self, text: &str) -> HewResult<()> {
+        self.remembered.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+    fn run_raw(&self, _: &[&OsStr]) -> HewResult<BdOutput> {
+        Ok(BdOutput { stdout: String::new(), stderr: String::new() })
+    }
+}
+
+/// Spawner that closes the primed task via the shared bd handle and
+/// returns a SpawnOutcome WITHOUT the literal `closed <id>` marker in
+/// either `closed_task` or `raw_text`. Exercises the out-of-band
+/// closure detection (hew-7tp).
+#[derive(Debug)]
+struct SilentlyClosingSpawner {
+    bd: std::sync::Arc<MutableReadyBd>,
+    task_id: String,
+}
+
+impl RuntimeSpawner for SilentlyClosingSpawner {
+    fn spawn(
+        &self,
+        _prompt: &AssembledPrompt,
+        _allowed_tools: &[String],
+    ) -> hew_core::error::Result<SpawnOutcome> {
+        self.bd.remove_ready(&self.task_id);
+        Ok(SpawnOutcome {
+            success: true,
+            closed_task: None,
+            tokens: TokenSpend { input: 5, output: 3, cache_read: 0, cache_create: 0 },
+            stderr_tail: String::new(),
+            raw_text: "Done; added the struct and tests.".into(),
+        })
+    }
+}
+
+#[test]
+fn out_of_band_closure_promotes_no_close_to_closed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let task_id = "hew-silent".to_string();
+    let bd = MutableReadyBd::with(vec![ReadyTask {
+        id: task_id.clone(),
+        title: "silent close".into(),
+        description: String::new(),
+        priority: 1,
+        status: "open".into(),
+        issue_type: "task".into(),
+        parent: None,
+    }]);
+    let spawner = SilentlyClosingSpawner { bd: bd.clone(), task_id: task_id.clone() };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    run_loop_with(&ctx(), args_one_iter(), &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+
+    let runs_root = repo.join(".hew/loop");
+    let run_id = std::fs::read_dir(&runs_root)
+        .expect("loop runs dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.starts_with("loop-"))
+        .expect("run-id dir");
+    let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
+    let log: IterLog = serde_json::from_str(
+        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+    )
+    .expect("parse iter log");
+    assert_eq!(
+        log.outcome.as_deref(),
+        Some("closed"),
+        "expected NoClose to be promoted to Closed after the task left the ready set",
+    );
+}
+
 #[test]
 fn gate_pass_keeps_iter_commit() {
     let tmp = tempfile::tempdir().expect("tempdir");

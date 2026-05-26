@@ -300,6 +300,17 @@ pub fn run_loop_with(
             break;
         }
 
+        // Snapshot the pre-iter ready set so we can detect closure
+        // out-of-band: if the iter's task is no longer in `bd.ready()`
+        // after the spawn, it was closed — even when the agent ran
+        // `hew task close` via Bash and the literal `closed <id>`
+        // marker never made it into the model's final reply. The
+        // marker-text path (`detect_closed_task`) is kept as a
+        // secondary signal for cases where the agent closes a
+        // *different* task than the one we primed.
+        let pre_ready_ids: std::collections::BTreeSet<String> =
+            ready.iter().map(|t| t.id.clone()).collect();
+
         let task = match ready.into_iter().next() {
             Some(t) => t,
             None => {
@@ -379,6 +390,23 @@ pub fn run_loop_with(
         } else {
             (IterOutcome::NoClose, Default::default(), None)
         };
+
+        // Out-of-band closure detection. detect_closed_task only
+        // fires when the model echoes `closed <id>` in its final
+        // reply; agents that close via `hew task close` (Bash tool)
+        // don't surface the marker. Promote NoClose → Closed if the
+        // iter's task is no longer in the ready set. Skipped under
+        // --dry-run (no real bd state changes).
+        if !args.dry_run
+            && matches!(outcome, IterOutcome::NoClose)
+            && let Ok(post_ready) = bd.ready()
+        {
+            let still_ready = post_ready.iter().any(|t| t.id == task.id);
+            let was_ready = pre_ready_ids.contains(&task.id);
+            if was_ready && !still_ready {
+                outcome = IterOutcome::Closed;
+            }
+        }
 
         // Backpressure gate: run tests + lint after a non-error spawn,
         // skip under `--dry-run`. Pure verdict logic lives in
