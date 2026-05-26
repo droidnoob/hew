@@ -4,6 +4,7 @@
 //! easy to unit test. The `hew` binary wires presentation on top.
 
 pub mod allowed_tools;
+pub mod backpressure;
 pub mod bd;
 #[cfg(feature = "treesitter")]
 pub mod blast;
