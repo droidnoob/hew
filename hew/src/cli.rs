@@ -157,8 +157,8 @@ pub enum Command {
     /// Requires the `treesitter` build feature.
     Blast(crate::commands::blast::Args),
 
-    /// Run the autonomous outer loop: assemble prompt, spawn agent
-    /// runtime, run gate, log, repeat. Use `--dry-run` to exercise
-    /// prompt assembly without subprocess + git side effects.
-    Loop(crate::commands::loop_cmd::Args),
+    /// Autonomous outer loop: `hew loop run` drives the queue; `hew
+    /// loop cancel` / `logs` / `list` inspect or stop running and
+    /// completed runs.
+    Loop(crate::commands::loop_cmd::LoopCmd),
 }

@@ -16,10 +16,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Args as ClapArgs;
+use clap::{Args as ClapArgs, Subcommand};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::loop_log::{
-    IterLog, RunLog, iter_log_path, new_run_id, run_dir, run_log_path, stop_file_path,
+    IterLog, LOOP_ROOT, RunLog, iter_log_path, new_run_id, run_dir, run_log_path, stop_file_path,
     write_json_atomic,
 };
 use hew_core::prompt;
@@ -28,6 +28,64 @@ use hew_core::runtime::{ClaudeSpawner, RuntimeSpawner};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
+
+#[derive(Debug, ClapArgs)]
+pub struct LoopCmd {
+    #[command(subcommand)]
+    pub sub: LoopSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LoopSub {
+    /// Drive the autonomous outer loop until a stop signal fires.
+    Run(Args),
+    /// Touch the stop-file of a running loop. Defaults to the most
+    /// recent run.
+    Cancel(CancelArgs),
+    /// Pretty-print iter logs from a completed or running loop.
+    Logs(LogsArgs),
+    /// List recent loop runs and their state.
+    List(ListArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct CancelArgs {
+    /// Specific run-id to cancel. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct LogsArgs {
+    /// Run-id to inspect. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Only show the last N iters (default 5; `0` = all).
+    #[arg(long, default_value_t = 5)]
+    pub tail: u32,
+    /// Read a single iter by number.
+    #[arg(long)]
+    pub iter: Option<u32>,
+    /// Emit JSON rather than the pretty table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct ListArgs {
+    /// Max rows to show. Default 20.
+    #[arg(long, default_value_t = 20)]
+    pub n: u32,
+}
+
+pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
+    match cmd.sub {
+        LoopSub::Run(a) => run_loop(ctx, a),
+        LoopSub::Cancel(a) => run_cancel(ctx, a),
+        LoopSub::Logs(a) => run_logs(ctx, a),
+        LoopSub::List(a) => run_list(ctx, a),
+    }
+}
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -80,7 +138,7 @@ pub struct Args {
     pub skill: String,
 }
 
-pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
+pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     if args.runtime != "claude" {
         return Err(miette::miette!(
             "unsupported runtime `{}`; only `claude` is wired in v1",
@@ -220,6 +278,210 @@ fn print_summary(ctx: &Ctx, run: &Run, dir: &std::path::Path) {
     println!("  tokens: {}", run.cumulative_tokens());
     println!("  stop:   {stop}");
     println!("  logs:   {}", dir.display());
+}
+
+fn loop_root(project_root: &std::path::Path) -> PathBuf {
+    project_root.join(LOOP_ROOT)
+}
+
+/// Return the most recently modified subdirectory of `.hew/loop/`. Used
+/// when the user omits `--run-id` on cancel/logs.
+fn latest_run_id(project_root: &std::path::Path) -> miette::Result<String> {
+    let root = loop_root(project_root);
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let entries = std::fs::read_dir(&root)
+        .map_err(|e| miette::miette!("no loop runs in {}: {e}", root.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        if !name.starts_with("loop-") {
+            continue;
+        }
+        let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        match &best {
+            None => best = Some((mtime, name.to_string())),
+            Some((bm, _)) if mtime > *bm => best = Some((mtime, name.to_string())),
+            _ => {}
+        }
+    }
+    best.map(|(_, n)| n).ok_or_else(|| miette::miette!("no loop runs found in {}", root.display()))
+}
+
+pub fn run_cancel(ctx: &Ctx, args: CancelArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let run_id = match args.run_id {
+        Some(id) => id,
+        None => latest_run_id(&project_root)?,
+    };
+    let dir = loop_root(&project_root).join(&run_id);
+    if !dir.exists() {
+        return Err(miette::miette!("run-dir not found: {}", dir.display()));
+    }
+    let stop = stop_file_path(&dir);
+    std::fs::write(&stop, b"cancel\n")
+        .map_err(|e| miette::miette!("write {}: {e}", stop.display()))?;
+    if !ctx.quiet {
+        println!("cancelled {} (stop-file: {})", run_id, stop.display());
+    }
+    Ok(())
+}
+
+pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let run_id = match args.run_id {
+        Some(id) => id,
+        None => latest_run_id(&project_root)?,
+    };
+    let dir = loop_root(&project_root).join(&run_id);
+    if !dir.exists() {
+        return Err(miette::miette!("run-dir not found: {}", dir.display()));
+    }
+
+    if let Some(n) = args.iter {
+        let path = iter_log_path(&dir, n);
+        let body = std::fs::read_to_string(&path)
+            .map_err(|e| miette::miette!("read {}: {e}", path.display()))?;
+        if args.json {
+            print!("{body}");
+        } else {
+            let log: IterLog = serde_json::from_str(&body)
+                .map_err(|e| miette::miette!("parse {}: {e}", path.display()))?;
+            print_iter(&log);
+        }
+        return Ok(());
+    }
+
+    let logs = collect_iter_logs(&dir)?;
+    let logs: Vec<IterLog> = if args.tail == 0 {
+        logs
+    } else {
+        let n = args.tail as usize;
+        let start = logs.len().saturating_sub(n);
+        logs[start..].to_vec()
+    };
+
+    if args.json {
+        let body = serde_json::to_string_pretty(&logs)
+            .map_err(|e| miette::miette!("serialize logs: {e}"))?;
+        println!("{body}");
+        return Ok(());
+    }
+
+    let run_log_path = run_log_path(&dir);
+    if !ctx.quiet
+        && run_log_path.exists()
+        && let Ok(body) = std::fs::read_to_string(&run_log_path)
+        && let Ok(rl) = serde_json::from_str::<RunLog>(&body)
+    {
+        println!(
+            "run {} — iters={} tokens={} stop={}",
+            rl.id,
+            rl.iter_count,
+            rl.cumulative_tokens,
+            rl.stop_reason.unwrap_or_else(|| "(running)".into()),
+        );
+    }
+    for log in &logs {
+        print_iter(log);
+    }
+    Ok(())
+}
+
+pub fn run_list(_ctx: &Ctx, args: ListArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let root = loop_root(&project_root);
+    if !root.exists() {
+        println!("(no loop runs)");
+        return Ok(());
+    }
+    let mut runs: Vec<(std::time::SystemTime, String, RunListRow)> = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .map_err(|e| miette::miette!("read {}: {e}", root.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        if !name.starts_with("loop-") {
+            continue;
+        }
+        let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        let row = load_run_list_row(&path);
+        runs.push((mtime, name.to_string(), row));
+    }
+    runs.sort_by_key(|r| std::cmp::Reverse(r.0));
+    if runs.is_empty() {
+        println!("(no loop runs)");
+        return Ok(());
+    }
+    let max = if args.n == 0 { runs.len() } else { args.n as usize };
+    for (_, name, row) in runs.into_iter().take(max) {
+        println!("{:<46} {:<10} iters={:<3} stop={}", name, row.state, row.iters, row.stop);
+    }
+    Ok(())
+}
+
+struct RunListRow {
+    state: &'static str,
+    iters: u32,
+    stop: String,
+}
+
+fn load_run_list_row(dir: &std::path::Path) -> RunListRow {
+    let stop_present = stop_file_path(dir).exists();
+    let rl_path = run_log_path(dir);
+    let parsed = std::fs::read_to_string(&rl_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<RunLog>(&s).ok());
+    let (iters, stop) = parsed
+        .as_ref()
+        .map(|r| (r.iter_count, r.stop_reason.clone().unwrap_or_default()))
+        .unwrap_or((0, String::new()));
+    let state = if !stop.is_empty() {
+        "completed"
+    } else if stop_present {
+        "cancelled"
+    } else {
+        "running"
+    };
+    RunListRow { state, iters, stop }
+}
+
+fn collect_iter_logs(dir: &std::path::Path) -> miette::Result<Vec<IterLog>> {
+    let mut logs: Vec<IterLog> = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|e| miette::miette!("read {}: {e}", dir.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        if !name.starts_with("iter-") || !name.ends_with(".json") {
+            continue;
+        }
+        if let Ok(body) = std::fs::read_to_string(&path)
+            && let Ok(log) = serde_json::from_str::<IterLog>(&body)
+        {
+            logs.push(log);
+        }
+    }
+    logs.sort_by_key(|l| l.number);
+    Ok(logs)
+}
+
+fn print_iter(log: &IterLog) {
+    let outcome = log.outcome.clone().unwrap_or_else(|| "running".into());
+    let task = log.task_id.clone().unwrap_or_else(|| "-".into());
+    let tokens = log.cost.total();
+    let hash = log.prompt_prefix_hash.clone().unwrap_or_default();
+    println!(
+        "iter {:>3} task={} outcome={} tokens={} prefix={}",
+        log.number, task, outcome, tokens, hash
+    );
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
