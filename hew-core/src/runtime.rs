@@ -335,16 +335,44 @@ mod tests {
     }
 
     /// E2E: only runs when HEW_LOOP_E2E=1 and `claude` is on PATH.
-    /// Stays off CI by default; manual invocation only.
+    /// Stays off CI by default; manual invocation only. Verifies field
+    /// names (tokens > 0), result text containing the close marker
+    /// (closed_task.is_some()), and exit-0 success path.
     #[test]
     fn e2e_real_claude_spawn() {
         if std::env::var("HEW_LOOP_E2E").as_deref() != Ok("1") {
             return;
         }
         let s = ClaudeSpawner::from_env();
-        let p = assemble("You are a calculator.", "", "Compute 2+2. Reply with only the number.");
+        let p = assemble(
+            "You are a test agent.",
+            "",
+            "Reply with exactly this single line and nothing else: closed hew-e2e — done",
+        );
         let out = s.spawn(&p, &[]).expect("spawn ok");
-        assert!(out.raw_text.contains('4'), "raw={}", out.raw_text);
-        assert!(out.tokens.total() > 0);
+        assert!(out.success, "expected success, stderr={}", out.stderr_tail);
+        assert!(out.tokens.total() > 0, "expected nonzero tokens, raw={}", out.raw_text);
+        assert_eq!(
+            out.closed_task.as_deref(),
+            Some("hew-e2e"),
+            "expected closed_task to be detected from result text, raw={}",
+            out.raw_text
+        );
+    }
+
+    /// Regression test against a captured real `claude -p` response
+    /// (see `hew-core/tests/fixtures/claude-output.json`). If the live
+    /// JSON shape changes — field renames in `usage`, or `result` no
+    /// longer carrying the agent's text — this test will catch it.
+    #[test]
+    fn parse_claude_json_matches_captured_fixture() {
+        let bytes = include_bytes!("../tests/fixtures/claude-output.json");
+        let (text, tokens) = parse_claude_json(bytes).expect("fixture parses");
+        assert_eq!(text, "closed hew-e2i — done");
+        assert_eq!(tokens.input, 6);
+        assert_eq!(tokens.output, 14);
+        assert_eq!(tokens.cache_read, 22827);
+        assert_eq!(tokens.cache_create, 23362);
+        assert_eq!(detect_closed_task(&text).as_deref(), Some("hew-e2i"));
     }
 }
