@@ -179,7 +179,7 @@ impl Iter {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenSpend {
     pub input: u64,
     pub output: u64,
@@ -193,7 +193,7 @@ impl TokenSpend {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResearchSpend {
     pub web: u32,
     pub fetch: u32,
