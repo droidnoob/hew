@@ -41,27 +41,60 @@ pub trait GateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck;
 }
 
-/// Production gate runner: `cargo test --quiet` + `cargo clippy
-/// --all-targets -- -D warnings`. v1 leaves the craft signals unset
-/// (false) — a follow-up task will wire them from `hew_core::config`.
+/// Production gate runner. Reads `(test, lint)` from project-authored
+/// signals (`Makefile`, `justfile`, `package.json` scripts) — see
+/// [`hew_core::gate`]. No signals → no gate; the agent runs whatever
+/// checks it wants directly inside the iter via Bash, which is the
+/// correct default given we'd otherwise be guessing.
+///
+/// Spawn errors are split: `ErrorKind::NotFound` (tool not installed)
+/// degrades to skip-pass with a breadcrumb; any other error or a
+/// non-zero exit fails the gate normally.
 #[derive(Debug, Default)]
-pub struct CargoGateRunner;
+pub struct AutoGateRunner;
 
-impl GateRunner for CargoGateRunner {
+/// Kept as a thin alias so any external callers wiring the production
+/// runner by name still compile. The behavior no longer hardcodes
+/// cargo — see [`AutoGateRunner`] / [`hew_core::gate`].
+pub type CargoGateRunner = AutoGateRunner;
+
+impl GateRunner for AutoGateRunner {
     fn run_gate(&self, project_root: &Path) -> GateCheck {
-        let tests_passed = std::process::Command::new("cargo")
-            .args(["test", "--quiet"])
-            .current_dir(project_root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let lint_passed = std::process::Command::new("cargo")
-            .args(["clippy", "--all-targets", "--", "-D", "warnings"])
-            .current_dir(project_root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let spec = hew_core::gate::detect(project_root);
+        if !spec.has_any() {
+            eprintln!(
+                "hew loop: no gate signals (Makefile/justfile/package.json) at {} — gate skipped",
+                project_root.display()
+            );
+            return GateCheck { tests_passed: true, lint_passed: true, ..Default::default() };
+        }
+        let tests_passed = run_gate_step("test", &spec.test_cmd, project_root);
+        let lint_passed = run_gate_step("lint", &spec.lint_cmd, project_root);
         GateCheck { tests_passed, lint_passed, ..Default::default() }
+    }
+}
+
+/// Run one step of the auto-detected gate. Empty `cmd` (e.g. Node repo
+/// with no `lint` script) is a deliberate skip and passes. ENOENT on
+/// the binary is treated as skip-pass with a breadcrumb so a missing
+/// optional toolchain (`ruff`, `pytest`) doesn't trap the loop. Any
+/// other spawn error or non-zero exit fails the step.
+fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
+    if cmd.is_empty() {
+        return true;
+    }
+    let mut command = std::process::Command::new(&cmd[0]);
+    command.args(&cmd[1..]).current_dir(project_root);
+    match command.status() {
+        Ok(s) => s.success(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("hew loop: `{}` not found in PATH — {label} gate skipped", cmd[0]);
+            true
+        }
+        Err(e) => {
+            eprintln!("hew loop: {label} gate spawn failed ({e}); treating as fail");
+            false
+        }
     }
 }
 
@@ -169,6 +202,9 @@ pub enum LoopSub {
     Logs(LogsArgs),
     /// List recent loop runs and their state.
     List(ListArgs),
+    /// Re-render the end-of-run summary for a completed (or running)
+    /// loop from its persisted logs. Defaults to the most recent run.
+    Summary(SummaryArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -201,12 +237,20 @@ pub struct ListArgs {
     pub n: u32,
 }
 
+#[derive(Debug, ClapArgs)]
+pub struct SummaryArgs {
+    /// Run-id to summarize. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+}
+
 pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
     match cmd.sub {
         LoopSub::Run(a) => run_loop(ctx, a),
         LoopSub::Cancel(a) => run_cancel(ctx, a),
         LoopSub::Logs(a) => run_logs(ctx, a),
         LoopSub::List(a) => run_list(ctx, a),
+        LoopSub::Summary(a) => run_summary(ctx, a),
     }
 }
 
@@ -277,7 +321,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
     let spawner: Option<Box<dyn RuntimeSpawner>> =
         if args.dry_run { None } else { Some(Box::new(ClaudeSpawner::from_env())) };
-    let gate = CargoGateRunner;
+    let gate = AutoGateRunner;
     run_loop_with(ctx, args, &bd, spawner.as_deref(), &gate, &project_root)
 }
 
@@ -718,6 +762,53 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
     for log in &logs {
         print_iter(log);
     }
+    Ok(())
+}
+
+pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let run_id = match args.run_id {
+        Some(id) => id,
+        None => latest_run_id(&project_root)?,
+    };
+    let dir = loop_root(&project_root).join(&run_id);
+    if !dir.exists() {
+        return Err(miette::miette!("run-dir not found: {}", dir.display()));
+    }
+
+    // Load the persisted run header for id + stop reason.
+    let rl_body = std::fs::read_to_string(run_log_path(&dir))
+        .map_err(|e| miette::miette!("read run.json: {e}"))?;
+    let rl: RunLog =
+        serde_json::from_str(&rl_body).map_err(|e| miette::miette!("parse run.json: {e}"))?;
+
+    let iter_logs = collect_iter_logs(&dir)?;
+
+    // Reconstruct the minimal `Run` that `loop_summary::summarize`
+    // reads: id, stop_reason, and per-iter timestamps (for duration).
+    // Everything else in the summary is derived from `iter_logs`.
+    let run = Run {
+        id: rl.id.clone(),
+        started_at: rl.started_at.clone(),
+        config: RunConfig::default(),
+        iters: iter_logs
+            .iter()
+            .map(|l| Iter {
+                number: l.number,
+                task_id: l.task_id.clone(),
+                started_at: l.started_at.clone(),
+                ended_at: l.ended_at.clone(),
+                outcome: None,
+                cost: l.cost,
+                decisions: l.decisions.clone(),
+                deferred: l.deferred.clone(),
+                stderr_tail: l.stderr_tail.clone(),
+            })
+            .collect(),
+        stop_reason: rl.stop_reason.as_deref().and_then(hew_core::runner::StopReason::from_label),
+    };
+
+    print_summary(ctx, &run, &iter_logs, &dir);
     Ok(())
 }
 

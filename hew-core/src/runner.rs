@@ -67,6 +67,26 @@ pub enum StopReason {
     RuntimeError,
 }
 
+impl StopReason {
+    /// Parse the snake_case label persisted in `run.json` back into a
+    /// [`StopReason`]. Inverse of `loop_log::stop_reason_label`; used by
+    /// `hew loop summary` to re-render a past run from disk. Unknown
+    /// labels return `None`.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Some(match label {
+            "cancelled" => Self::Cancelled,
+            "stop_file" => Self::StopFile,
+            "budget_tokens" => Self::BudgetTokens,
+            "budget_wall" => Self::BudgetWall,
+            "max_iter" => Self::MaxIter,
+            "ready_empty" => Self::ReadyEmpty,
+            "guard_trip" => Self::GuardTrip,
+            "runtime_error" => Self::RuntimeError,
+            _ => return None,
+        })
+    }
+}
+
 /// A snapshot of stop-relevant signals at one decision point. Caller
 /// gathers; this module decides.
 #[derive(Clone, Copy, Debug, Default)]

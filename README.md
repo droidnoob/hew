@@ -10,11 +10,15 @@ A methodology and CLI for AI coding agents, backed by [Beads](https://gastownhal
 
 Hew puts project state in the graph (not in markdown files) so the agent queries, not narrates, what to do next.
 
+<p align="center">
+  <img src="assets/hew-init.gif" alt="hew init — banner, runtime detection, a few default pickers, then the setup summary" width="800">
+</p>
+
 ---
 
 ## Why I Built This
 
-GSD and similar frameworks ask the LLM to be the source of truth for project state. State lives in `PLAN.md` / `TODO.md` / `STATE.md`; the agent re-parses it every session; dependencies live in English prose.
+Most agent workflows make the LLM the source of truth for project state. State lives in `PLAN.md` / `TODO.md` / `STATE.md`; the agent re-parses it every session; dependencies live in English prose.
 
 State drifts. Context bloats. Crash recovery requires migration scripts. The agent makes things up.
 
@@ -34,6 +38,27 @@ Hew inverts that. **Beads is the graph. The agent queries it.**
 
 ---
 
+## The autonomous loop
+
+There's a known trick for autonomous coding — [Ralph](https://ghuntley.com/ralph/), Geoffrey Huntley's one-liner that pipes a prompt into the agent in an infinite shell loop. It works better than it has any right to, and it's where `hew loop` starts. The difference is what hew adds around the loop so it can run unattended without drifting:
+
+```sh
+hew loop run --until-empty
+```
+
+<p align="center">
+  <img src="assets/hew-loop-summary.png" alt="hew loop summary — end-of-run report: two iters closed, 3.1M tokens (95% served from prompt cache), prefix hash stable across iters, symbols touched, stop reason" width="800">
+</p>
+
+- **The graph is the state.** Each iter asks `bd ready` for the next unblocked task instead of re-reading a prose prompt that drifts. The agent queries; it doesn't re-narrate what to do next.
+- **A backpressure gate with rollback.** After each iter, hew runs your project's tests and lint; if they fail, the iter is reverted with `git reset --hard <pre-iter-sha>` so a bad pass can't compound. The gate runs *your* commands — a `test` / `lint` target in your `Makefile`, a `justfile` recipe, or a `package.json` script — across Rust, Python, Go, Node, whatever your project already uses. No signal, no gate: the loop trusts the agent and keeps moving.
+- **A byte-stable prompt prefix.** The skill body and memory primer are identical across iters, so the prompt cache hits instead of paying full input cost every pass.
+- **Budgets and clean stops.** `--max-iter`, `--budget-tokens`, `--budget-wall`, and `--until-empty` bound the run; Ctrl+C lets the in-flight iter finish cleanly rather than corrupting state.
+
+Full guide: [`docs/LOOP.md`](./docs/LOOP.md).
+
+---
+
 ## How It Works
 
 The daily loop is `plan → decompose → execute → verify`, repeating until the milestone closes.
@@ -44,6 +69,12 @@ decompose   →   translate plan into Beads tasks with deps + acceptance
 execute     →   for each ready task: claim → code → guard → commit → close
 verify      →   batch-level check that the epic actually delivers
 ```
+
+`hew status` reads that state straight from the graph — phases, task counts, the memories in play, and the symbols touched since the last close:
+
+<p align="center">
+  <img src="assets/hew-status.gif" alt="hew status — project dashboard: phases, task counts, memories, and the symbols touched since the last close" width="800">
+</p>
 
 Three things keep the loop coherent across sessions:
 
@@ -172,7 +203,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://github.com/droidnoob/hew/rele
 **Homebrew:**
 
 ```sh
-brew install droidnoob/tap/hew
+brew install droidnoob/hew/hew
 ```
 
 **From source** (Rust toolchain required):
@@ -211,8 +242,8 @@ Open your agent (Claude Code, Cursor, etc.) and route on intent — skills auto-
 ```
 
 For long autonomous runs that survive a single chat session — drain the
-ready queue across many tasks while you do something else — use
-`hew loop run` directly:
+ready queue across many tasks while you do something else — drive
+[the loop](#the-autonomous-loop) directly:
 
 ```sh
 hew loop run --until-empty            # drain everything ready
@@ -223,15 +254,8 @@ hew loop logs --tail 5                # last 5 iters of latest run
 hew loop cancel                       # touch stop-file on latest run
 ```
 
-Each iter is a fresh `claude -p` subprocess; the skill body + memory
-primer prefix is byte-stable across iters so the prompt cache hits.
-Per-iter test + lint runs as a backpressure gate — a failing iter is
-rolled back via `git reset --hard <pre-iter-sha>`. Ctrl+C produces
-`stop_reason: cancelled`; the in-flight iter finishes cleanly. End of
-run prints a coloured summary with the cache hit rate, token breakdown,
+End of run prints a summary with the cache hit rate, token breakdown, a
 sparkline of per-iter spend, and the symbols the run touched.
-
-Full guide: [`docs/LOOP.md`](./docs/LOOP.md).
 
 On Claude Code the agent statusline shows what hew is working on (scope, progress bar, phase, epic fraction) — auto-wired by `hew init --runtime=claude`. See `hew statusline --help` for `--compact` / `--full` / `--width` overrides.
 
@@ -400,4 +424,4 @@ MIT. See [LICENSE](./LICENSE).
 
 Built on [Beads](https://gastownhall.github.io/beads/) by the Gastown Hall team.
 
-Distilled from observing what works (and what doesn't) in [GSD](https://github.com/gsd-build/get-shit-done) and other AI-agent methodologies.
+Distilled from observing what works — and what doesn't — across AI-agent coding methodologies.

@@ -11,3 +11,6 @@
 /target
 **/*.rs.bk
 Cargo.lock.bak
+
+# vhs tapes — local only, regenerate GIFs with `vhs assets/<name>.tape`
+assets/*.tape

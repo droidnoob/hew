@@ -6,6 +6,48 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-28
+
+Makes the loop runner portable across language stacks and adds a way to
+re-inspect any past run. Born from a real bug: `hew loop` died on iter 1
+in a Python project because the per-iter gate was hardcoded to Rust.
+
+### Added
+
+- **Language-aware loop gate.** The per-iter test/lint gate no longer
+  assumes `cargo`. It reads the commands from signals the project
+  already wrote — a `test` / `lint` target in a `Makefile`, a recipe in
+  a `justfile`, or a script in `package.json` — so the loop gates Rust,
+  Python, Go, Node, or anything with those entry points. Detection lives
+  in the new pure-logic `hew_core::gate` module. When no signal is
+  present the gate is skipped (with a stderr breadcrumb) rather than
+  failing the run, and a missing tool binary (ENOENT) degrades to
+  skip-pass instead of trapping the loop.
+- **`hew loop summary [--run-id]`.** Re-renders the rich end-of-run
+  report (token breakdown, cache-hit rate, per-iter spend sparkline,
+  symbols touched, stop reason) for any completed or running loop from
+  its persisted `run.json` + iter logs — previously that summary only
+  printed once, live at the end of a `run`. Backed by a new
+  `StopReason::from_label` with a round-trip drift test.
+
+### Fixed
+
+- **`hew loop` no longer traps non-Rust projects.** A Python (or any
+  non-cargo) repo previously tripped `GuardTrip` after one iter because
+  `cargo test` / `cargo clippy` errored on the missing `Cargo.toml`. The
+  loop now drains the queue regardless of stack.
+- **Homebrew install path in the README** corrected to
+  `brew install droidnoob/hew/hew` (the old `droidnoob/tap/hew` pointed
+  at a tap repo that never existed).
+
+### Docs
+
+- New "The autonomous loop" section framing `hew loop` and its
+  guardrails (graph-as-state, backpressure gate with rollback,
+  byte-stable prompt prefix, budgets and clean stops).
+- Terminal demos added to the README: `hew init`, `hew status`, and a
+  `hew loop summary` screenshot.
+
 ## [0.9.0] — 2026-05-26
 
 The "loop runner" release. `hew loop run` is now a fully wired

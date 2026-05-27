@@ -1,4 +1,4 @@
-<!-- hew:version=0.9.0 -->
+<!-- hew:version=0.10.0 -->
 ---
 name: hew-boundary
 category: brownfield

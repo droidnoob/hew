@@ -191,6 +191,23 @@ mod tests {
     use super::*;
     use crate::runner::{Iter, RunConfig, TokenSpend};
 
+    #[test]
+    fn stop_reason_label_round_trips_through_from_label() {
+        for r in [
+            StopReason::Cancelled,
+            StopReason::StopFile,
+            StopReason::BudgetTokens,
+            StopReason::BudgetWall,
+            StopReason::MaxIter,
+            StopReason::ReadyEmpty,
+            StopReason::GuardTrip,
+            StopReason::RuntimeError,
+        ] {
+            assert_eq!(StopReason::from_label(stop_reason_label(r)), Some(r), "drift on {r:?}");
+        }
+        assert_eq!(StopReason::from_label("bogus"), None);
+    }
+
     fn tmpdir() -> PathBuf {
         let base = std::env::temp_dir().join(format!(
             "hew-loop-log-{}-{}",
