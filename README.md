@@ -47,7 +47,7 @@ hew loop run --until-empty
 ```
 
 <p align="center">
-  <img src="assets/hew-loop.gif" alt="hew loop logs — a real run: two iters closed, 3.1M tokens, prompt prefix hash stable across iters so the cache hits" width="800">
+  <img src="assets/hew-loop-summary.png" alt="hew loop summary — end-of-run report: two iters closed, 3.1M tokens (95% served from prompt cache), prefix hash stable across iters, symbols touched, stop reason" width="800">
 </p>
 
 - **The graph is the state.** Each iter asks `bd ready` for the next unblocked task instead of re-reading a prose prompt that drifts. The agent queries; it doesn't re-narrate what to do next.

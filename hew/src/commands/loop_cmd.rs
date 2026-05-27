@@ -202,6 +202,9 @@ pub enum LoopSub {
     Logs(LogsArgs),
     /// List recent loop runs and their state.
     List(ListArgs),
+    /// Re-render the end-of-run summary for a completed (or running)
+    /// loop from its persisted logs. Defaults to the most recent run.
+    Summary(SummaryArgs),
 }
 
 #[derive(Debug, ClapArgs)]
@@ -234,12 +237,20 @@ pub struct ListArgs {
     pub n: u32,
 }
 
+#[derive(Debug, ClapArgs)]
+pub struct SummaryArgs {
+    /// Run-id to summarize. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+}
+
 pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
     match cmd.sub {
         LoopSub::Run(a) => run_loop(ctx, a),
         LoopSub::Cancel(a) => run_cancel(ctx, a),
         LoopSub::Logs(a) => run_logs(ctx, a),
         LoopSub::List(a) => run_list(ctx, a),
+        LoopSub::Summary(a) => run_summary(ctx, a),
     }
 }
 
@@ -751,6 +762,53 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
     for log in &logs {
         print_iter(log);
     }
+    Ok(())
+}
+
+pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let run_id = match args.run_id {
+        Some(id) => id,
+        None => latest_run_id(&project_root)?,
+    };
+    let dir = loop_root(&project_root).join(&run_id);
+    if !dir.exists() {
+        return Err(miette::miette!("run-dir not found: {}", dir.display()));
+    }
+
+    // Load the persisted run header for id + stop reason.
+    let rl_body = std::fs::read_to_string(run_log_path(&dir))
+        .map_err(|e| miette::miette!("read run.json: {e}"))?;
+    let rl: RunLog =
+        serde_json::from_str(&rl_body).map_err(|e| miette::miette!("parse run.json: {e}"))?;
+
+    let iter_logs = collect_iter_logs(&dir)?;
+
+    // Reconstruct the minimal `Run` that `loop_summary::summarize`
+    // reads: id, stop_reason, and per-iter timestamps (for duration).
+    // Everything else in the summary is derived from `iter_logs`.
+    let run = Run {
+        id: rl.id.clone(),
+        started_at: rl.started_at.clone(),
+        config: RunConfig::default(),
+        iters: iter_logs
+            .iter()
+            .map(|l| Iter {
+                number: l.number,
+                task_id: l.task_id.clone(),
+                started_at: l.started_at.clone(),
+                ended_at: l.ended_at.clone(),
+                outcome: None,
+                cost: l.cost,
+                decisions: l.decisions.clone(),
+                deferred: l.deferred.clone(),
+                stderr_tail: l.stderr_tail.clone(),
+            })
+            .collect(),
+        stop_reason: rl.stop_reason.as_deref().and_then(hew_core::runner::StopReason::from_label),
+    };
+
+    print_summary(ctx, &run, &iter_logs, &dir);
     Ok(())
 }
 
