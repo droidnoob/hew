@@ -11,14 +11,14 @@ A methodology and CLI for AI coding agents, backed by [Beads](https://gastownhal
 Hew puts project state in the graph (not in markdown files) so the agent queries, not narrates, what to do next.
 
 <p align="center">
-  <img src="assets/hew-status.gif" alt="hew status — project dashboard: phases, task counts, memories, and the symbols touched since the last close" width="800">
+  <img src="assets/hew-init.gif" alt="hew init — banner, runtime detection, a few default pickers, then the setup summary" width="800">
 </p>
 
 ---
 
 ## Why I Built This
 
-GSD and similar frameworks ask the LLM to be the source of truth for project state. State lives in `PLAN.md` / `TODO.md` / `STATE.md`; the agent re-parses it every session; dependencies live in English prose.
+Most agent workflows make the LLM the source of truth for project state. State lives in `PLAN.md` / `TODO.md` / `STATE.md`; the agent re-parses it every session; dependencies live in English prose.
 
 State drifts. Context bloats. Crash recovery requires migration scripts. The agent makes things up.
 
@@ -69,6 +69,12 @@ decompose   →   translate plan into Beads tasks with deps + acceptance
 execute     →   for each ready task: claim → code → guard → commit → close
 verify      →   batch-level check that the epic actually delivers
 ```
+
+`hew status` reads that state straight from the graph — phases, task counts, the memories in play, and the symbols touched since the last close:
+
+<p align="center">
+  <img src="assets/hew-status.gif" alt="hew status — project dashboard: phases, task counts, memories, and the symbols touched since the last close" width="800">
+</p>
 
 Three things keep the loop coherent across sessions:
 
@@ -214,10 +220,6 @@ cargo install --git https://github.com/droidnoob/hew hew
 cd <your-project>
 hew init
 ```
-
-<p align="center">
-  <img src="assets/hew-init.gif" alt="hew init — banner, runtime detection, a few default pickers, then the setup summary" width="800">
-</p>
 
 `hew init` detects your agent runtime (Claude Code / Cursor / Codex / Windsurf / Generic) and installs the right skill + slash command layout.
 
@@ -422,4 +424,4 @@ MIT. See [LICENSE](./LICENSE).
 
 Built on [Beads](https://gastownhall.github.io/beads/) by the Gastown Hall team.
 
-Distilled from observing what works (and what doesn't) in [GSD](https://github.com/gsd-build/get-shit-done) and other AI-agent methodologies.
+Distilled from observing what works — and what doesn't — across AI-agent coding methodologies.
