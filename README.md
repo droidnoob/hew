@@ -10,6 +10,10 @@ A methodology and CLI for AI coding agents, backed by [Beads](https://gastownhal
 
 Hew puts project state in the graph (not in markdown files) so the agent queries, not narrates, what to do next.
 
+<p align="center">
+  <img src="assets/hew-status.gif" alt="hew status — project dashboard: phases, task counts, memories, and the symbols touched since the last close" width="800">
+</p>
+
 ---
 
 ## Why I Built This
@@ -41,6 +45,10 @@ There's a known trick for autonomous coding — [Ralph](https://ghuntley.com/ral
 ```sh
 hew loop run --until-empty
 ```
+
+<p align="center">
+  <img src="assets/hew-loop.gif" alt="hew loop logs — a real run: two iters closed, 3.1M tokens, prompt prefix hash stable across iters so the cache hits" width="800">
+</p>
 
 - **The graph is the state.** Each iter asks `bd ready` for the next unblocked task instead of re-reading a prose prompt that drifts. The agent queries; it doesn't re-narrate what to do next.
 - **A backpressure gate with rollback.** After each iter, hew runs your project's tests and lint; if they fail, the iter is reverted with `git reset --hard <pre-iter-sha>` so a bad pass can't compound. The gate runs *your* commands — a `test` / `lint` target in your `Makefile`, a `justfile` recipe, or a `package.json` script — across Rust, Python, Go, Node, whatever your project already uses. No signal, no gate: the loop trusts the agent and keeps moving.
@@ -206,6 +214,10 @@ cargo install --git https://github.com/droidnoob/hew hew
 cd <your-project>
 hew init
 ```
+
+<p align="center">
+  <img src="assets/hew-init.gif" alt="hew init — banner, runtime detection, a few default pickers, then the setup summary" width="800">
+</p>
 
 `hew init` detects your agent runtime (Claude Code / Cursor / Codex / Windsurf / Generic) and installs the right skill + slash command layout.
 
