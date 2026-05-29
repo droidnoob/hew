@@ -1199,6 +1199,7 @@ pub fn run_worker_loop(
         let mut log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
         if active_spawner.is_some() {
             log.runtime_used = Some(active_kind.as_str().to_string());
+            log.model = spawn_opts.model_override.clone();
         }
         log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
         write_json_atomic(&iter_log_path(&worker.log_dir, worker.worker_n, iter_number), &log)

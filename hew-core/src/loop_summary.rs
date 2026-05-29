@@ -402,6 +402,7 @@ mod tests {
             symbols_touched,
             runtime_used: None,
             cooldown_engaged: false,
+            model: None,
         }
     }
 

@@ -98,6 +98,12 @@ pub struct IterLog {
     /// Always `false` when no fallback is configured.
     #[serde(default)]
     pub cooldown_engaged: bool,
+    /// Model the spawner was invoked with for this iter, as resolved by
+    /// `hew_core::loop_model::resolve_model` (description tag > label >
+    /// config). `None` ⇒ runtime default was used (display as `(default)`
+    /// in `hew loop summary`). Absent in pre-epic-D iter logs.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl IterLog {
@@ -124,6 +130,7 @@ impl IterLog {
             symbols_touched,
             runtime_used: None,
             cooldown_engaged: false,
+            model: None,
         }
     }
 }
@@ -600,6 +607,41 @@ mod tests {
         let root = tmpdir();
         let missing = root.join(LOOP_ROOT); // never created
         assert!(active_run_ids(&missing).unwrap().is_empty());
+    }
+
+    #[test]
+    fn iter_log_round_trips_model_field() {
+        let mut it = Iter::new(1, "2026-05-26T00:00:00Z");
+        it.outcome = Some(IterOutcome::Closed);
+        let mut log = IterLog::from_iter(&it, None, Vec::new(), Vec::new());
+        log.model = Some("opus-4.7".into());
+        let json = serde_json::to_string(&log).unwrap();
+        let parsed: IterLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("opus-4.7"));
+    }
+
+    #[test]
+    fn iter_log_from_iter_defaults_model_to_none() {
+        let it = Iter::new(1, "2026-05-26T00:00:00Z");
+        let log = IterLog::from_iter(&it, None, Vec::new(), Vec::new());
+        assert!(log.model.is_none());
+    }
+
+    #[test]
+    fn iter_log_parses_pre_model_fixture_with_model_none() {
+        // Backward-compat: legacy iter logs written before the `model`
+        // field existed must still parse cleanly (model defaults to None).
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("iter-log-pre-model.json");
+        let body = std::fs::read_to_string(&path).expect("read pre-model fixture");
+        let parsed: IterLog = serde_json::from_str(&body).expect("parse pre-model fixture");
+        assert_eq!(parsed.number, 1);
+        assert_eq!(parsed.task_id.as_deref(), Some("hew-abc"));
+        assert_eq!(parsed.outcome.as_deref(), Some("closed"));
+        assert_eq!(parsed.runtime_used.as_deref(), Some("claude"));
+        assert!(parsed.model.is_none(), "missing model must deserialize to None");
     }
 
     #[test]
