@@ -219,9 +219,13 @@ cargo install --git https://github.com/droidnoob/hew hew
 ```sh
 cd <your-project>
 hew init
+
+# or target multiple runtimes in one pass:
+hew init --runtime=claude,codex
+hew init --runtime=claude --runtime=windsurf   # repeated form also works
 ```
 
-`hew init` detects your agent runtime (Claude Code / Cursor / Codex / Windsurf / Generic) and installs the right skill + slash command layout.
+`hew init` detects your agent runtime (Claude Code / Cursor / Codex / Windsurf / Generic) and installs the right skill + slash command layout. Pass `--runtime` (CSV or repeated) to install several runtimes side-by-side — useful if you switch between, say, Claude Code and Codex on the same project.
 
 It also wires a `SessionStart` hook on Claude Code so `hew prime resume` runs automatically on every session entry.
 
