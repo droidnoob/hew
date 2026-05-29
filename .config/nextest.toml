@@ -1,0 +1,26 @@
+# cargo-nextest configuration.
+#
+# Install: `cargo install --locked cargo-nextest`
+# Run    : `cargo nextest run --workspace`
+#
+# The default profile is what pre-commit / day-to-day runs use. The `slow`
+# profile additionally runs tests marked `#[ignore]` — used in CI and for the
+# periodic local sweep:
+#
+#   cargo nextest run --workspace --profile slow
+
+[profile.default]
+# Show the slowest tests first when something fails — easier triage than the
+# default ordering.
+status-level = "fail"
+failure-output = "immediate-final"
+final-status-level = "slow"
+
+# Tests that legitimately need to spawn real subprocesses can occasionally
+# exceed cargo's default 60s timeout under cold-cache CI. 120s gives headroom
+# without masking a genuine hang.
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.slow]
+# Inherits from default; the CLI invocation toggles `--run-ignored all`.
+slow-timeout = { period = "90s", terminate-after = 2 }

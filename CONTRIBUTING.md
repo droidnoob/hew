@@ -65,10 +65,51 @@ Allowed prefixes: `feat`, `fix`, `chore`, `docs`, `refactor`, `perf`,
 
 ```sh
 cargo build                          # 1.x s incremental, ~30s cold
-cargo test                           # full suite; ~2s after warm cache
+cargo test                           # full suite; ~25s warm cache
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
+
+### Faster tests via `cargo-nextest` (recommended)
+
+The default `cargo test` runs each test binary serially and reports
+per-test output. [`cargo-nextest`](https://nexte.st) runs every binary
+in parallel with a tighter scheduler — on this workspace it cuts the
+suite from ~25s to under 20s on warm cache, and the `.githooks/pre-commit`
+hook automatically prefers it when present.
+
+Install once per machine:
+
+```sh
+cargo install --locked cargo-nextest
+```
+
+Then:
+
+```sh
+cargo nextest run --workspace         # default profile — skips #[ignore]d tests
+cargo nextest run --workspace --profile slow --run-ignored all   # periodic full sweep
+```
+
+Plain `cargo test` is still supported (CI keeps it in the matrix to
+guarantee both invocations stay green).
+
+### Slow tests gated behind `#[ignore = "slow"]`
+
+A small set of heavy e2e tests — parallel-loop worktree drivers, the
+real-git merge-conflict simulator — carry `#[ignore = "slow"]` so the
+default `cargo test` / `cargo nextest run` keeps the pre-commit gate fast.
+Run them explicitly before tagging a release or merging anything that
+touches the loop runner:
+
+```sh
+cargo test --workspace -- --include-ignored
+# or
+cargo nextest run --workspace --profile slow --run-ignored all
+```
+
+CI runs the full sweep on every PR, so missing this locally never lands
+silently.
 
 Tests are organised as:
 
