@@ -156,7 +156,10 @@ Do not create planning markdown files (`PLAN.md`, `TODO.md`, `ROADMAP.md`,
 code, not plans.
 
 Do not use string-prefixed task titles (`"GATE: ..."`, `"PHASE: ..."`) to fake
-structural roles. Beads has native types: `--type=gate`, `--type=epic`,
-`bd mol bond`. Use them.
+structural roles. Use the typed surfaces: `--type=epic` for hierarchical
+containers, `--type=decision` for ADR-shaped records, and the dedicated
+`hew gate` command for external-state gates (PR merge / future
+issue-close / etc). `bd mol bond` is documented broken — wire cross-epic
+ordering with `hew dep add` instead.
 
 Do not skip the `hew-guard` step before `hew task close`. Drift compounds.

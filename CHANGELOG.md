@@ -6,6 +6,19 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`hew-decompose` skill documents `bd create --graph` for batch task
+  creation.** Hand-rolling `hew task new` in a loop hits
+  `GOTCHA:zsh-cmd-substitution` on apostrophes / backticks / `$()` in
+  multi-line descriptions. The skill body now includes a graph-JSON
+  example (nodes + edges + parent_key) and calls out batch mode as the
+  recommended path for >3-task plans. No new `hew` code — `bd create
+  --graph` is a documented hold-out (alongside `bd orphans` / `bd lint`).
+  Also fixes two stale references to a `bd gate create` primitive that
+  never existed, and drops `gate` from the task-type table (external
+  blockers use the dedicated `hew gate` surface, not a task type).
+
 ### Added
 
 - **`hew gate` — external-state gates for `/hew:ship` and friends.**
