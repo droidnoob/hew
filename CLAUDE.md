@@ -118,7 +118,7 @@ hew loop prune-worktrees [--apply]    # GC orphan worktrees from crashed paralle
 
 Each iter is a fresh `claude -p` (or `codex exec`) subprocess; the skill body + memory primer prefix is byte-stable across iters so the prompt cache hits (check `prompt_prefix_hash` in `.hew/loop/<run-id>/iter-NNN.json`). `--fallback-runtime` is primary-sticky with a configurable cooldown (`--fallback-cooldown-iters`, default 3) — see [docs/LOOP.md](./docs/LOOP.md#fallback-runtime) for the worked example. Parallel runs (`--jobs N`) lay down per-worker git worktrees under `~/.hew/wt/<run-id>/<n>/` and merge each `loop/<run-id>/w<n>` branch back at shutdown — see [docs/LOOP.md](./docs/LOOP.md#parallel-runs).
 
-`/hew:auto` now points at `hew loop run --until-empty`. The in-conversation walk is still reachable via `/hew:work`. Full guide: [docs/LOOP.md](./docs/LOOP.md).
+`/hew:loop` drives this subprocess loop. `/hew:auto` is the in-conversation, epic-scoped walk — one session, one epic, mid-loop steering. Full guide: [docs/LOOP.md](./docs/LOOP.md).
 
 ### Statusline
 
