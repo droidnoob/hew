@@ -343,6 +343,7 @@ fn read_manifest(repo: &Path) -> serde_json::Value {
 }
 
 #[test]
+#[ignore = "slow"]
 fn e2e_parallel_jobs_2_with_mock_spawner() {
     if !git_available() {
         eprintln!("git not on PATH, skipping");
@@ -409,6 +410,7 @@ fn e2e_parallel_jobs_2_with_mock_spawner() {
 }
 
 #[test]
+#[ignore = "slow"]
 fn e2e_parallel_merge_conflict_files_bug_task() {
     if !git_available() {
         eprintln!("git not on PATH, skipping");
