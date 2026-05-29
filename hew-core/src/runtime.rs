@@ -14,10 +14,49 @@
 //! exercised by an integration test gated on `HEW_LOOP_E2E=1`.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::error::Result;
 use crate::prompt::AssembledPrompt;
 use crate::runner::TokenSpend;
+
+/// Loop-side runtime selector. The two values are the subset of
+/// [`crate::install::Runtime`] (5 variants: Claude/Cursor/Codex/Windsurf/
+/// Generic) that the loop can actually drive — runtimes with a
+/// non-interactive `-p`-style invocation. Install-side enums one for
+/// methodology body fan-out; this one for spawner dispatch.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Claude,
+    Codex,
+}
+
+impl RuntimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// CLI-side accepted values for `--runtime`. Kept in sync with
+    /// the `FromStr` arms so clap valid-values lists never drift.
+    pub const VARIANTS: &'static [&'static str] = &["claude", "codex"];
+}
+
+impl FromStr for RuntimeKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            other => {
+                Err(format!("unknown runtime `{other}`; expected one of {:?}", Self::VARIANTS))
+            }
+        }
+    }
+}
 
 /// Environment variable that overrides the `claude` binary location.
 /// Used by tests and for pinning to a specific install.
@@ -200,6 +239,34 @@ impl Default for SpawnOutcome {
 mod tests {
     use super::*;
     use crate::prompt::assemble;
+
+    #[test]
+    fn runtime_kind_parses_known_values() {
+        assert_eq!("claude".parse::<RuntimeKind>().unwrap(), RuntimeKind::Claude);
+        assert_eq!("codex".parse::<RuntimeKind>().unwrap(), RuntimeKind::Codex);
+    }
+
+    #[test]
+    fn runtime_kind_rejects_unknown() {
+        let err = "cursor".parse::<RuntimeKind>().unwrap_err();
+        assert!(err.contains("cursor"));
+        assert!(err.contains("claude"));
+        assert!(err.contains("codex"));
+    }
+
+    #[test]
+    fn runtime_kind_variants_matches_parser() {
+        for v in RuntimeKind::VARIANTS {
+            assert!(v.parse::<RuntimeKind>().is_ok(), "variant {v} must parse");
+        }
+    }
+
+    #[test]
+    fn runtime_kind_as_str_roundtrip() {
+        for k in [RuntimeKind::Claude, RuntimeKind::Codex] {
+            assert_eq!(k.as_str().parse::<RuntimeKind>().unwrap(), k);
+        }
+    }
 
     #[test]
     fn build_args_includes_print_json_and_tools() {

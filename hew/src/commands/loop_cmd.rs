@@ -29,7 +29,7 @@ use hew_core::loop_log::{
 };
 use hew_core::prompt;
 use hew_core::runner::{Iter, IterOutcome, Run, RunConfig};
-use hew_core::runtime::{ClaudeSpawner, RuntimeSpawner};
+use hew_core::runtime::{ClaudeSpawner, RuntimeKind, RuntimeSpawner};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
@@ -291,8 +291,14 @@ pub struct Args {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub unattended: bool,
 
-    /// Runtime to drive. Only `claude` is wired in v1.
-    #[arg(long, default_value = "claude")]
+    /// Runtime to drive. `claude` is fully wired; `codex` parses and
+    /// reaches prompt assembly (dry-run only — real spawner lands with
+    /// hew-9d4).
+    #[arg(
+        long,
+        default_value = "claude",
+        value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
+    )]
     pub runtime: String,
 
     /// Override the stop-file path. Defaults to `<run-dir>/.stop`.
@@ -310,17 +316,23 @@ pub struct Args {
 }
 
 pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
-    if args.runtime != "claude" {
-        return Err(miette::miette!(
-            "unsupported runtime `{}`; only `claude` is wired in v1",
-            args.runtime
-        ));
-    }
+    let kind: RuntimeKind = args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
 
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
-    let spawner: Option<Box<dyn RuntimeSpawner>> =
-        if args.dry_run { None } else { Some(Box::new(ClaudeSpawner::from_env())) };
+    let spawner: Option<Box<dyn RuntimeSpawner>> = if args.dry_run {
+        None
+    } else {
+        match kind {
+            RuntimeKind::Claude => Some(Box::new(ClaudeSpawner::from_env())),
+            RuntimeKind::Codex => {
+                return Err(miette::miette!(
+                    "runtime `codex` spawner not yet wired (tracked by hew-9d4); \
+                     use --dry-run to exercise prompt assembly"
+                ));
+            }
+        }
+    };
     let gate = AutoGateRunner;
     run_loop_with(ctx, args, &bd, spawner.as_deref(), &gate, &project_root)
 }
