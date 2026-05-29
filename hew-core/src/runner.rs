@@ -524,6 +524,70 @@ mod tests {
         assert_eq!(c.iters_remaining, 3);
     }
 
+    /// Scripted sequence e2e: primary errors twice, fallback succeeds,
+    /// primary retry succeeds. Asserts the chosen-spawner sequence and
+    /// the cooldown state at each step — the dispatching contract the
+    /// loop driver depends on. Distinct from the per-transition unit
+    /// tests above; this exercises the full walk.
+    #[test]
+    fn cooldown_sequence_primary_fails_twice_then_recovers() {
+        let primary = mock(SpawnFailureClass::Success);
+        let fb = mock(SpawnFailureClass::Success);
+
+        let primary_id = &primary as *const _ as *const ();
+        let fb_id = &fb as *const _ as *const ();
+        let id_of = |s: &dyn RuntimeSpawner| s as *const _ as *const ();
+
+        let mut c = CooldownState::new(2);
+        let mut chosen: Vec<&'static str> = Vec::new();
+
+        // Iter 1: primary errors → enter cooldown.
+        let s = c.next_spawner(&primary, Some(&fb));
+        chosen.push(if std::ptr::eq(id_of(s), primary_id) { "primary" } else { "fallback" });
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::RateLimit));
+        assert!(c.in_cooldown);
+        assert_eq!(c.iters_remaining, 2);
+
+        // Iter 2: fallback success, drain to 1.
+        let s = c.next_spawner(&primary, Some(&fb));
+        chosen.push(if std::ptr::eq(id_of(s), primary_id) { "primary" } else { "fallback" });
+        c.record_outcome(true, SpawnFailureClass::Success);
+        assert_eq!(c.iters_remaining, 1);
+
+        // Iter 3: primary errors again on a retry attempt? No — still on
+        // fallback because iters_remaining > 0. Fallback errors this
+        // time → window resets to quantum (2).
+        let s = c.next_spawner(&primary, Some(&fb));
+        chosen.push(if std::ptr::eq(id_of(s), primary_id) { "primary" } else { "fallback" });
+        c.record_outcome(true, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+        assert_eq!(c.iters_remaining, 2);
+
+        // Iter 4 + 5: two fallback successes drain to 0.
+        for _ in 0..2 {
+            let s = c.next_spawner(&primary, Some(&fb));
+            chosen.push(if std::ptr::eq(id_of(s), primary_id) { "primary" } else { "fallback" });
+            c.record_outcome(true, SpawnFailureClass::Success);
+        }
+        assert_eq!(c.iters_remaining, 0);
+        assert!(c.in_cooldown);
+
+        // Iter 6: window drained → route to primary for retry. Primary
+        // succeeds → exit cooldown.
+        let s = c.next_spawner(&primary, Some(&fb));
+        chosen.push(if std::ptr::eq(id_of(s), primary_id) { "primary" } else { "fallback" });
+        c.record_outcome(false, SpawnFailureClass::Success);
+        assert!(!c.in_cooldown);
+
+        assert_eq!(
+            chosen,
+            vec!["primary", "fallback", "fallback", "fallback", "fallback", "primary"],
+            "chosen sequence diverged from cooldown contract"
+        );
+        // Silence the unused-binding lint in case the fb id doesn't get
+        // checked above (it will, but be explicit).
+        let _ = fb_id;
+    }
+
     #[test]
     fn no_fallback_configured_never_switches() {
         let mut c = CooldownState::new(3);

@@ -1032,6 +1032,32 @@ mod tests {
         );
     }
 
+    /// E2E: only runs when HEW_LOOP_E2E=1 and `codex` is on PATH.
+    /// Mirrors `e2e_real_claude_spawn` — manual invocation only, off
+    /// the default CI matrix. Verifies the codex JSONL stream parser
+    /// extracts non-empty text and Success class against a live codex
+    /// install. Sandbox pinned to read-only since the test does no
+    /// filesystem writes.
+    #[test]
+    fn e2e_real_codex_spawn() {
+        if std::env::var("HEW_LOOP_E2E").as_deref() != Ok("1") {
+            return;
+        }
+        if which::which("codex").is_err() {
+            return;
+        }
+        let s = CodexSpawner::from_env();
+        let p = assemble(
+            "You are a test agent.",
+            "",
+            "Reply with exactly this single line and nothing else: pong",
+        );
+        let out = s.spawn(&p, &[], &SpawnOpts::default()).expect("spawn ok");
+        assert_eq!(out.failure_class, SpawnFailureClass::Success, "stderr={}", out.stderr_tail);
+        assert!(!out.raw_text.is_empty(), "expected non-empty reply, stderr={}", out.stderr_tail);
+        assert!(out.tokens.total() > 0, "expected nonzero tokens, raw={}", out.raw_text);
+    }
+
     #[test]
     fn classify_http_status_table() {
         let cases = [

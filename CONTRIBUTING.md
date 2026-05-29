@@ -83,6 +83,28 @@ Add a test for every behavior change. Snapshots are intentionally
 avoided in favor of structural assertions (JSON shape, file presence)
 so test churn matches behavior churn.
 
+### Live-runtime e2e tests (opt-in)
+
+Two tests in `hew-core/src/runtime.rs` shell out to a real agent CLI to
+catch live JSON-shape drift. Both stay off CI by default — they only
+run when both gates are satisfied:
+
+| Test | Gate |
+|------|------|
+| `e2e_real_claude_spawn` | `HEW_LOOP_E2E=1` and `claude` on PATH |
+| `e2e_real_codex_spawn`  | `HEW_LOOP_E2E=1` and `codex` on PATH |
+
+Run them manually after bumping a spawner or when re-confirming against
+a newer CLI release:
+
+```sh
+HEW_LOOP_E2E=1 cargo test -p hew-core e2e_real_
+```
+
+Each test skips gracefully (returns early) when its gate isn't met, so
+the default `cargo test` invocation never touches the network or a real
+agent process.
+
 ## Workspace layout
 
 ```
