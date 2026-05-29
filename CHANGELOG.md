@@ -14,6 +14,34 @@ versioning follows [Semantic Versioning](https://semver.org/).
   then iterates each runtime in order with a per-runtime stdout banner.
   The interactive picker becomes a multi-select checkbox with
   currently-detected runtimes pre-checked.
+- **`hew loop --runtime=codex` drives codex-cli as a first-class
+  runtime.** The new `CodexSpawner` mirrors `ClaudeSpawner`: same
+  `RuntimeSpawner` trait, same `HEW_LOOP_*_BIN` override pattern, same
+  failure classification + token accounting. Codex's `--sandbox` enum is
+  mapped from hew's `allowed_tools` list (`Edit`/`Write`/`MultiEdit`/
+  `NotebookEdit` → `workspace-write`; everything else → `read-only`).
+  See `docs/LOOP.md` for the runtime table and the lossy-translation
+  caveat for `Bash(git:*)`-style restrictions.
+- **Fallback runtime with primary-sticky cooldown.**
+  `--fallback-runtime=<claude|codex>` (config:
+  `loop.fallback_runtime`) routes iters to a secondary runtime when the
+  primary returns a `RuntimeError`. `--fallback-cooldown-iters N`
+  (config: `loop.fallback_cooldown_iters`, default 3) controls how long
+  the loop sticks with the fallback before retrying primary. Worked
+  example + cooldown semantics in `docs/LOOP.md`.
+- **`SpawnFailureClass`** sits alongside `SpawnOutcome.success` so the
+  runner can distinguish "runtime broke" (try fallback) from "guard
+  tripped" / "budget exhausted" (don't). Status-code → kind classifier
+  is shared between Claude's JSON error envelope and Codex's nested
+  `turn.failed` message.
+- **`SpawnOpts { model_override, working_dir }`** threaded through
+  `RuntimeSpawner::spawn` for per-iter overrides. No behavior change
+  today (call sites pass `SpawnOpts::default()`); substrate for the
+  upcoming per-task model resolution epic.
+- **Live-runtime e2e tests for both spawners.** `e2e_real_claude_spawn`
+  + `e2e_real_codex_spawn` in `hew-core/src/runtime.rs` exercise the
+  real CLIs when `HEW_LOOP_E2E=1` and the binary is on PATH. Default
+  `cargo test` skips both. Documented in `CONTRIBUTING.md`.
 
 ### Changed
 
@@ -22,6 +50,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
   Useful for `hew update` re-runs and CI flows that want
   every-installed-runtime regenerated without naming them. Zero detected
   + non-interactive still errors with `MissingFlag` as today.
+- **`RuntimeSpawner::spawn` gained a `&SpawnOpts` parameter.** Custom
+  implementations need to add `_opts: &SpawnOpts` to the signature.
+  Existing call sites (production loop + tests) pass
+  `&SpawnOpts::default()`.
 
 ## [0.10.0] — 2026-05-28
 
