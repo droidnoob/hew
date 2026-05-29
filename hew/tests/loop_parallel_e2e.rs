@@ -23,6 +23,7 @@ use hew_core::runtime::{
 
 use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
 use hew_core::backpressure::GateCheck;
+use hew_core::config::LoopModelConfig;
 
 /// Process-wide lock for HOME mutation. Tests in this binary may run on
 /// separate threads; serializing them keeps the env swap safe.
@@ -366,6 +367,7 @@ fn e2e_parallel_jobs_2_with_mock_spawner() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -443,6 +445,7 @@ fn e2e_parallel_merge_conflict_files_bug_task() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )

@@ -23,10 +23,12 @@ use std::time::Duration;
 use clap::{Args as ClapArgs, Subcommand};
 use hew_core::backpressure::{self, GateCheck, Verdict};
 use hew_core::bd::{BdClient, RealBd};
+use hew_core::config::LoopModelConfig;
 use hew_core::loop_log::{
     IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
     run_log_path, stop_file_path, write_json_atomic, write_manifest,
 };
+use hew_core::loop_model::{TaskRecord, resolve_model};
 use hew_core::prompt;
 use hew_core::runner::{CooldownState, Iter, IterOutcome, Run, RunConfig};
 use hew_core::runtime::{
@@ -398,6 +400,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let fallback_spawner: Option<Box<dyn RuntimeSpawner>> =
         if args.dry_run { None } else { fallback.runtime.map(build_spawner_for) };
     let gate = AutoGateRunner;
+    let loop_model = cfg.loop_cfg.model.clone();
     run_loop_with(
         ctx,
         args,
@@ -405,6 +408,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         spawner.as_deref(),
         fallback_spawner.as_deref(),
         fallback,
+        loop_model,
         &gate,
         &project_root,
     )
@@ -479,6 +483,7 @@ pub fn run_loop_with(
     spawner: Option<&dyn RuntimeSpawner>,
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
 ) -> miette::Result<()> {
@@ -494,11 +499,22 @@ pub fn run_loop_with(
             spawner,
             fallback_spawner,
             fallback,
+            loop_model,
             gate,
             project_root,
         );
     }
-    run_loop_parallel(ctx, args, bd, spawner, fallback_spawner, fallback, gate, project_root)
+    run_loop_parallel(
+        ctx,
+        args,
+        bd,
+        spawner,
+        fallback_spawner,
+        fallback,
+        loop_model,
+        gate,
+        project_root,
+    )
 }
 
 /// Today's single-worker loop, factored out so [`run_loop_with`] can
@@ -513,6 +529,7 @@ fn run_loop_serial(
     spawner: Option<&dyn RuntimeSpawner>,
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
 ) -> miette::Result<()> {
@@ -563,6 +580,7 @@ fn run_loop_serial(
         spawner,
         fallback_spawner,
         fallback,
+        loop_model.clone(),
         gate,
         &worker,
         &skill,
@@ -623,6 +641,7 @@ fn run_loop_parallel(
     spawner: Option<&dyn RuntimeSpawner>,
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
 ) -> miette::Result<()> {
@@ -731,6 +750,7 @@ fn run_loop_parallel(
             spawner,
             fallback_spawner,
             fallback,
+            loop_model.clone(),
             gate,
             worker,
             &skill,
@@ -841,6 +861,7 @@ pub fn run_worker_loop(
     spawner: Option<&dyn RuntimeSpawner>,
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     worker: &Worker,
     skill: &skills::Skill,
@@ -865,6 +886,7 @@ pub fn run_worker_loop(
         strict: args.strict,
         interactive: args.interactive,
         unattended: args.unattended,
+        loop_model,
     };
 
     let collector = Collector::new(stop_path.to_path_buf());
@@ -974,11 +996,25 @@ pub fn run_worker_loop(
         let active_kind =
             if on_fallback { fallback.runtime.unwrap_or(primary_kind) } else { primary_kind };
 
+        // Per-task model resolution (Epic D / hew-1tq). Honors
+        // description tag > label > config precedence — see
+        // `hew_core::loop_model::resolve_model`. Empty `LoopModelConfig`
+        // + un-annotated task ⇒ `None`, behavior identical to the
+        // pre-epic spawner default.
+        let model_override = resolve_model(
+            &TaskRecord {
+                description: &task.description,
+                labels: &[],
+                priority: task.priority,
+                issue_type: &task.issue_type,
+            },
+            &cfg.loop_model,
+        );
+        let spawn_opts = SpawnOpts { model_override, working_dir: None };
+
         let (mut outcome, tokens, mut stderr_tail, failure_class) = if let Some(s) = active_spawner
         {
-            // SpawnOpts::default() until Epic D wires per-task model
-            // resolution; opts is the future channel for that override.
-            match s.spawn(&assembled, allowed, &SpawnOpts::default()) {
+            match s.spawn(&assembled, allowed, &spawn_opts) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
                         IterOutcome::Closed
@@ -1163,6 +1199,7 @@ pub fn run_worker_loop(
         let mut log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
         if active_spawner.is_some() {
             log.runtime_used = Some(active_kind.as_str().to_string());
+            log.model = spawn_opts.model_override.clone();
         }
         log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
         write_json_atomic(&iter_log_path(&worker.log_dir, worker.worker_n, iter_number), &log)

@@ -42,6 +42,17 @@ versioning follows [Semantic Versioning](https://semver.org/).
   --verify` and returns a clear `GitNonZero` rather than silently
   overwriting. Branch naming stays the documented `loop/<run-id>/w<n>`
   (see `worktree::branch_name`).
+- **Per-task model selection in `hew loop`.** Heavy tasks can route to a
+  stronger model without changing the rest of the queue. Precedence
+  (highest first): description tag `<!-- hew:model=opus-4-7 -->`, label
+  `model:<name>`, config `loop.model.by_priority.<P>`,
+  `loop.model.by_type.<type>`, `loop.model.default`. The resolved model
+  is passed to the spawner per iter as `--model` / `-m` and logged in
+  `iter-NNN.json::model`. `hew loop summary` adds a "by model"
+  breakdown table (iters, tasks, input/cached/output/total) when at
+  least one iter recorded a model; hidden otherwise. See
+  `docs/LOOP.md` "Per-task model selection" for syntax + the
+  per-model prompt-cache caveat.
 
 ### Changed
 

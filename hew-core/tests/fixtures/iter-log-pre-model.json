@@ -1,0 +1,21 @@
+{
+  "number": 1,
+  "task_id": "hew-abc",
+  "started_at": "2026-05-26T00:00:00Z",
+  "ended_at": "2026-05-26T00:01:00Z",
+  "outcome": "closed",
+  "prompt_prefix_hash": "abc123",
+  "cost": {
+    "input": 100,
+    "output": 50,
+    "cache_read": 0,
+    "cache_create": 0
+  },
+  "decisions": [],
+  "deferred": [],
+  "tool_calls": ["Read", "Edit"],
+  "stderr_tail": null,
+  "symbols_touched": [],
+  "runtime_used": "claude",
+  "cooldown_engaged": false
+}

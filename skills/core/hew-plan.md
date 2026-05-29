@@ -258,6 +258,16 @@ read these per-plan deviations *in addition to* the project's
 `CONVENTION:craft.*` memories. Deviations are scoped to the plan id;
 they do not bleed across features.
 
+### Note for `hew loop` runs
+
+If you expect this plan to drive an autonomous `hew loop` and one or
+two tasks are clearly heavier than the rest, mention it now — the
+decomposer will mark those tasks with `<!-- hew:model=<name> -->`
+or a `model:<name>` label so the loop routes them to a stronger
+model. Project-wide policy (e.g. "all P0s on opus-4-7") lives in
+`loop.model.by_priority` / `loop.model.by_type` and is set once at
+the config layer; see `docs/LOOP.md` "Per-task model selection."
+
 ## What you don't do
 
 - **No tasks.** That is `hew-decompose`. Do not run `hew task new` here.

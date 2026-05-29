@@ -25,6 +25,7 @@ pub mod git;
 pub mod guard;
 pub mod install;
 pub mod loop_log;
+pub mod loop_model;
 pub mod loop_summary;
 pub mod memories;
 pub mod merge_back;

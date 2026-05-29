@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use crate::config::LoopModelConfig;
 use crate::runtime::{RuntimeSpawner, SpawnFailureClass};
 
 /// Per-run configuration. Set once at `hew loop` invocation, immutable
@@ -30,6 +31,11 @@ pub struct RunConfig {
     /// running `decide::resolve` after the iter completes. Mutually
     /// exclusive with `interactive`.
     pub unattended: bool,
+    /// Per-task model selection knobs consumed by
+    /// [`crate::loop_model::resolve_model`] to pick a `--model` /
+    /// `-m` override for each iter. Empty by default (no overrides;
+    /// the spawner falls back to its own default).
+    pub loop_model: LoopModelConfig,
 }
 
 impl Default for RunConfig {
@@ -42,6 +48,7 @@ impl Default for RunConfig {
             strict: true,
             interactive: false,
             unattended: false,
+            loop_model: LoopModelConfig::default(),
         }
     }
 }

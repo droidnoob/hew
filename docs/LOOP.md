@@ -136,6 +136,73 @@ iter 6: claude succeeds                  → no cooldown
 If iter 5's claude retry had errored, the loop would re-enter cooldown
 for another 3 iters on codex, then retry claude once at iter 9.
 
+---
+
+## Per-task model selection
+
+By default every iter runs against the runtime's default model. When
+one task is genuinely harder than the rest of the queue — a tricky
+refactor, a thorny algorithm, an architectural call — you can route
+just that task to a stronger model without touching the rest. The
+loop resolves a `--model` / `-m` override per iter from this
+precedence chain (highest wins):
+
+1. Description tag: `<!-- hew:model=opus-4-7 -->` anywhere in the
+   task description. Cheapest to add; travels with the task body.
+2. Label: `bd label add hew-X model:opus-4-7`. Useful when you don't
+   want to edit the description, or when many sibling tasks should
+   share an override.
+3. Config: `loop.model.by_priority.<P>` and `loop.model.by_type.<t>`,
+   both maps. By-priority wins over by-type when both match.
+4. Config: `loop.model.default`. The project-wide floor.
+5. None — runtime picks its default.
+
+### TOML config
+
+```toml
+[loop.model]
+default = "sonnet-4-6"
+
+[loop.model.by_priority]
+P0 = "opus-4-7"
+P1 = "opus-4-7"
+
+[loop.model.by_type]
+bug = "opus-4-7"
+```
+
+Read/write via `hew config get loop.model.by_priority` (comma-separated
+`KEY=VAL` pairs) or `hew config set loop.model.by_priority.P0 opus-4-7`
+(dotted single-entry form; empty value clears).
+
+### Per-model spend in the summary
+
+When at least one iter records a `model`, `hew loop summary` adds a
+"by model" breakdown:
+
+```text
+by model
+─────────────────────────────────────────────────────────────────
+model         iters   tasks   input    cached   output   total
+opus-4-7         3       3   12.4k    98.1k     4.2k    114.7k
+sonnet-4-6       7       6    8.1k    71.2k     2.9k     82.2k
+(default)        1       1    0.5k     3.4k     0.2k      4.1k
+─────────────────────────────────────────────────────────────────
+```
+
+Iters without a resolved model collapse under `(default)`. The table
+is hidden when no iter recorded one — no flag, no config to enable.
+
+### Caveat: per-model cache pools
+
+Anthropic's prompt cache is keyed per model. If half a run uses
+`sonnet-4-6` and half uses `opus-4-7`, you pay the cache-creation
+input cost twice — once per model — even if the prefix bytes are
+identical. The compounding effect from "Memory-graph compounding" is
+still real, but it's per-model. Reserve overrides for tasks that
+genuinely benefit from the swap; sprinkling them across an otherwise
+uniform queue costs cache hits.
+
 ### Failure classification
 
 The loop categorizes each iter's outcome before deciding what to do:

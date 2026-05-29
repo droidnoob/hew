@@ -4,6 +4,7 @@
 //! to `~/.config/hew/config.toml`. All fields have sensible defaults so
 //! a missing file is not an error.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,26 @@ pub struct LoopConfig {
     /// Iters the loop stays on the fallback before retrying the
     /// primary. `None` → default 3 per `DECISION:loop-fallback-policy`.
     pub fallback_cooldown_iters: Option<u32>,
+    /// Per-task model selection knobs consumed by the dynamic-model
+    /// resolver (epic `hew-1tq`). All-None / empty by default.
+    pub model: LoopModelConfig,
+}
+
+/// Persistent inputs for the dynamic per-task model resolver. Model
+/// names are free-form strings passed verbatim to the spawner; the
+/// runtime CLI rejects unknown ones at invocation time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LoopModelConfig {
+    /// Fallback model used when no `by_priority` / `by_type` rule
+    /// matches the task. `None` means "let the resolver fall through
+    /// to the runtime's own default".
+    pub default: Option<String>,
+    /// Model override keyed by task priority label (`P0`..`P4`).
+    pub by_priority: BTreeMap<String, String>,
+    /// Model override keyed by task type (`task`, `bug`, `chore`,
+    /// `feature`, `epic`, ...).
+    pub by_type: BTreeMap<String, String>,
 }
 
 /// Effective default for `fallback_cooldown_iters` when neither the
@@ -343,8 +364,47 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "loop.fallback_cooldown_iters" | "loop.fallback-cooldown-iters" => {
             cfg.loop_cfg.fallback_cooldown_iters.map(|n| n.to_string())
         }
+        "loop.model.default" => cfg.loop_cfg.model.default.clone(),
+        "loop.model.by_priority" | "loop.model.by-priority" => {
+            Some(format_map(&cfg.loop_cfg.model.by_priority))
+        }
+        "loop.model.by_type" | "loop.model.by-type" => {
+            Some(format_map(&cfg.loop_cfg.model.by_type))
+        }
+        k if k.starts_with("loop.model.by_priority.")
+            || k.starts_with("loop.model.by-priority.") =>
+        {
+            let sub = k.rsplit_once('.').map(|(_, s)| s).unwrap_or_default();
+            cfg.loop_cfg.model.by_priority.get(sub).cloned()
+        }
+        k if k.starts_with("loop.model.by_type.") || k.starts_with("loop.model.by-type.") => {
+            let sub = k.rsplit_once('.').map(|(_, s)| s).unwrap_or_default();
+            cfg.loop_cfg.model.by_type.get(sub).cloned()
+        }
         _ => None,
     }
+}
+
+fn format_map(m: &BTreeMap<String, String>) -> String {
+    m.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
+}
+
+fn parse_map(v: &str) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for entry in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (k, val) = entry.split_once('=').ok_or_else(|| HewError::MissingFlag {
+            flag: format!("value (expected comma-separated KEY=VALUE pairs, got `{v}`)"),
+        })?;
+        let k = k.trim();
+        let val = val.trim();
+        if k.is_empty() || val.is_empty() {
+            return Err(HewError::MissingFlag {
+                flag: format!("value (empty key or value in `{entry}`)"),
+            });
+        }
+        out.insert(k.to_string(), val.to_string());
+    }
+    Ok(out)
 }
 
 /// Set a key. Returns error for unknown keys or invalid values.
@@ -498,6 +558,40 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 cfg.loop_cfg.fallback_cooldown_iters = Some(n);
             }
         }
+        "loop.model.default" => {
+            cfg.loop_cfg.model.default =
+                if value.is_empty() { None } else { Some(value.to_string()) };
+        }
+        "loop.model.by_priority" | "loop.model.by-priority" => {
+            cfg.loop_cfg.model.by_priority = parse_map(value)?;
+        }
+        "loop.model.by_type" | "loop.model.by-type" => {
+            cfg.loop_cfg.model.by_type = parse_map(value)?;
+        }
+        k if k.starts_with("loop.model.by_priority.")
+            || k.starts_with("loop.model.by-priority.") =>
+        {
+            let sub = k.rsplit_once('.').map(|(_, s)| s).unwrap_or_default();
+            if sub.is_empty() {
+                return Err(HewError::MissingFlag { flag: format!("key (missing sub-key: {k})") });
+            }
+            if value.is_empty() {
+                cfg.loop_cfg.model.by_priority.remove(sub);
+            } else {
+                cfg.loop_cfg.model.by_priority.insert(sub.to_string(), value.to_string());
+            }
+        }
+        k if k.starts_with("loop.model.by_type.") || k.starts_with("loop.model.by-type.") => {
+            let sub = k.rsplit_once('.').map(|(_, s)| s).unwrap_or_default();
+            if sub.is_empty() {
+                return Err(HewError::MissingFlag { flag: format!("key (missing sub-key: {k})") });
+            }
+            if value.is_empty() {
+                cfg.loop_cfg.model.by_type.remove(sub);
+            } else {
+                cfg.loop_cfg.model.by_type.insert(sub.to_string(), value.to_string());
+            }
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -531,6 +625,9 @@ pub fn keys() -> &'static [&'static str] {
         "compact.exempt",
         "loop.fallback_runtime",
         "loop.fallback_cooldown_iters",
+        "loop.model.default",
+        "loop.model.by_priority",
+        "loop.model.by_type",
     ]
 }
 
@@ -623,6 +720,9 @@ mod tests {
                 "compact.exempt" => "STATUS:custom,SOMETHING:else",
                 "loop.fallback_runtime" => "codex",
                 "loop.fallback_cooldown_iters" => "5",
+                "loop.model.default" => "sonnet-4-6",
+                "loop.model.by_priority" => "P0=opus-4-7,P3=haiku-4-5",
+                "loop.model.by_type" => "bug=sonnet-4-6,chore=haiku-4-5",
                 k if k.starts_with("optional-skills.") => "yes",
                 _ => "true",
             };
@@ -949,6 +1049,131 @@ security = false
         let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.loop_cfg.fallback_runtime.as_deref(), Some("codex"));
         assert_eq!(loaded.loop_cfg.fallback_cooldown_iters, Some(7));
+    }
+
+    // ──────── loop.model.* ────────
+
+    #[test]
+    fn loop_model_defaults_are_empty() {
+        let cfg = Config::default();
+        assert!(cfg.loop_cfg.model.default.is_none());
+        assert!(cfg.loop_cfg.model.by_priority.is_empty());
+        assert!(cfg.loop_cfg.model.by_type.is_empty());
+        assert_eq!(get(&cfg, "loop.model.default"), None);
+        assert_eq!(get(&cfg, "loop.model.by_priority"), Some(String::new()));
+        assert_eq!(get(&cfg, "loop.model.by_type"), Some(String::new()));
+    }
+
+    #[test]
+    fn loop_model_default_is_free_form_string() {
+        let mut cfg = Config::default();
+        // Per task `Craft:`, no validation against a model catalogue.
+        set(&mut cfg, "loop.model.default", "sonnet-4-6").unwrap();
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+        set(&mut cfg, "loop.model.default", "some-future-model-2030").unwrap();
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("some-future-model-2030"));
+        set(&mut cfg, "loop.model.default", "").unwrap();
+        assert!(cfg.loop_cfg.model.default.is_none());
+    }
+
+    #[test]
+    fn loop_model_by_priority_dotted_keys() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.by_priority.P0", "opus-4-7").unwrap();
+        set(&mut cfg, "loop.model.by_priority.P3", "haiku-4-5").unwrap();
+        assert_eq!(get(&cfg, "loop.model.by_priority.P0"), Some("opus-4-7".into()));
+        assert_eq!(get(&cfg, "loop.model.by_priority.P3"), Some("haiku-4-5".into()));
+        assert_eq!(get(&cfg, "loop.model.by_priority.P9"), None);
+        // Comma-list view stays deterministic (BTreeMap order).
+        assert_eq!(get(&cfg, "loop.model.by_priority"), Some("P0=opus-4-7,P3=haiku-4-5".into()));
+        // Empty value removes the entry.
+        set(&mut cfg, "loop.model.by_priority.P0", "").unwrap();
+        assert!(!cfg.loop_cfg.model.by_priority.contains_key("P0"));
+    }
+
+    #[test]
+    fn loop_model_by_type_dotted_keys() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.by_type.bug", "sonnet-4-6").unwrap();
+        set(&mut cfg, "loop.model.by_type.chore", "haiku-4-5").unwrap();
+        assert_eq!(get(&cfg, "loop.model.by_type.bug"), Some("sonnet-4-6".into()));
+        assert_eq!(get(&cfg, "loop.model.by-type.chore"), Some("haiku-4-5".into()));
+        set(&mut cfg, "loop.model.by_type.bug", "").unwrap();
+        assert!(!cfg.loop_cfg.model.by_type.contains_key("bug"));
+    }
+
+    #[test]
+    fn loop_model_map_bulk_set_parses_comma_list() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.by_priority", "P0=opus-4-7, P1=sonnet-4-6,P3=haiku-4-5").unwrap();
+        assert_eq!(cfg.loop_cfg.model.by_priority.get("P0").unwrap(), "opus-4-7");
+        assert_eq!(cfg.loop_cfg.model.by_priority.get("P1").unwrap(), "sonnet-4-6");
+        assert_eq!(cfg.loop_cfg.model.by_priority.get("P3").unwrap(), "haiku-4-5");
+        // Empty bulk-set clears the map.
+        set(&mut cfg, "loop.model.by_priority", "").unwrap();
+        assert!(cfg.loop_cfg.model.by_priority.is_empty());
+        // Malformed entry without `=` rejected.
+        assert!(set(&mut cfg, "loop.model.by_priority", "P0,P1").is_err());
+        assert!(set(&mut cfg, "loop.model.by_priority", "=opus").is_err());
+        assert!(set(&mut cfg, "loop.model.by_priority", "P0=").is_err());
+    }
+
+    #[test]
+    fn loop_model_partial_section_parses() {
+        // Only `default` present — by_priority / by_type fall back to empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[loop.model]
+default = "sonnet-4-6"
+"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+        assert!(loaded.loop_cfg.model.by_priority.is_empty());
+        assert!(loaded.loop_cfg.model.by_type.is_empty());
+    }
+
+    #[test]
+    fn loop_model_missing_section_uses_defaults() {
+        // Pre-existing on-disk config with no [loop.model] section at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+update_check = true
+
+[loop]
+fallback_runtime = "codex"
+"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path).unwrap();
+        assert!(loaded.loop_cfg.model.default.is_none());
+        assert!(loaded.loop_cfg.model.by_priority.is_empty());
+        assert!(loaded.loop_cfg.model.by_type.is_empty());
+    }
+
+    #[test]
+    fn loop_model_round_trips_through_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.default", "sonnet-4-6").unwrap();
+        set(&mut cfg, "loop.model.by_priority.P0", "opus-4-7").unwrap();
+        set(&mut cfg, "loop.model.by_priority.P3", "haiku-4-5").unwrap();
+        set(&mut cfg, "loop.model.by_type.bug", "sonnet-4-6").unwrap();
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+        assert_eq!(loaded.loop_cfg.model.by_priority.get("P0").unwrap(), "opus-4-7");
+        assert_eq!(loaded.loop_cfg.model.by_priority.get("P3").unwrap(), "haiku-4-5");
+        assert_eq!(loaded.loop_cfg.model.by_type.get("bug").unwrap(), "sonnet-4-6");
     }
 
     #[test]

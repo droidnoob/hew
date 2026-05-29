@@ -24,6 +24,7 @@ use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOpts, SpawnOutco
 use hew::commands::loop_cmd::{
     Args, GateRunner, StaticGateRunner, Worker, run_loop_with, run_worker_loop,
 };
+use hew_core::config::LoopModelConfig;
 use hew_core::runtime::FallbackConfig;
 
 /// Spawner that creates a second commit in `repo_dir` to simulate the
@@ -168,6 +169,7 @@ fn gate_fail_reverts_iter_commits_and_files_status_memory() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -309,6 +311,7 @@ fn unattended_resolves_deferred_via_memory_lookup() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -392,6 +395,7 @@ fn without_unattended_deferred_is_left_alone() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -558,6 +562,7 @@ fn prompt_prefix_hash_is_stable_across_iters() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -617,6 +622,7 @@ fn out_of_band_closure_promotes_no_close_to_closed() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -674,6 +680,7 @@ fn gate_pass_keeps_iter_commit() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -820,6 +827,7 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         Some(&primary),
         Some(&fallback_spawner),
         fallback_cfg,
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -943,6 +951,7 @@ fn gate_is_called_with_worker_worktree_dir() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &worker,
         &skill,
@@ -996,6 +1005,7 @@ fn gate_falls_back_to_project_root_when_unspecified() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &repo,
     )
@@ -1059,6 +1069,7 @@ fn run_worker_loop_uses_worker_worktree_for_git_calls() {
         Some(&spawner),
         None,
         FallbackConfig::default(),
+        LoopModelConfig::default(),
         &gate,
         &worker,
         &skill,
@@ -1115,8 +1126,18 @@ fn jobs_1_uses_serial_fast_path() {
     args.jobs = 1;
     args.dry_run = true;
 
-    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
-        .expect("serial loop runs");
+    run_loop_with(
+        &ctx(),
+        args,
+        &bd,
+        None,
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("serial loop runs");
 
     let loop_root = repo.join(".hew/loop");
     let entry = std::fs::read_dir(&loop_root)
@@ -1156,8 +1177,18 @@ fn jobs_2_uses_dispatcher_path() {
     args.jobs = 2;
     args.dry_run = true;
 
-    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
-        .expect("parallel loop runs (dry-run)");
+    run_loop_with(
+        &ctx(),
+        args,
+        &bd,
+        None,
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("parallel loop runs (dry-run)");
 
     let loop_root = repo.join(".hew/loop");
     let entry = std::fs::read_dir(&loop_root)
