@@ -21,7 +21,7 @@ use hew_core::prompt::AssembledPrompt;
 use hew_core::runner::TokenSpend;
 use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOpts, SpawnOutcome};
 
-use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
+use hew::commands::loop_cmd::{Args, StaticGateRunner, Worker, run_loop_with, run_worker_loop};
 use hew_core::runtime::FallbackConfig;
 
 /// Spawner that creates a second commit in `repo_dir` to simulate the
@@ -862,4 +862,81 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
     // (iters 2, 3, 4).
     assert_eq!(*primary.calls.borrow(), 2, "primary call count");
     assert_eq!(*fallback_spawner.calls.borrow(), 3, "fallback call count");
+}
+
+/// `run_worker_loop` must target `worker.worktree_dir` for every git
+/// call, and write iter logs under `worker.log_dir` — not whatever
+/// the dispatcher's `project_root` happened to be. Exercises the
+/// per-worker contract that the future parallel dispatcher relies on.
+#[test]
+fn run_worker_loop_uses_worker_worktree_for_git_calls() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    std::fs::write(worktree.join("README.md"), b"seed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["commit", "-q", "-m", "seed"]);
+    let initial_sha = head_sha(&worktree);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: worktree.clone() };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let args = args_one_iter();
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        log_dir: log_dir.clone(),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    let outcome = run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    // Spawner committed inside `worktree`; HEAD must have advanced.
+    assert_ne!(head_sha(&worktree), initial_sha, "expected commit in worker worktree");
+
+    // Iter log must land under worker.log_dir, NOT under any other
+    // ambient project root.
+    let iter_log = log_dir.join("iter-001.json");
+    assert!(iter_log.exists(), "iter-001.json must live under worker.log_dir");
+    let body = std::fs::read_to_string(&iter_log).expect("read iter log");
+    let log: IterLog = serde_json::from_str(&body).expect("parse iter log");
+    assert_eq!(log.task_id.as_deref(), Some("hew-test"));
+    // The returned outcome mirrors the on-disk run.
+    assert_eq!(outcome.iter_logs.len(), 1);
+    assert_eq!(outcome.run.iters.len(), 1);
 }

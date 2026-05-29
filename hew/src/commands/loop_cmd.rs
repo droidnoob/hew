@@ -399,9 +399,46 @@ fn build_spawner_for(kind: RuntimeKind) -> Box<dyn RuntimeSpawner> {
     }
 }
 
+/// One worker's slot in a (potentially parallel) loop run.
+///
+/// In v1 the dispatcher only ever constructs a single `Worker` with
+/// `worktree_dir = project_root` and `log_dir = .hew/loop/<run-id>/`
+/// — that is the `--jobs=1` fast path and matches today's behavior
+/// byte-for-byte. The fields exist now so the future parallel
+/// dispatcher can fill multiple slots without re-plumbing
+/// [`run_worker_loop`]'s signature.
+#[derive(Debug, Clone)]
+pub struct Worker {
+    /// Stable slot id; `0` for the single-worker path.
+    pub id: u32,
+    /// Working tree this worker drives — every `git` / gate / agent
+    /// call inside [`run_worker_loop`] targets this path.
+    pub worktree_dir: PathBuf,
+    /// Branch the worker is committing to. Informational for v1; the
+    /// parallel dispatcher uses this to scope `git reset --hard`.
+    pub branch: String,
+    /// Where per-iter logs (`iter-NNN.json`, `run.json`) land.
+    pub log_dir: PathBuf,
+}
+
+/// Final state returned by [`run_worker_loop`]. The dispatcher reads
+/// this to render the end-of-run summary; in the parallel future it
+/// will fold N `WorkerOutcome`s into a single report.
+#[derive(Debug)]
+pub struct WorkerOutcome {
+    pub run: Run,
+    pub iter_logs: Vec<IterLog>,
+}
+
 /// Testable inner. Production [`run_loop`] resolves `bd`, the spawner,
 /// the gate runner and the project root; tests construct mocks and call
 /// this directly. Returns the same `miette::Result` as `run_loop`.
+///
+/// Acts as the v1 dispatcher: builds the per-run scaffolding (run-id,
+/// log dir, primer text, allowed-tools set), constructs a single
+/// [`Worker`] over `project_root`, and delegates the iter loop to
+/// [`run_worker_loop`]. The behavior is byte-identical to the
+/// pre-split single-threaded loop.
 #[allow(clippy::too_many_arguments)]
 pub fn run_loop_with(
     ctx: &Ctx,
@@ -415,6 +452,87 @@ pub fn run_loop_with(
 ) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
+
+    let run_id = new_run_id();
+    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
+    let stop_path = args.stop_file.clone().unwrap_or_else(|| stop_file_path(&dir));
+
+    if !ctx.quiet {
+        eprintln!("hew loop {} — run-dir={}", &run_id, dir.display());
+        if args.dry_run {
+            eprintln!("(--dry-run: no subprocess, no git ops)");
+        }
+    }
+
+    let allowed = allowed_tools::for_skill(&args.skill);
+
+    // Freeze the bd prime payload once at run start: this is the
+    // cacheable per-run primer the agent sees on every iter. New
+    // memories filed mid-run (STATUS:loop-iter-failed, DECISIONs from
+    // unattended resolution, etc.) deliberately don't appear in the
+    // prompt until the next `hew loop run` invocation — the trade-off
+    // is agent-stale-by-up-to-one-run for a byte-stable prompt prefix
+    // that the Anthropic prompt cache can hit across iters. Agents can
+    // always shell `hew memories --prefix=…` inside a spawn if they
+    // need fresh state.
+    let primer_text = bd.prime_raw().unwrap_or_default();
+
+    // v1: one worker, worktree_dir = project_root, log_dir = run-dir.
+    // The `branch` field is informational for the single-slot path;
+    // the parallel dispatcher (hew-9m5) will populate it with the
+    // per-slot `loop/<run-id>/w<n>` branch.
+    let worker = Worker {
+        id: 0,
+        worktree_dir: project_root.to_path_buf(),
+        branch: String::new(),
+        log_dir: dir.clone(),
+    };
+
+    let outcome = run_worker_loop(
+        ctx,
+        &args,
+        bd,
+        spawner,
+        fallback_spawner,
+        fallback,
+        gate,
+        &worker,
+        &skill,
+        &primer_text,
+        &run_id,
+        &allowed,
+        &stop_path,
+    )?;
+
+    print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir);
+    Ok(())
+}
+
+/// One worker's iter loop. Pulls ready tasks from `bd`, drives the
+/// runtime, runs the backpressure gate, logs iters under
+/// `worker.log_dir`. All git + gate calls target `worker.worktree_dir`
+/// so a future parallel dispatcher can run multiple workers against
+/// disjoint worktrees without contention.
+///
+/// `--jobs=1` constructs a single worker with `worktree_dir =
+/// project_root` and `log_dir = .hew/loop/<run-id>/`, preserving the
+/// pre-split behavior byte-for-byte.
+#[allow(clippy::too_many_arguments)]
+pub fn run_worker_loop(
+    ctx: &Ctx,
+    args: &Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    gate: &dyn GateRunner,
+    worker: &Worker,
+    skill: &skills::Skill,
+    primer_text: &str,
+    run_id: &str,
+    allowed: &[String],
+    stop_path: &Path,
+) -> miette::Result<WorkerOutcome> {
     let primary_kind: RuntimeKind =
         args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
     // CooldownState only matters when a fallback spawner is wired —
@@ -433,11 +551,8 @@ pub fn run_loop_with(
         unattended: args.unattended,
     };
 
-    let run_id = new_run_id();
-    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
-    let stop_path = args.stop_file.unwrap_or_else(|| stop_file_path(&dir));
-    let collector = Collector::new(stop_path);
-    let mut run_state = Run::new(run_id.clone(), iso_now_utc(), cfg.clone());
+    let collector = Collector::new(stop_path.to_path_buf());
+    let mut run_state = Run::new(run_id.to_string(), iso_now_utc(), cfg.clone());
 
     // Install (or refresh) the SIGINT handler so Ctrl+C flips the
     // shared CancelFlag instead of killing the loop process mid-iter.
@@ -449,27 +564,8 @@ pub fn run_loop_with(
         let _ = ctrlc::set_handler(move || flag.cancel());
     }
 
-    if !ctx.quiet {
-        eprintln!("hew loop {} — run-dir={}", &run_id, dir.display());
-        if args.dry_run {
-            eprintln!("(--dry-run: no subprocess, no git ops)");
-        }
-    }
-
-    let allowed = allowed_tools::for_skill(&args.skill);
     let mut last_outcome: Option<IterOutcome> = None;
     let mut iter_logs: Vec<IterLog> = Vec::new();
-
-    // Freeze the bd prime payload once at run start: this is the
-    // cacheable per-run primer the agent sees on every iter. New
-    // memories filed mid-run (STATUS:loop-iter-failed, DECISIONs from
-    // unattended resolution, etc.) deliberately don't appear in the
-    // prompt until the next `hew loop run` invocation — the trade-off
-    // is agent-stale-by-up-to-one-run for a byte-stable prompt prefix
-    // that the Anthropic prompt cache can hit across iters. Agents can
-    // always shell `hew memories --prefix=…` inside a spawn if they
-    // need fresh state.
-    let primer_text = bd.prime_raw().unwrap_or_default();
 
     loop {
         let ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
@@ -519,7 +615,7 @@ pub fn run_loop_with(
         let pre_iter_sha: Option<String> = if args.dry_run {
             None
         } else {
-            match git_head_sha(project_root) {
+            match git_head_sha(&worker.worktree_dir) {
                 Ok(sha) => Some(sha),
                 Err(e) => {
                     if !ctx.quiet {
@@ -538,7 +634,7 @@ pub fn run_loop_with(
             "Current task: {} ({}, P{}, status={}).\n\nDrive `{}` to close per the {} skill body.",
             task.id, task.title, task.priority, task.status, task.id, args.skill,
         );
-        let assembled = prompt::assemble(skill.body, &primer_text, &task_brief);
+        let assembled = prompt::assemble(skill.body, primer_text, &task_brief);
 
         if !ctx.quiet {
             eprintln!(
@@ -566,7 +662,7 @@ pub fn run_loop_with(
         {
             // SpawnOpts::default() until Epic D wires per-task model
             // resolution; opts is the future channel for that override.
-            match s.spawn(&assembled, &allowed, &SpawnOpts::default()) {
+            match s.spawn(&assembled, allowed, &SpawnOpts::default()) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
                         IterOutcome::Closed
@@ -619,7 +715,7 @@ pub fn run_loop_with(
         // a run we're about to abort.
         let cancelled_mid_iter = collector.cancel.is_cancelled();
         if !args.dry_run && !matches!(outcome, IterOutcome::RuntimeError) && !cancelled_mid_iter {
-            let check = gate.run_gate(project_root);
+            let check = gate.run_gate(&worker.worktree_dir);
             let verdict = backpressure::evaluate(&check, args.strict);
             match verdict {
                 Verdict::Pass => {}
@@ -633,7 +729,7 @@ pub fn run_loop_with(
                         eprintln!("iter {iter_number} gate FAIL: {}", reasons.join("; "));
                     }
                     if let Some(sha) = pre_iter_sha.as_deref() {
-                        if let Err(e) = git_reset_hard(project_root, sha) {
+                        if let Err(e) = git_reset_hard(&worker.worktree_dir, sha) {
                             eprintln!("iter {iter_number} rollback to {sha} failed: {e}");
                         } else if !ctx.quiet {
                             eprintln!("iter {iter_number} rolled back to {sha}");
@@ -686,7 +782,7 @@ pub fn run_loop_with(
                     continue;
                 };
                 let mut dctx =
-                    hew_core::decide::BdDecisionContext::new(bd, project_root.to_path_buf());
+                    hew_core::decide::BdDecisionContext::new(bd, worker.worktree_dir.clone());
                 let resolution = hew_core::decide::resolve(&topic, &mut dctx);
                 match resolution {
                     hew_core::decide::Resolution::Memory(hit) => {
@@ -746,13 +842,14 @@ pub fn run_loop_with(
         // actually produced commits. Best-effort: any error in the
         // blast path collapses to an empty list — we never let an
         // observability signal block iter logging.
-        let symbols_touched = compute_iter_symbols(project_root, pre_iter_sha.as_deref(), &outcome);
+        let symbols_touched =
+            compute_iter_symbols(&worker.worktree_dir, pre_iter_sha.as_deref(), &outcome);
         let mut log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
         if active_spawner.is_some() {
             log.runtime_used = Some(active_kind.as_str().to_string());
         }
         log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
-        write_json_atomic(&iter_log_path(&dir, iter_number), &log)
+        write_json_atomic(&iter_log_path(&worker.log_dir, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
 
@@ -772,17 +869,17 @@ pub fn run_loop_with(
         run_state.iters.push(iter);
 
         // Rewrite run.json after each iter.
-        write_json_atomic(&run_log_path(&dir), &RunLog::from_run(&run_state))
+        write_json_atomic(&run_log_path(&worker.log_dir), &RunLog::from_run(&run_state))
             .map_err(|e| miette::miette!("write run log: {e}"))?;
     }
 
-    // Final summary.
+    // Final summary persisted to disk; the dispatcher renders the
+    // pretty end-of-run report from the returned WorkerOutcome.
     let summary = RunLog::from_run(&run_state);
-    write_json_atomic(&run_log_path(&dir), &summary)
+    write_json_atomic(&run_log_path(&worker.log_dir), &summary)
         .map_err(|e| miette::miette!("write final run log: {e}"))?;
 
-    print_summary(ctx, &run_state, &iter_logs, &dir);
-    Ok(())
+    Ok(WorkerOutcome { run: run_state, iter_logs })
 }
 
 fn print_summary(ctx: &Ctx, run: &Run, iter_logs: &[IterLog], dir: &std::path::Path) {
