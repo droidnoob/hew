@@ -52,6 +52,39 @@ pub fn detect_runtimes(project_root: &Path) -> Vec<Runtime> {
         .collect()
 }
 
+/// Stricter detection than [`detect_runtimes`]: does the install artifact
+/// hew specifically would write actually exist? Used by `hew init` to decide
+/// between Fresh, Refresh, Reconfigure, and Cancel flows on a re-run. A user
+/// who has `.claude/` from some other tool but no hew install must still get
+/// the Fresh flow (full prompt chain).
+///
+/// Per runtime:
+///
+/// - Claude   → `.claude/skills/hew/SKILL.md` exists
+/// - Codex    → `.agents/skills/hew-execute/SKILL.md` exists
+/// - Cursor   → `.cursorrules` contains the `HEW:BEGIN` marker
+/// - Windsurf → `.windsurfrules` contains the `HEW:BEGIN` marker
+/// - Generic  → `CLAUDE.md` at root exists (weak signal — generic adapter
+///   writes the bundle unmarked, so the file's mere presence is all we can
+///   key on)
+pub fn detect_existing(runtime: Runtime, root: &Path) -> bool {
+    match runtime {
+        Runtime::Claude => {
+            root.join(".claude").join("skills").join("hew").join("SKILL.md").exists()
+        }
+        Runtime::Codex => {
+            root.join(".agents").join("skills").join("hew-execute").join("SKILL.md").exists()
+        }
+        Runtime::Cursor => file_contains(&root.join(".cursorrules"), "HEW:BEGIN"),
+        Runtime::Windsurf => file_contains(&root.join(".windsurfrules"), "HEW:BEGIN"),
+        Runtime::Generic => root.join("CLAUDE.md").exists(),
+    }
+}
+
+fn file_contains(path: &Path, needle: &str) -> bool {
+    fs::read_to_string(path).map(|s| s.contains(needle)).unwrap_or(false)
+}
+
 /// How the running `hew` binary was installed. Used by `hew update` to
 /// route to the appropriate platform upgrade tool instead of the
 /// receipt-based in-process updater (which is never wired up because
@@ -1154,6 +1187,54 @@ mod tests {
         assert!(found.contains(&Runtime::Claude));
         assert!(found.contains(&Runtime::Cursor));
         assert!(!found.contains(&Runtime::Codex));
+    }
+
+    #[test]
+    fn detect_existing_claude_keys_on_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty .claude/ does NOT count — must be a hew install.
+        fs::create_dir(tmp.path().join(".claude")).unwrap();
+        assert!(!detect_existing(Runtime::Claude, tmp.path()));
+        // After install() the marker file exists.
+        install(Runtime::Claude, tmp.path()).unwrap();
+        assert!(detect_existing(Runtime::Claude, tmp.path()));
+    }
+
+    #[test]
+    fn detect_existing_codex_keys_on_hew_execute_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty .codex/ alone is not enough — codex install also writes .agents/.
+        fs::create_dir(tmp.path().join(".codex")).unwrap();
+        assert!(!detect_existing(Runtime::Codex, tmp.path()));
+        install(Runtime::Codex, tmp.path()).unwrap();
+        assert!(detect_existing(Runtime::Codex, tmp.path()));
+    }
+
+    #[test]
+    fn detect_existing_cursor_requires_hew_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Foreign .cursorrules without the marker must NOT count.
+        fs::write(tmp.path().join(".cursorrules"), "user rules\n").unwrap();
+        assert!(!detect_existing(Runtime::Cursor, tmp.path()));
+        install(Runtime::Cursor, tmp.path()).unwrap();
+        assert!(detect_existing(Runtime::Cursor, tmp.path()));
+    }
+
+    #[test]
+    fn detect_existing_windsurf_requires_hew_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join(".windsurfrules"), "user rules\n").unwrap();
+        assert!(!detect_existing(Runtime::Windsurf, tmp.path()));
+        install(Runtime::Windsurf, tmp.path()).unwrap();
+        assert!(detect_existing(Runtime::Windsurf, tmp.path()));
+    }
+
+    #[test]
+    fn detect_existing_generic_keys_on_claude_md_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!detect_existing(Runtime::Generic, tmp.path()));
+        install(Runtime::Generic, tmp.path()).unwrap();
+        assert!(detect_existing(Runtime::Generic, tmp.path()));
     }
 
     #[test]

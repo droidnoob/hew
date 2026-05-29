@@ -744,6 +744,90 @@ fn init_multi_runtime_repeated_flag_form_equivalent_to_csv() {
 }
 
 #[test]
+fn init_rerun_non_interactive_refreshes_only_keeps_config() {
+    // hew-0wa: re-running `hew init` in an already-inited dir non-interactively
+    // must refresh skill files but leave the persisted config untouched.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    // First run: persists git_track=true + require_tests=true.
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--git-track",
+            "--require-tests",
+        ])
+        .assert()
+        .success();
+    let cfg_first = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_first.contains("git_track = true"));
+    assert!(cfg_first.contains("require = true"));
+
+    // Second run: no flags, install detected → Refresh path. Config must not
+    // be rewritten; the "Refreshed" banner must show.
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Refreshed"));
+    let cfg_second = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert_eq!(cfg_first, cfg_second, "Refresh mode must not rewrite config");
+}
+
+#[test]
+fn init_rerun_reconfigure_forces_config_overwrite() {
+    // --reconfigure flips the re-run from Refresh to Reconfigure, taking the
+    // full prompt chain (here: flag values) and overwriting config.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--require-tests"])
+        .assert()
+        .success();
+    let cfg_first = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_first.contains("require = true"));
+
+    // Re-run with --reconfigure and --no-require-tests: config must flip.
+    hew_with_stub(project.path(), stub_dir.path())
+        .args([
+            "init",
+            "--non-interactive",
+            "--runtime",
+            "claude",
+            "--reconfigure",
+            "--no-require-tests",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Reconfigured"));
+    let cfg_second = fs::read_to_string(project.path().join("hew-test-config.toml")).unwrap();
+    assert!(cfg_second.contains("require = false"), "Reconfigure must overwrite: {cfg_second}");
+}
+
+#[test]
+fn init_fresh_dir_still_runs_full_setup() {
+    // No prior install → Fresh path → "Setup complete" banner, full config write.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    // No .claude/, no .cursorrules, nothing — fully fresh.
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("Setup complete"));
+}
+
+#[test]
 fn init_no_flag_with_multiple_detected_refreshes_all() {
     // hew-a41: previously errored on multi-detected non-interactive; now refreshes all.
     let stub_dir = tempfile::tempdir().unwrap();
