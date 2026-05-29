@@ -31,6 +31,7 @@ use hew_core::prompt;
 use hew_core::runner::{CooldownState, Iter, IterOutcome, Run, RunConfig};
 use hew_core::runtime::{
     ClaudeSpawner, CodexSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner, SpawnFailureClass,
+    SpawnOpts,
 };
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
@@ -563,7 +564,9 @@ pub fn run_loop_with(
 
         let (mut outcome, tokens, mut stderr_tail, failure_class) = if let Some(s) = active_spawner
         {
-            match s.spawn(&assembled, &allowed) {
+            // SpawnOpts::default() until Epic D wires per-task model
+            // resolution; opts is the future channel for that override.
+            match s.spawn(&assembled, &allowed, &SpawnOpts::default()) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
                         IterOutcome::Closed

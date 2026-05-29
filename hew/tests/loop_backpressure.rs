@@ -19,7 +19,7 @@ use hew_core::error::Result as HewResult;
 use hew_core::loop_log::{IterLog, iter_log_path, run_dir};
 use hew_core::prompt::AssembledPrompt;
 use hew_core::runner::TokenSpend;
-use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOutcome};
+use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOpts, SpawnOutcome};
 
 use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
 use hew_core::runtime::FallbackConfig;
@@ -37,6 +37,7 @@ impl RuntimeSpawner for CommitMakingSpawner {
         &self,
         _prompt: &AssembledPrompt,
         _allowed_tools: &[String],
+        _opts: &SpawnOpts,
     ) -> hew_core::error::Result<SpawnOutcome> {
         std::fs::write(self.repo_dir.join("iter-marker.txt"), b"iter\n")
             .expect("write iter marker");
@@ -205,6 +206,7 @@ impl RuntimeSpawner for DeferredWritingSpawner {
         &self,
         _prompt: &AssembledPrompt,
         _allowed_tools: &[String],
+        _opts: &SpawnOpts,
     ) -> hew_core::error::Result<SpawnOutcome> {
         self.bd
             .remember(&format!("DEFERRED:{} — agent is unsure", self.topic))
@@ -466,6 +468,7 @@ impl RuntimeSpawner for SilentlyClosingSpawner {
         &self,
         _prompt: &AssembledPrompt,
         _allowed_tools: &[String],
+        _opts: &SpawnOpts,
     ) -> hew_core::error::Result<SpawnOutcome> {
         self.bd.remove_ready(&self.task_id);
         Ok(SpawnOutcome {
@@ -492,6 +495,7 @@ impl RuntimeSpawner for DrainingSpawner {
         &self,
         _prompt: &AssembledPrompt,
         _allowed_tools: &[String],
+        _opts: &SpawnOpts,
     ) -> hew_core::error::Result<SpawnOutcome> {
         let head = self.bd.ready.lock().unwrap().first().map(|t| t.id.clone());
         if let Some(id) = head {
@@ -707,6 +711,7 @@ impl RuntimeSpawner for ScriptedSpawner {
         &self,
         _prompt: &AssembledPrompt,
         _allowed_tools: &[String],
+        _opts: &SpawnOpts,
     ) -> hew_core::error::Result<SpawnOutcome> {
         *self.calls.borrow_mut() += 1;
         let mut q = self.outcomes.borrow_mut();

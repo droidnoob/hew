@@ -181,10 +181,38 @@ pub struct SpawnOutcome {
     pub failure_class: SpawnFailureClass,
 }
 
+/// Per-iter overrides threaded through [`RuntimeSpawner::spawn`]. Both
+/// fields are `Option` so an unset value defers to whatever the spawner
+/// was constructed with — `SpawnOpts::default()` is a no-op.
+///
+/// `model_override` injects `--model X` (Claude) or `-m X` (Codex) at
+/// spawn time. Migrating model selection here unblocks per-iter / per-
+/// task model resolution (Epic D) without sharing mutable state on the
+/// spawner struct.
+///
+/// `working_dir` becomes `-C <dir>` for Codex; Claude has no equivalent
+/// flag today, so the field is reserved for future use (and for the
+/// worktree-parallel epic, where the runner can pre-cd the subprocess).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpawnOpts {
+    pub model_override: Option<String>,
+    pub working_dir: Option<PathBuf>,
+}
+
 /// Inject-at-runtime abstraction. Production wires [`ClaudeSpawner`];
 /// tests use [`MockSpawner`].
+///
+/// The `opts` parameter (added in hew-uqg) carries per-iter overrides
+/// — model selection and working directory — without polluting the
+/// spawner struct's static configuration. Callers that don't need
+/// per-iter control pass `&SpawnOpts::default()`.
 pub trait RuntimeSpawner {
-    fn spawn(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Result<SpawnOutcome>;
+    fn spawn(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Result<SpawnOutcome>;
 }
 
 /// Production spawner. Shells `claude -p <prompt> --allowedTools <list>
@@ -211,7 +239,18 @@ impl ClaudeSpawner {
     /// Build the argv (excluding bin) that would be passed to the
     /// subprocess. Exposed so tests can verify command construction
     /// without spawning a real process.
-    pub fn build_args(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Vec<String> {
+    ///
+    /// `opts.model_override` injects `--model <X>` ahead of `extra_args`
+    /// so a per-iter override wins even if `extra_args` carries a stale
+    /// `--model` (Claude's CLI honors the last occurrence — keeping
+    /// opts ahead of extras documents the intent and lets a future
+    /// refactor strip `--model` out of `extra_args` cleanly).
+    pub fn build_args(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             prompt.full_text.clone(),
@@ -221,6 +260,10 @@ impl ClaudeSpawner {
         if !allowed_tools.is_empty() {
             args.push("--allowedTools".to_string());
             args.push(allowed_tools.join(","));
+        }
+        if let Some(model) = opts.model_override.as_deref() {
+            args.push("--model".to_string());
+            args.push(model.to_string());
         }
         args.extend(self.extra_args.iter().cloned());
         args
@@ -234,8 +277,13 @@ impl Default for ClaudeSpawner {
 }
 
 impl RuntimeSpawner for ClaudeSpawner {
-    fn spawn(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Result<SpawnOutcome> {
-        let args = self.build_args(prompt, allowed_tools);
+    fn spawn(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Result<SpawnOutcome> {
+        let args = self.build_args(prompt, allowed_tools, opts);
         let output = std::process::Command::new(&self.bin).args(&args).output()?;
         let stderr_tail = tail_text(&String::from_utf8_lossy(&output.stderr), 16);
         let exit_ok = output.status.success();
@@ -386,7 +434,12 @@ impl CodexSpawner {
     ///
     /// `--` separates flags from the positional prompt so a prompt
     /// starting with `-` cannot be mis-parsed as a flag.
-    pub fn build_args(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Vec<String> {
+    pub fn build_args(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Vec<String> {
         let mut args = vec![
             "exec".to_string(),
             "--json".to_string(),
@@ -394,13 +447,19 @@ impl CodexSpawner {
             "--sandbox".to_string(),
             self.effective_sandbox(allowed_tools).as_str().to_string(),
         ];
-        if let Some(model) = &self.model_override {
+        // opts wins over the spawner's construction-time defaults so a
+        // per-iter resolver (Epic D) can override without rebuilding
+        // the spawner. `as_ref` preserves the borrow shape so an unset
+        // opts.model_override falls through to self.model_override.
+        let model = opts.model_override.as_ref().or(self.model_override.as_ref());
+        if let Some(m) = model {
             args.push("-m".to_string());
-            args.push(model.clone());
+            args.push(m.clone());
         }
-        if let Some(wd) = &self.working_dir {
+        let wd = opts.working_dir.as_ref().or(self.working_dir.as_ref());
+        if let Some(p) = wd {
             args.push("-C".to_string());
-            args.push(wd.display().to_string());
+            args.push(p.display().to_string());
         }
         args.extend(self.extra_args.iter().cloned());
         args.push("--".to_string());
@@ -416,8 +475,13 @@ impl Default for CodexSpawner {
 }
 
 impl RuntimeSpawner for CodexSpawner {
-    fn spawn(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Result<SpawnOutcome> {
-        let args = self.build_args(prompt, allowed_tools);
+    fn spawn(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Result<SpawnOutcome> {
+        let args = self.build_args(prompt, allowed_tools, opts);
         let output = std::process::Command::new(&self.bin).args(&args).output()?;
         let stderr_tail = tail_text(&String::from_utf8_lossy(&output.stderr), 16);
         let exit_ok = output.status.success();
@@ -647,17 +711,28 @@ fn tail_text(text: &str, lines: usize) -> String {
 pub struct MockSpawner {
     pub outcome: SpawnOutcome,
     pub last_args: std::cell::RefCell<Option<(AssembledPrompt, Vec<String>)>>,
+    pub last_opts: std::cell::RefCell<Option<SpawnOpts>>,
 }
 
 impl MockSpawner {
     pub fn new(outcome: SpawnOutcome) -> Self {
-        Self { outcome, last_args: std::cell::RefCell::new(None) }
+        Self {
+            outcome,
+            last_args: std::cell::RefCell::new(None),
+            last_opts: std::cell::RefCell::new(None),
+        }
     }
 }
 
 impl RuntimeSpawner for MockSpawner {
-    fn spawn(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Result<SpawnOutcome> {
+    fn spawn(
+        &self,
+        prompt: &AssembledPrompt,
+        allowed_tools: &[String],
+        opts: &SpawnOpts,
+    ) -> Result<SpawnOutcome> {
         *self.last_args.borrow_mut() = Some((prompt.clone(), allowed_tools.to_vec()));
+        *self.last_opts.borrow_mut() = Some(opts.clone());
         Ok(self.outcome.clone())
     }
 }
@@ -713,7 +788,7 @@ mod tests {
         let s = ClaudeSpawner { bin: "claude".into(), extra_args: vec![] };
         let p = assemble("S", "P", "T");
         let tools = vec!["Read".into(), "Bash(cargo:*)".into()];
-        let args = s.build_args(&p, &tools);
+        let args = s.build_args(&p, &tools, &SpawnOpts::default());
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], p.full_text);
         assert!(args.iter().any(|a| a == "--output-format"));
@@ -726,7 +801,7 @@ mod tests {
     fn build_args_omits_allowedtools_when_empty() {
         let s = ClaudeSpawner { bin: "claude".into(), extra_args: vec![] };
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         assert!(!args.iter().any(|a| a == "--allowedTools"));
     }
 
@@ -737,10 +812,28 @@ mod tests {
             extra_args: vec!["--model".into(), "opus".into()],
         };
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         assert_eq!(args.last().map(String::as_str), Some("opus"));
         let model_idx = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[model_idx + 1], "opus");
+    }
+
+    #[test]
+    fn claude_spawner_threads_model_override_through_args() {
+        let s = ClaudeSpawner { bin: "claude".into(), extra_args: vec![] };
+        let p = assemble("", "", "");
+        let opts = SpawnOpts { model_override: Some("opus-4.7".into()), ..SpawnOpts::default() };
+        let args = s.build_args(&p, &[], &opts);
+        let idx = args.iter().position(|a| a == "--model").expect("--model present");
+        assert_eq!(args.get(idx + 1).map(String::as_str), Some("opus-4.7"));
+    }
+
+    #[test]
+    fn claude_build_args_omits_model_when_opts_default() {
+        let s = ClaudeSpawner { bin: "claude".into(), extra_args: vec![] };
+        let p = assemble("", "", "");
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
+        assert!(!args.iter().any(|a| a == "--model"), "args={args:?}");
     }
 
     #[test]
@@ -883,12 +976,15 @@ mod tests {
         let m = MockSpawner::new(outcome.clone());
         let p = assemble("S", "P", "T");
         let tools = vec!["Read".to_string()];
-        let result = m.spawn(&p, &tools).unwrap();
+        let opts = SpawnOpts { model_override: Some("opus".into()), ..SpawnOpts::default() };
+        let result = m.spawn(&p, &tools, &opts).unwrap();
         assert_eq!(result, outcome);
         let last = m.last_args.borrow();
         let (recorded_prompt, recorded_tools) = last.as_ref().unwrap();
         assert_eq!(recorded_prompt.full_text, p.full_text);
         assert_eq!(recorded_tools, &tools);
+        let recorded_opts = m.last_opts.borrow();
+        assert_eq!(recorded_opts.as_ref().unwrap(), &opts);
     }
 
     #[test]
@@ -925,7 +1021,7 @@ mod tests {
             "",
             "Reply with exactly this single line and nothing else: closed hew-e2e — done",
         );
-        let out = s.spawn(&p, &[]).expect("spawn ok");
+        let out = s.spawn(&p, &[], &SpawnOpts::default()).expect("spawn ok");
         assert!(out.success, "expected success, stderr={}", out.stderr_tail);
         assert!(out.tokens.total() > 0, "expected nonzero tokens, raw={}", out.raw_text);
         assert_eq!(
@@ -1054,7 +1150,7 @@ mod tests {
         let s = CodexSpawner::from_env().with_model("gpt-5.4");
         let p = assemble("S", "P", "T");
         let tools = vec!["Edit".to_string()];
-        let args = s.build_args(&p, &tools);
+        let args = s.build_args(&p, &tools, &SpawnOpts::default());
         assert_eq!(args[0], "exec");
         assert!(args.iter().any(|a| a == "--json"));
         assert!(args.iter().any(|a| a == "--skip-git-repo-check"));
@@ -1069,7 +1165,7 @@ mod tests {
     fn codex_build_args_omits_model_when_none() {
         let s = CodexSpawner::from_env();
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         assert!(!args.iter().any(|a| a == "-m"), "args={args:?}");
     }
 
@@ -1077,7 +1173,7 @@ mod tests {
     fn codex_build_args_omits_cd_when_no_working_dir() {
         let s = CodexSpawner::from_env();
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         assert!(!args.iter().any(|a| a == "-C"), "args={args:?}");
     }
 
@@ -1085,7 +1181,7 @@ mod tests {
     fn codex_build_args_emits_cd_when_working_dir_set() {
         let s = CodexSpawner::from_env().with_working_dir("/tmp/wt");
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         assert_eq!(arg_pair(&args, "-C"), Some("/tmp/wt"));
     }
 
@@ -1093,10 +1189,12 @@ mod tests {
     fn codex_build_args_sandbox_defaults_to_tool_mapping() {
         let s = CodexSpawner::from_env();
         // No write tools → read-only.
-        let args = s.build_args(&assemble("", "", ""), &["Read".to_string()]);
+        let args =
+            s.build_args(&assemble("", "", ""), &["Read".to_string()], &SpawnOpts::default());
         assert_eq!(arg_pair(&args, "--sandbox"), Some("read-only"));
         // Write tool present → workspace-write via mapper.
-        let args = s.build_args(&assemble("", "", ""), &["Write".to_string()]);
+        let args =
+            s.build_args(&assemble("", "", ""), &["Write".to_string()], &SpawnOpts::default());
         assert_eq!(arg_pair(&args, "--sandbox"), Some("workspace-write"));
     }
 
@@ -1105,7 +1203,7 @@ mod tests {
         // No write tools — mapper would say read-only — but an
         // explicit DangerFullAccess wins.
         let s = CodexSpawner::from_env().with_sandbox(SandboxPolicy::DangerFullAccess);
-        let args = s.build_args(&assemble("", "", ""), &[]);
+        let args = s.build_args(&assemble("", "", ""), &[], &SpawnOpts::default());
         assert_eq!(arg_pair(&args, "--sandbox"), Some("danger-full-access"));
     }
 
@@ -1114,7 +1212,7 @@ mod tests {
         let mut s = CodexSpawner::from_env();
         s.extra_args = vec!["-c".into(), "model_reasoning_effort=high".into()];
         let p = assemble("", "", "");
-        let args = s.build_args(&p, &[]);
+        let args = s.build_args(&p, &[], &SpawnOpts::default());
         let extra_idx = args.iter().position(|a| a == "-c").unwrap();
         let dash = args.iter().position(|a| a == "--").unwrap();
         assert!(extra_idx < dash, "extra_args must precede `--`: args={args:?}");
@@ -1135,6 +1233,41 @@ mod tests {
                 None => std::env::remove_var(CODEX_BIN_ENV),
             }
         }
+    }
+
+    #[test]
+    fn codex_spawner_threads_model_override_through_args() {
+        let s = CodexSpawner::from_env();
+        let p = assemble("", "", "");
+        let opts = SpawnOpts { model_override: Some("gpt-5.4".into()), ..SpawnOpts::default() };
+        let args = s.build_args(&p, &[], &opts);
+        assert_eq!(arg_pair(&args, "-m"), Some("gpt-5.4"));
+    }
+
+    #[test]
+    fn codex_spawner_opts_model_override_wins_over_struct_default() {
+        let s = CodexSpawner::from_env().with_model("from-struct");
+        let p = assemble("", "", "");
+        let opts = SpawnOpts { model_override: Some("from-opts".into()), ..SpawnOpts::default() };
+        let args = s.build_args(&p, &[], &opts);
+        assert_eq!(arg_pair(&args, "-m"), Some("from-opts"));
+    }
+
+    #[test]
+    fn codex_spawner_opts_working_dir_wins_over_struct_default() {
+        let s = CodexSpawner::from_env().with_working_dir("/from/struct");
+        let p = assemble("", "", "");
+        let opts =
+            SpawnOpts { working_dir: Some(PathBuf::from("/from/opts")), ..SpawnOpts::default() };
+        let args = s.build_args(&p, &[], &opts);
+        assert_eq!(arg_pair(&args, "-C"), Some("/from/opts"));
+    }
+
+    #[test]
+    fn spawn_opts_default_is_no_op() {
+        let opts = SpawnOpts::default();
+        assert!(opts.model_override.is_none());
+        assert!(opts.working_dir.is_none());
     }
 
     #[test]
