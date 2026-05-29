@@ -27,9 +27,12 @@ pub struct Args {
     #[arg(long, conflicts_with = "git_track")]
     pub stealth: bool,
 
-    /// Agent runtime to install for. Defaults to auto-detect.
-    #[arg(long, value_enum)]
-    pub runtime: Option<RuntimeArg>,
+    /// Agent runtime(s) to install for. Defaults to auto-detect. Accepts
+    /// comma-separated values (`--runtime=claude,codex`) or repeated flags
+    /// (`--runtime=claude --runtime=codex`); both forms append. Empty when
+    /// the flag is omitted, which preserves the detect-or-prompt fallback.
+    #[arg(long, value_enum, value_delimiter = ',', action = clap::ArgAction::Append)]
+    pub runtime: Vec<RuntimeArg>,
 
     /// Installation scope.
     #[arg(long, value_enum, default_value_t = Scope::Local)]
@@ -491,7 +494,10 @@ fn resolve_runtime(
     args: &Args,
     project_root: &std::path::Path,
 ) -> miette::Result<Runtime> {
-    if let Some(r) = args.runtime {
+    // Transitional: this task (hew-0tz) only widens the Args type. The
+    // multi-runtime install loop lands in hew-3mo/hew-zue; for now we keep
+    // single-runtime semantics by picking the first explicit value.
+    if let Some(r) = args.runtime.first().copied() {
         return Ok(r.into());
     }
     let detected = install::detect_runtimes(project_root);
@@ -778,4 +784,62 @@ fn run_bd_init(
     }
     bd.run_raw(&args)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Args-parsing tests for `--runtime` multi-value semantics (hew-0tz).
+    //!
+    //! Parse `hew init` argv via a minimal clap shim that wraps the real
+    //! `Args` struct; this exercises the same `#[arg(...)]` attributes the
+    //! production binary uses, without depending on the full `Cli` tree.
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Debug, Parser)]
+    struct InitOnly {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
+        let mut full = vec!["hew-init-test"];
+        full.extend_from_slice(argv);
+        InitOnly::try_parse_from(full).map(|p| p.args)
+    }
+
+    #[test]
+    fn runtime_csv_form_parses_to_vec() {
+        let args = parse(&["--runtime=claude,codex"]).expect("parse");
+        assert!(matches!(args.runtime.as_slice(), [RuntimeArg::Claude, RuntimeArg::Codex]));
+    }
+
+    #[test]
+    fn runtime_repeated_flag_form_parses_to_vec() {
+        let args = parse(&["--runtime=claude", "--runtime=codex"]).expect("parse");
+        assert!(matches!(args.runtime.as_slice(), [RuntimeArg::Claude, RuntimeArg::Codex]));
+    }
+
+    #[test]
+    fn runtime_mixed_csv_and_repeated_appends_in_order() {
+        let args = parse(&["--runtime=claude,codex", "--runtime=windsurf"]).expect("parse");
+        assert!(matches!(
+            args.runtime.as_slice(),
+            [RuntimeArg::Claude, RuntimeArg::Codex, RuntimeArg::Windsurf]
+        ));
+    }
+
+    #[test]
+    fn runtime_absent_yields_empty_vec() {
+        let args = parse(&[]).expect("parse");
+        assert!(args.runtime.is_empty());
+    }
+
+    #[test]
+    fn runtime_invalid_value_rejected_by_clap() {
+        let err = parse(&["--runtime=bogus"]).expect_err("should fail");
+        // clap renders a "possible values" list — assert one of them surfaces.
+        let msg = err.to_string();
+        assert!(msg.contains("claude"), "expected possible-values list, got: {msg}");
+    }
 }
