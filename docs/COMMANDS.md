@@ -40,11 +40,13 @@ Fast mode: one task, no plan/decompose overhead.
 
 ### `/hew:auto`
 
-Run plan → decompose → execute → verify autonomously. Now a thin
-pointer at `hew loop run --until-empty` — the in-conversation walk is
-still reachable via `/hew:work`.
+In-conversation, epic-scoped driver. Walks the children of one active
+epic in dependency order, tail-calling `/hew:next` per task, in a
+single Claude session. For the subprocess loop that drains the global
+ready queue with cache-warm prefixes and on-disk per-iter logs, use
+`/hew:loop`.
 
-- Use when: you trust the agent to drive end-to-end without pause
+- Use when: you want one session focused on one epic with mid-loop steering
 
 ### `/hew:loop`
 

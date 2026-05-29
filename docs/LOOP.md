@@ -256,8 +256,8 @@ Outstanding bugs discovered by the run:
 ## Related
 
 - `commands/loop.md` — the `/hew:loop` slash body.
-- `commands/auto.md` — the `/hew:auto` slash, now a thin pointer at
-  `hew loop run --until-empty`.
+- `commands/auto.md` — the `/hew:auto` slash: in-conversation,
+  epic-scoped walk (one session, one epic, mid-loop steering).
 - `hew_core::runner` — pure precedence logic for stop signals.
 - `hew_core::prompt` — cache-disciplined assembler.
 - `hew_core::runtime` — Claude Code spawner.

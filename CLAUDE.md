@@ -116,7 +116,7 @@ hew loop cancel                       # touch stop-file on latest run
 
 Each iter is a fresh `claude -p` (or `codex exec`) subprocess; the skill body + memory primer prefix is byte-stable across iters so the prompt cache hits (check `prompt_prefix_hash` in `.hew/loop/<run-id>/iter-NNN.json`). `--fallback-runtime` is primary-sticky with a configurable cooldown (`--fallback-cooldown-iters`, default 3) — see [docs/LOOP.md](./docs/LOOP.md#fallback-runtime) for the worked example.
 
-`/hew:auto` now points at `hew loop run --until-empty`. The in-conversation walk is still reachable via `/hew:work`. Full guide: [docs/LOOP.md](./docs/LOOP.md).
+`/hew:loop` drives this subprocess loop. `/hew:auto` is the in-conversation, epic-scoped walk — one session, one epic, mid-loop steering. Full guide: [docs/LOOP.md](./docs/LOOP.md).
 
 ### Statusline
 
