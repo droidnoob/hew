@@ -53,6 +53,18 @@ versioning follows [Semantic Versioning](https://semver.org/).
   least one iter recorded a model; hidden otherwise. See
   `docs/LOOP.md` "Per-task model selection" for syntax + the
   per-model prompt-cache caveat.
+- **`hew init` re-run UX.** Re-running `hew init` in an already-inited
+  directory now detects the prior install via per-runtime artifact
+  markers (`.claude/skills/hew/SKILL.md`, `.agents/skills/hew-execute/SKILL.md`,
+  `HEW:BEGIN` in `.cursorrules`/`.windsurfrules`, `CLAUDE.md` for generic)
+  and routes to one of three modes instead of silently re-prompting and
+  overwriting `~/.config/hew/config.toml`: **Refresh** (default —
+  re-lay skill files only, keep config), **Reconfigure** (full prompt
+  chain + config overwrite, opt in via `--reconfigure`), or **Cancel**
+  (no changes). Interactive runs get a 3-option picker; non-interactive
+  runs without `--reconfigure` default to Refresh. The summary panel
+  header reflects the chosen mode (`Setup complete` / `Refreshed` /
+  `Reconfigured`). Fresh installs are unaffected. (hew-0wa)
 
 ### Changed
 

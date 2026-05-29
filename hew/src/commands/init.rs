@@ -82,6 +82,46 @@ pub struct Args {
     /// Accept all defaults non-interactively.
     #[arg(short, long)]
     pub yes: bool,
+
+    /// Force the full prompt chain + config overwrite on a re-run, even
+    /// when an existing hew install is detected. Without this flag the
+    /// default re-run behaviour is to refresh skill files only.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub reconfigure: bool,
+}
+
+/// What `hew init` should actually do this invocation. Distinct from the
+/// runtime resolver: this captures whether a previous install exists at
+/// `install_root` and how aggressively to re-run the prompt chain.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InitMode {
+    /// No prior install — full prompt chain + install + persist config.
+    Fresh,
+    /// Prior install detected — re-lay skill files only. No prompts,
+    /// no config overwrite, no `bd init` re-prompt.
+    Refresh,
+    /// Prior install detected, user (or `--reconfigure`) wants the full
+    /// prompt chain again. Same as Fresh from the prompt/config side.
+    Reconfigure,
+    /// Prior install detected, user cancelled. No bd init, no install.
+    Cancel,
+}
+
+impl InitMode {
+    /// Should the prompt block + config overwrite run for this mode?
+    fn runs_prompts(self) -> bool {
+        matches!(self, Self::Fresh | Self::Reconfigure)
+    }
+
+    fn summary_header(self) -> &'static str {
+        match self {
+            Self::Fresh => "Setup complete",
+            Self::Refresh => "Refreshed",
+            Self::Reconfigure => "Reconfigured",
+            // Cancel never reaches the summary panel — handled before install.
+            Self::Cancel => "Cancelled",
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -187,6 +227,14 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let runtimes = resolve_runtimes(&args, detected, ctx.interactive, interactive_runtime_pick)?;
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
+    let mode = detect_init_mode(ctx, &args, &runtimes, &install_root, interactive_rerun_pick)?;
+    if mode == InitMode::Cancel {
+        if !ctx.quiet {
+            println!("Cancelled. No changes.");
+        }
+        return Ok(());
+    }
+
     let bd = ensure_bd(ctx)?;
 
     // Git must be initialised BEFORE bd init: in non-stealth mode bd
@@ -207,23 +255,30 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         println!("beads: ✓ task graph initialised in .beads/");
     }
 
-    let project_type = resolve_project_type(ctx, &args, &project_root);
-    let branching = resolve_branching(ctx, &args);
-    let skills = resolve_optional_skills(ctx, &args);
-    let require_tests = resolve_require_tests(ctx, &args);
-    let advanced = resolve_advanced(ctx, &args);
-
-    persist_config(ctx, |cfg| {
-        cfg.git_track = git_track;
-        cfg.branching.strategy = branching.as_str().to_string();
-        cfg.optional_skills.deps = skills.0.into_core();
-        cfg.optional_skills.research = skills.1.into_core();
-        cfg.optional_skills.security = skills.2.into_core();
-        cfg.testing.require = require_tests;
-        cfg.research.default = advanced.research_default.as_str().to_string();
-        cfg.review.after_n_tasks = advanced.review_after_n;
-        cfg.review.after_epic = advanced.review_after_epic;
-    });
+    // Refresh mode: skip the prompt block + config write. Load the existing
+    // config (or default) so the summary panel still has something to show
+    // and skills/branching values reflect what's actually persisted.
+    let (project_type, branching, skills, require_tests, advanced) = if mode.runs_prompts() {
+        let project_type = resolve_project_type(ctx, &args, &project_root);
+        let branching = resolve_branching(ctx, &args);
+        let skills = resolve_optional_skills(ctx, &args);
+        let require_tests = resolve_require_tests(ctx, &args);
+        let advanced = resolve_advanced(ctx, &args);
+        persist_config(ctx, |cfg| {
+            cfg.git_track = git_track;
+            cfg.branching.strategy = branching.as_str().to_string();
+            cfg.optional_skills.deps = skills.0.into_core();
+            cfg.optional_skills.research = skills.1.into_core();
+            cfg.optional_skills.security = skills.2.into_core();
+            cfg.testing.require = require_tests;
+            cfg.research.default = advanced.research_default.as_str().to_string();
+            cfg.review.after_n_tasks = advanced.review_after_n;
+            cfg.review.after_epic = advanced.review_after_epic;
+        });
+        (project_type, branching, skills, require_tests, advanced)
+    } else {
+        load_persisted_summary_inputs(&args, &project_root)
+    };
 
     let mut plans = Vec::with_capacity(runtimes.len());
     for rt in &runtimes {
@@ -245,6 +300,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     if !ctx.quiet {
         print_summary_panel(
+            mode,
             &plans,
             args.scope,
             git_track,
@@ -256,6 +312,104 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refresh-mode summary inputs come from the on-disk config (or defaults
+/// when the file is missing). Project-type is detected from the tree since
+/// we don't persist it.
+fn load_persisted_summary_inputs(
+    args: &Args,
+    project_root: &std::path::Path,
+) -> (ProjectTypeArg, BranchingArg, (SkillModeArg, SkillModeArg, SkillModeArg), bool, AdvancedKnobs)
+{
+    let cfg = config::load().unwrap_or_default();
+    let project_type = args.project_type.unwrap_or_else(|| detect_project_type(project_root));
+    let branching = match cfg.branching.strategy.as_str() {
+        "none" => BranchingArg::None,
+        "always" => BranchingArg::Always,
+        _ => BranchingArg::Epic,
+    };
+    let skills = (
+        skill_mode_to_arg(cfg.optional_skills.deps),
+        skill_mode_to_arg(cfg.optional_skills.research),
+        skill_mode_to_arg(cfg.optional_skills.security),
+    );
+    let advanced = AdvancedKnobs {
+        research_default: match cfg.research.default.as_str() {
+            "auto-skip" => ResearchDefaultArg::AutoSkip,
+            "auto-run" => ResearchDefaultArg::AutoRun,
+            _ => ResearchDefaultArg::Ask,
+        },
+        review_after_n: cfg.review.after_n_tasks,
+        review_after_epic: cfg.review.after_epic,
+    };
+    (project_type, branching, skills, cfg.testing.require, advanced)
+}
+
+fn skill_mode_to_arg(m: hew_core::config::SkillMode) -> SkillModeArg {
+    use hew_core::config::SkillMode;
+    match m {
+        SkillMode::Yes => SkillModeArg::Yes,
+        SkillMode::No => SkillModeArg::No,
+        SkillMode::Ask => SkillModeArg::Ask,
+    }
+}
+
+/// Resolve which [`InitMode`] applies. Pure (apart from the injected picker);
+/// no I/O of its own beyond the marker checks done by `install::detect_existing`.
+///
+/// Decision matrix:
+///
+/// - Nothing detected for any requested runtime → [`InitMode::Fresh`].
+/// - At least one detected + `--reconfigure` → [`InitMode::Reconfigure`].
+/// - At least one detected + non-interactive (no flag) → [`InitMode::Refresh`].
+/// - At least one detected + interactive (no flag) → invoke picker.
+fn detect_init_mode<F>(
+    ctx: &Ctx,
+    args: &Args,
+    runtimes: &[Runtime],
+    install_root: &std::path::Path,
+    picker: F,
+) -> miette::Result<InitMode>
+where
+    F: FnOnce(&[Runtime]) -> miette::Result<InitMode>,
+{
+    let detected: Vec<Runtime> =
+        runtimes.iter().copied().filter(|r| install::detect_existing(*r, install_root)).collect();
+    if detected.is_empty() {
+        return Ok(InitMode::Fresh);
+    }
+    if args.reconfigure {
+        return Ok(InitMode::Reconfigure);
+    }
+    if !ctx.interactive {
+        return Ok(InitMode::Refresh);
+    }
+    picker(&detected)
+}
+
+fn interactive_rerun_pick(detected: &[Runtime]) -> miette::Result<InitMode> {
+    use inquire::Select;
+    let names: Vec<&'static str> = detected.iter().map(|r| r.as_str()).collect();
+    let header =
+        format!("Existing hew install detected ({}). What would you like to do?", names.join(", "));
+    let pick = Select::new(
+        &header,
+        vec![
+            "refresh — re-lay skill files only (keep config)",
+            "reconfigure — full prompt chain + overwrite config",
+            "cancel — no changes",
+        ],
+    )
+    .with_starting_cursor(0)
+    .prompt();
+    match pick {
+        Ok(s) if s.starts_with("refresh") => Ok(InitMode::Refresh),
+        Ok(s) if s.starts_with("reconfigure") => Ok(InitMode::Reconfigure),
+        Ok(s) if s.starts_with("cancel") => Ok(InitMode::Cancel),
+        // ESC / Ctrl-C → safe default: cancel.
+        _ => Ok(InitMode::Cancel),
+    }
 }
 
 /// One-line banner per runtime install: `<Name>: ✓ N files into <artifact>`.
@@ -293,6 +447,7 @@ fn runtime_artifact_label(rt: Runtime) -> &'static str {
 
 #[allow(clippy::too_many_arguments)] // IV.13 refactor will collapse this into a FlowChoices struct.
 fn print_summary_panel(
+    mode: InitMode,
     plans: &[install::InstallPlan],
     scope: Scope,
     git_track: bool,
@@ -307,7 +462,7 @@ fn print_summary_panel(
     let total_files: usize = plans.iter().map(|p| p.written.len()).sum();
     let root_display = plans.first().map(|p| p.root.display().to_string()).unwrap_or_default();
     println!();
-    println!("Setup complete");
+    println!("{}", mode.summary_header());
     println!("{bar}");
     println!("  runtime           {runtimes_str}");
     println!(
