@@ -282,6 +282,59 @@ pub fn write_manifest(run_dir: &Path, manifest: &Manifest) -> Result<()> {
     write_json_atomic(&manifest_path(run_dir), manifest)
 }
 
+/// Run-ids under `loop_root` (`<project>/.hew/loop/`) whose `run.json`
+/// reports no `stop_reason` yet — i.e. the run never reached a clean
+/// shutdown.
+///
+/// Used by `hew loop prune-worktrees` to decide which worktrees under
+/// `~/.hew/wt/<run-id>/` may still be owned by a live process. A run
+/// without `run.json` is treated as active too (just starting up or
+/// crashed before the first iter wrote run.json — we err on the side of
+/// not deleting); a run with `stop_reason` set is considered finished
+/// and its worktrees are eligible for pruning.
+///
+/// Returns an empty set — not an error — when `loop_root` is absent.
+pub fn active_run_ids(loop_root: &Path) -> Result<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    let entries = match fs::read_dir(loop_root) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        if !name.starts_with("loop-") {
+            continue;
+        }
+        let rl_path = path.join("run.json");
+        match fs::read_to_string(&rl_path) {
+            Ok(body) => match serde_json::from_str::<RunLog>(&body) {
+                Ok(rl) if rl.stop_reason.is_none() => {
+                    out.insert(name.to_string());
+                }
+                Ok(_) => {}
+                // Unparseable run.json: treat conservatively as active
+                // so we don't delete worktrees the operator may still
+                // need to triage by hand.
+                Err(_) => {
+                    out.insert(name.to_string());
+                }
+            },
+            // No run.json yet: a run that crashed before the first iter,
+            // or one mid-init. Treat as active — operator decides via
+            // `--force` (future flag) whether to clean up.
+            Err(_) => {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +554,52 @@ mod tests {
             let l = outcome_label(o);
             assert!(!l.is_empty());
         }
+    }
+
+    #[test]
+    fn active_run_ids_includes_running_runs() {
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let running_dir = run_dir(&root, "loop-running").unwrap();
+        // run.json with no stop_reason → run is live.
+        let cfg = RunConfig::default();
+        let run = Run::new("loop-running", "2026-05-30T00:00:00Z", cfg);
+        write_json_atomic(&running_dir.join("run.json"), &RunLog::from_run(&run)).unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(active.contains("loop-running"), "running run must be flagged active");
+    }
+
+    #[test]
+    fn active_run_ids_excludes_completed_runs() {
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let completed_dir = run_dir(&root, "loop-completed").unwrap();
+        let mut run = Run::new("loop-completed", "2026-05-30T00:00:00Z", RunConfig::default());
+        run.stop_reason = Some(StopReason::ReadyEmpty);
+        write_json_atomic(&completed_dir.join("run.json"), &RunLog::from_run(&run)).unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(!active.contains("loop-completed"), "completed run must not be active");
+    }
+
+    #[test]
+    fn active_run_ids_treats_missing_run_json_as_active() {
+        // A run that crashed before the first iter wrote run.json: leave
+        // it in the active set so its worktree isn't auto-pruned.
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let _ = run_dir(&root, "loop-crashed").unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(active.contains("loop-crashed"));
+    }
+
+    #[test]
+    fn active_run_ids_empty_when_loop_root_absent() {
+        let root = tmpdir();
+        let missing = root.join(LOOP_ROOT); // never created
+        assert!(active_run_ids(&missing).unwrap().is_empty());
     }
 
     #[test]

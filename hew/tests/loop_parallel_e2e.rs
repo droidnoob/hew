@@ -385,24 +385,19 @@ fn e2e_parallel_jobs_2_with_mock_spawner() {
         spawner.call_count(),
     );
 
-    // Both worktrees were created on disk under the isolated HOME. We
-    // assert AFTER the run (worktree teardown is hew-kt5q's job, not
-    // dispatcher shutdown's), which still proves they existed during
-    // the run.
-    let runs_under_wt: Vec<PathBuf> = std::fs::read_dir(&wt_root)
-        .expect("wt_root exists")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    assert_eq!(
-        runs_under_wt.len(),
-        1,
-        "expected one run-id dir under wt_root, got {runs_under_wt:?}"
+    // Graceful shutdown (hew-kt5q): both worker branches merged cleanly
+    // onto launch HEAD, so the dispatcher's post-merge teardown removed
+    // each worker's worktree. The run-id dir itself is removed by
+    // `worktree::prune` once empty.
+    let surviving_run_dirs: Vec<PathBuf> = std::fs::read_dir(&wt_root)
+        .map(|it| {
+            it.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        surviving_run_dirs.is_empty(),
+        "expected no surviving worktree dirs after clean merge, got {surviving_run_dirs:?}",
     );
-    let run_dir = &runs_under_wt[0];
-    assert!(run_dir.join("0").is_dir(), "worker 0 worktree should exist");
-    assert!(run_dir.join("1").is_dir(), "worker 1 worktree should exist");
 
     // Manifest pins the per-run shape downstream tooling consumes.
     let m = read_manifest(&repo);
@@ -471,8 +466,11 @@ fn e2e_parallel_merge_conflict_files_bug_task() {
         "expected a bug-task body referencing the conflicting file, got {bodies:?}",
     );
 
-    // Both worktrees survive on disk — operator needs them to resolve
-    // the conflict by hand.
+    // Worker 1's worktree must survive on disk — its branch conflicted
+    // on `data.txt` and the operator needs the worktree to resolve. Per
+    // hew-kt5q's graceful teardown, worker 0's worktree (which merged
+    // cleanly first) is pruned on the way out; the run-id dir remains
+    // only because at least one child (worker-1) is still on disk.
     let runs_under_wt: Vec<PathBuf> = std::fs::read_dir(&wt_root)
         .expect("wt_root exists")
         .filter_map(|e| e.ok())
@@ -481,6 +479,9 @@ fn e2e_parallel_merge_conflict_files_bug_task() {
         .collect();
     assert_eq!(runs_under_wt.len(), 1);
     let run_dir = &runs_under_wt[0];
-    assert!(run_dir.join("0").is_dir(), "worker 0 worktree must remain on disk after conflict");
-    assert!(run_dir.join("1").is_dir(), "worker 1 worktree must remain on disk after conflict");
+    assert!(
+        !run_dir.join("0").exists(),
+        "worker 0 worktree (clean merge) should be pruned by graceful teardown"
+    );
+    assert!(run_dir.join("1").is_dir(), "worker 1 worktree (conflict) must remain on disk");
 }

@@ -208,6 +208,20 @@ pub enum LoopSub {
     /// Re-render the end-of-run summary for a completed (or running)
     /// loop from its persisted logs. Defaults to the most recent run.
     Summary(SummaryArgs),
+    /// Remove orphaned worktrees under `~/.hew/wt/` left behind by
+    /// crashed or interrupted parallel loop runs. A worktree is "orphan"
+    /// when its `<run-id>` has no live run-dir under
+    /// `<project>/.hew/loop/` (or that run-dir's `run.json` already
+    /// records a `stop_reason`). Defaults to listing what would be
+    /// removed; pass `--apply` to actually delete.
+    PruneWorktrees(PruneWorktreesArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct PruneWorktreesArgs {
+    /// Actually remove orphan worktrees. Default is dry-run.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -254,6 +268,7 @@ pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
         LoopSub::Logs(a) => run_logs(ctx, a),
         LoopSub::List(a) => run_list(ctx, a),
         LoopSub::Summary(a) => run_summary(ctx, a),
+        LoopSub::PruneWorktrees(a) => run_prune_worktrees(ctx, a),
     }
 }
 
@@ -734,14 +749,15 @@ fn run_loop_parallel(
         let _ = dispatcher.complete(w.id);
     }
 
-    // Merge each worker branch back onto launch HEAD. Conflicts file
-    // [merge-conflict] bug tasks; the worktrees stay on disk so the
-    // operator can resolve them by hand.
+    // Merge each worker branch back onto launch HEAD. Cleanly-merged
+    // worktrees are pruned on the way out (graceful teardown — hew-kt5q).
+    // Conflicted ones survive on disk because the `[merge-conflict]` bug
+    // task points at them for human resolution.
     if !args.dry_run && !workers.is_empty() {
         let branches: Vec<String> =
             workers.iter().map(|w| w.branch.clone()).filter(|b| !b.is_empty()).collect();
         if !branches.is_empty()
-            && let Some(git) = git_client.as_ref()
+            && let (Some(git), Some(wt_root)) = (git_client.as_ref(), wt_root_opt.as_ref())
         {
             match dispatcher.shutdown_merge_back(git, bd, project_root, "HEAD", &branches) {
                 Ok((report, bug_ids)) => {
@@ -752,6 +768,28 @@ fn run_loop_parallel(
                             report.conflicts.len(),
                             bug_ids.len(),
                         );
+                    }
+                    let merged_set: std::collections::HashSet<&str> =
+                        report.merged.iter().map(String::as_str).collect();
+                    let mut pruned = 0u32;
+                    for h in &worker_handles {
+                        if !merged_set.contains(h.branch.as_str()) {
+                            continue;
+                        }
+                        if let Err(e) = hew_core::worktree::prune(
+                            git,
+                            project_root,
+                            wt_root,
+                            &h.run_id,
+                            h.worker_n,
+                        ) {
+                            eprintln!("worktree prune slot {} failed: {e}", h.worker_n);
+                        } else {
+                            pruned += 1;
+                        }
+                    }
+                    if pruned > 0 && !ctx.quiet {
+                        eprintln!("worktrees: pruned {pruned} cleanly-merged");
                     }
                 }
                 Err(e) => {
@@ -1328,6 +1366,59 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
     };
 
     print_summary(ctx, &run, &iter_logs, &dir);
+    Ok(())
+}
+
+pub fn run_prune_worktrees(ctx: &Ctx, args: PruneWorktreesArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let wt_root = hew_core::worktree::root().map_err(|e| miette::miette!("worktree root: {e}"))?;
+    let loop_root = loop_root(&project_root);
+
+    let active = hew_core::loop_log::active_run_ids(&loop_root)
+        .map_err(|e| miette::miette!("scan loop dir: {e}"))?;
+    let orphans = hew_core::worktree::list_orphans(&wt_root, &active)
+        .map_err(|e| miette::miette!("list orphans: {e}"))?;
+
+    if orphans.is_empty() {
+        if !ctx.quiet {
+            println!("(no orphan worktrees under {})", wt_root.display());
+        }
+        return Ok(());
+    }
+
+    if !args.apply {
+        if !ctx.quiet {
+            println!(
+                "{} orphan worktree{} (dry-run; pass --apply to remove):",
+                orphans.len(),
+                if orphans.len() == 1 { "" } else { "s" },
+            );
+            for h in &orphans {
+                println!("  {} (branch {})", h.path.display(), h.branch);
+            }
+        }
+        return Ok(());
+    }
+
+    let git = hew_core::git::RealGit::discover().map_err(|e| miette::miette!("git: {e}"))?;
+    let mut removed = 0u32;
+    let mut failed = 0u32;
+    for h in &orphans {
+        match hew_core::worktree::prune(&git, &project_root, &wt_root, &h.run_id, h.worker_n) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                failed += 1;
+                eprintln!("prune {} failed: {e}", h.path.display());
+            }
+        }
+    }
+    if !ctx.quiet {
+        if failed == 0 {
+            println!("pruned {removed} orphan worktree{}", if removed == 1 { "" } else { "s" });
+        } else {
+            println!("pruned {removed}; {failed} failed");
+        }
+    }
     Ok(())
 }
 
