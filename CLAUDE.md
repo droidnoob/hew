@@ -148,7 +148,7 @@ The single most useful thing to read before debugging. These are stored as `GOTC
 
 **`GOTCHA:pipe-deadlock`** — large `bd` JSON output deadlocks on the OS pipe buffer (~16KB on macOS, ~64KB on Linux) if you read after `wait_timeout`. Use `BdClient::run_to_file` (the `Stdio::from(File)` path) for any command that could exceed those. Helper: `RealBd::read_via_temp(args, label, ext)`.
 
-**`GOTCHA:zsh-cmd-substitution`** — multi-line `hew task new --description "$(cat <<EOF ... EOF)"` hits zsh parse errors on embedded apostrophes/quotes. Use `bd q` + `bd update --body-file <path>` from a temp file instead.
+**`GOTCHA:zsh-cmd-substitution`** — multi-line `hew task new --description "$(cat <<EOF ... EOF)"` hits zsh parse errors on embedded apostrophes/quotes. For any batch of >3 tasks, write a graph-JSON file and run `bd create --graph plan.json` instead — one transaction, deps wired inline, content passes through verbatim. See the "Batch mode" section in `skills/core/hew-decompose.md` for the schema. For one-off updates use `bd update --body-file <path>` from a temp file.
 
 **`GOTCHA:clippy-derivable-impls`** — clippy fires on hand-written `Default { field: false }`. Use `#[derive(Default)]` when the impl is trivial.
 

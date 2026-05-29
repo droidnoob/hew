@@ -214,6 +214,63 @@ Heuristics for "too small":
 
 Then merge it into the next task.
 
+### Batch mode — `bd create --graph` for >3 tasks
+
+`hew task new` in a loop hits `GOTCHA:zsh-cmd-substitution`: multi-line
+descriptions with apostrophes, backticks, or `$(…)` substitutions blow up
+the shell before they reach bd. For any decomposition above ~3 tasks,
+emit a single graph-JSON file and run `bd create --graph plan.json` —
+one transaction, deps wired inline, content passes through verbatim
+(apostrophes/quotes/backticks/`$(…)` all survive).
+
+This is a **documented bd hold-out**: `hew` doesn't wrap batch creation;
+`bd create --graph` is the path.
+
+```json
+{
+  "nodes": [
+    {"key": "epic", "title": "Auth System", "type": "epic", "priority": 1,
+     "description": "JWT auth for /api/v1/*. See DECISION:auth."},
+
+    {"key": "contracts", "parent_key": "epic", "title": "Define auth contracts",
+     "type": "task", "priority": 1,
+     "description": "**Why:** interface-first ordering.\n**What:** AuthResponse, RefreshRequest, route paths /login /refresh /logout.\n**Files:** app/api/v1/auth/types.py."},
+
+    {"key": "login", "parent_key": "epic", "title": "Implement POST /login",
+     "type": "task", "priority": 1,
+     "description": "**Why:** D-04. **What:** validates body, returns AuthResponse.\nApostrophes', \"quotes\", $(this) and `backticks` all pass through verbatim.\nFiles: app/services/auth_service.py, tests/api/test_login.py."},
+
+    {"key": "refresh", "parent_key": "epic", "title": "Implement /refresh + rotation",
+     "type": "task", "priority": 1,
+     "description": "**What:** rotation-on-use, revoke-old, reuse-detection."}
+  ],
+  "edges": [
+    {"from_key": "login",   "to_key": "contracts", "type": "blocks"},
+    {"from_key": "refresh", "to_key": "contracts", "type": "blocks"}
+  ]
+}
+```
+
+Run it:
+
+```
+bd create --graph plan.json
+# Created 4 issues
+#   epic      -> hew-a3f8
+#   contracts -> hew-a3f8.1
+#   login     -> hew-a3f8.2
+#   refresh   -> hew-a3f8.3
+```
+
+Schema cheat-sheet:
+
+- **`nodes[].key`** — local-only handle, used by edges and parent_key. Discarded after creation.
+- **`nodes[].parent_key`** / **`nodes[].parent_id`** — wire hierarchy. Use `parent_key` for siblings in the same plan; `parent_id` for an already-existing parent (e.g. `"hew-a3f8"`).
+- **`nodes[].type`** — `task` / `epic` / `feature` / `bug` / `chore` / `decision`. (No `gate` type — see Step 5.)
+- **`edges[].from_key` / `to_key`** — `from` is the dependent (blocked); `to` is the prerequisite. `type` is typically `"blocks"`.
+
+For a one-off task with no hostile content, plain `hew task new` is still fine. Reach for `--graph` when the plan is >3 tasks or any description carries shell-hostile characters.
+
 ## Step 4 — wire dependencies
 
 A task `hew dep add <child> --on <prerequisite>` if it cannot start until
@@ -236,20 +293,27 @@ hew dep add hew-X.4 --on hew-X.2
 
 ## Step 5 — place gates for external blockers
 
-Gates are for anything outside the Beads graph. Never fake a gate with a
-title prefix. Create the blocked task first, then attach a gate to it.
+Gates are for anything outside the Beads graph (a PR has to merge, CI
+has to go green, a human has to approve). Never fake a gate with a title
+prefix. Create the gate first, then wire it as a prerequisite of the
+blocked task.
 
 | Trigger | Command |
 |---------|---------|
-| Wait for PR merge | `bd gate create --type=gh:pr --blocks=<task-id> --await-id=42 --reason="PR #42 merge"` |
-| Wait for CI | `bd gate create --type=gh:run --blocks=<task-id> --await-id=<run-id> --reason="CI green"` |
-| Manual approval | `bd gate create --type=human --blocks=<task-id> --reason="Staging approved"` |
-| Timer / cooldown | `bd gate create --type=timer --blocks=<task-id> --timeout=30m` |
+| Wait for PR merge | `hew gate new --gh-pr=42 --title="PR #42 merged"` |
+| Wait for CI / issue close / cmd | (deferred — only `--gh-pr` ships in v1; the `GateKind` enum scaffolds `GhIssue` / `GhRun` / `Cmd`) |
+| Manual approval | create a normal task with title `"Approval: <thing>"`, leave it open until human closes — no special primitive needed |
 
-Gate creation is a documented hold-out — `hew` has no `gate` wrapper yet
-(`bd gate create` stays the path; `bd gate resolve <id>` closes manual
-gates). Inspect with `bd gate list`. The `--blocks` flag does the
-dependency wiring inline, so no separate `hew dep add` is needed.
+Then attach the gate to the blocked task:
+
+```
+GATE=$(hew gate new --gh-pr=42 --title="PR #42 merged" --quiet)
+hew dep add <next-epic> "$GATE"
+```
+
+Resolve gates periodically (or wire into a loop hook): `hew gate poll`
+queries the external source and closes any whose state has resolved
+(`MERGED` for `--gh-pr`). Inspect with `hew gate list`.
 
 ## Step 6 — pick types and priorities
 
@@ -260,7 +324,10 @@ dependency wiring inline, so no separate `hew dep add` is needed.
 | `bug` | semantic alias — surfaces in bug queries |
 | `chore` | refactor, cleanup, non-feature |
 | `epic` | container; only closes when all children close |
-| `gate` | external blocker (above) |
+| `decision` | ADR-shaped record |
+
+(External-blocker gates use the dedicated `hew gate` surface above, not
+a task type — see Step 5.)
 
 | `--priority=` | Meaning |
 |---------------|---------|
