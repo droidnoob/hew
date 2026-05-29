@@ -16,9 +16,12 @@
 //! later as `[merge-conflict]` bug tasks.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::bd::{BdClient, ReadyTask};
 use crate::error::Result;
+use crate::git::GitClient;
+use crate::merge_back::{self, MergeReport};
 use crate::tasks;
 
 /// State of a single worker slot.
@@ -169,6 +172,27 @@ impl Dispatcher {
         }
 
         Ok(tick)
+    }
+
+    /// Consolidate every worker branch back onto `base_branch` and file
+    /// `[merge-conflict]` bug tasks for any that didn't merge cleanly.
+    /// Worktrees are intentionally NOT removed — the human resolving the
+    /// conflict needs to `cd ~/.hew/wt/<run-id>/<n>/` per
+    /// `DECISION:loop-parallel-overlap-policy`.
+    ///
+    /// Returns the [`MergeReport`] plus the IDs of any bug tasks filed
+    /// (one per conflict).
+    pub fn shutdown_merge_back(
+        &self,
+        git: &dyn GitClient,
+        bd: &dyn BdClient,
+        project_root: &Path,
+        base_branch: &str,
+        worker_branches: &[String],
+    ) -> Result<(MergeReport, Vec<String>)> {
+        let report = merge_back::merge_back(git, project_root, base_branch, worker_branches)?;
+        let bug_ids = merge_back::file_conflict_bug_tasks(bd, self.run_id(), &report.conflicts)?;
+        Ok((report, bug_ids))
     }
 
     /// Release `slot_id`, returning the task id that was running there
