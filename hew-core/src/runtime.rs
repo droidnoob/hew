@@ -240,15 +240,16 @@ impl RuntimeSpawner for ClaudeSpawner {
         let stderr_tail = tail_text(&String::from_utf8_lossy(&output.stderr), 16);
         let exit_ok = output.status.success();
         match parse_claude_json(&output.stdout) {
-            Ok((raw_text, tokens)) => {
+            Ok((raw_text, tokens, failure_class)) => {
+                let success = exit_ok && matches!(failure_class, SpawnFailureClass::Success);
                 let closed_task = detect_closed_task(&raw_text);
                 Ok(SpawnOutcome {
-                    success: exit_ok,
+                    success,
                     closed_task,
                     tokens,
                     stderr_tail,
                     raw_text,
-                    failure_class: SpawnFailureClass::Success,
+                    failure_class,
                 })
             }
             Err(_) if !exit_ok => Ok(SpawnOutcome {
@@ -402,11 +403,21 @@ impl RuntimeSpawner for CodexSpawner {
     }
 }
 
-/// Parse `claude --output-format json`. The JSON shape is
+/// Parse `claude --output-format json`. The success shape is
 /// `{ "result": "<text>", "usage": { "input_tokens": N, ... }, ... }`.
-/// Missing fields default to zero / empty so a partial response still
-/// produces a `SpawnOutcome` instead of erroring out.
-pub fn parse_claude_json(bytes: &[u8]) -> Result<(String, TokenSpend)> {
+/// The error shape carries an `error` object — Anthropic's documented
+/// envelope is `{ "type": "error", "error": { "type": "<kind>",
+/// "status_code": <int>, "message": "<...>" } }`. `is_error: true` may
+/// also appear at the top level.
+///
+/// Returns `(result_text, tokens, failure_class)`. When the response
+/// is a success envelope, `failure_class` is
+/// [`SpawnFailureClass::Success`]. When an error envelope is detected,
+/// the kind is derived from `error.status_code` if present (via
+/// [`classify_http_status`]), else from `error.type`. Missing fields
+/// default to zero / empty so a partial response still produces a
+/// usable triple.
+pub fn parse_claude_json(bytes: &[u8]) -> Result<(String, TokenSpend, SpawnFailureClass)> {
     let v: serde_json::Value = serde_json::from_slice(bytes)?;
     let result_text = v.get("result").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let usage = v.get("usage").cloned().unwrap_or(serde_json::Value::Null);
@@ -417,7 +428,41 @@ pub fn parse_claude_json(bytes: &[u8]) -> Result<(String, TokenSpend)> {
         cache_read: pick("cache_read_input_tokens"),
         cache_create: pick("cache_creation_input_tokens"),
     };
-    Ok((result_text, tokens))
+
+    let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false)
+        || v.get("type").and_then(|x| x.as_str()) == Some("error")
+        || v.get("error").is_some();
+
+    let failure_class = if is_error {
+        let err = v.get("error");
+        let status = err.and_then(|e| e.get("status_code")).and_then(|x| x.as_u64());
+        let kind = match status {
+            Some(s) => classify_http_status(s as u16),
+            None => err
+                .and_then(|e| e.get("type"))
+                .and_then(|x| x.as_str())
+                .map(classify_claude_error_type)
+                .unwrap_or(RuntimeErrorKind::Unknown),
+        };
+        SpawnFailureClass::RuntimeError(kind)
+    } else {
+        SpawnFailureClass::Success
+    };
+
+    Ok((result_text, tokens, failure_class))
+}
+
+/// Map an Anthropic error `type` string to [`RuntimeErrorKind`]. Used
+/// as a fallback when an error envelope lacks a numeric `status_code`.
+/// Tags mirror Anthropic's documented API error vocabulary.
+pub fn classify_claude_error_type(ty: &str) -> RuntimeErrorKind {
+    match ty {
+        "authentication_error" | "permission_error" => RuntimeErrorKind::Auth,
+        "rate_limit_error" => RuntimeErrorKind::RateLimit,
+        "invalid_request_error" | "not_found_error" => RuntimeErrorKind::BadRequest,
+        "api_error" | "overloaded_error" => RuntimeErrorKind::Server,
+        _ => RuntimeErrorKind::Unknown,
+    }
 }
 
 /// Parse `codex exec --json` JSONL output.
@@ -666,20 +711,88 @@ mod tests {
                 "cache_creation_input_tokens": 200
             }
         }"#;
-        let (text, tokens) = parse_claude_json(bytes).unwrap();
+        let (text, tokens, class) = parse_claude_json(bytes).unwrap();
         assert!(text.contains("closed hew-abc"));
         assert_eq!(tokens.input, 1000);
         assert_eq!(tokens.output, 500);
         assert_eq!(tokens.cache_read, 8000);
         assert_eq!(tokens.cache_create, 200);
+        assert_eq!(class, SpawnFailureClass::Success);
     }
 
     #[test]
     fn parse_claude_json_tolerates_missing_usage() {
         let bytes = br#"{"result":"hi"}"#;
-        let (text, tokens) = parse_claude_json(bytes).unwrap();
+        let (text, tokens, class) = parse_claude_json(bytes).unwrap();
         assert_eq!(text, "hi");
         assert_eq!(tokens.total(), 0);
+        assert_eq!(class, SpawnFailureClass::Success);
+    }
+
+    // Fabricated from Anthropic's documented API error envelope spec
+    // (see docs.anthropic.com/en/api/errors). Not live-captured — when
+    // validating against a real CLI response, replace these strings.
+    #[test]
+    fn parse_claude_json_classifies_429_as_ratelimit() {
+        let bytes = br#"{
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "status_code": 429,
+                "message": "rate limit exceeded"
+            }
+        }"#;
+        let (_text, _tokens, class) = parse_claude_json(bytes).unwrap();
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::RateLimit));
+    }
+
+    #[test]
+    fn parse_claude_json_classifies_401_as_auth() {
+        let bytes = br#"{
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "status_code": 401,
+                "message": "invalid API key"
+            }
+        }"#;
+        let (_text, _tokens, class) = parse_claude_json(bytes).unwrap();
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Auth));
+    }
+
+    #[test]
+    fn parse_claude_json_classifies_500_as_server() {
+        let bytes = br#"{
+            "type": "error",
+            "error": { "type": "api_error", "status_code": 500, "message": "boom" }
+        }"#;
+        let (_text, _tokens, class) = parse_claude_json(bytes).unwrap();
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+    }
+
+    #[test]
+    fn parse_claude_json_falls_back_to_error_type_when_status_missing() {
+        // No numeric status — classify_claude_error_type covers it.
+        let bytes = br#"{"is_error": true, "error": {"type": "rate_limit_error"}}"#;
+        let (_text, _tokens, class) = parse_claude_json(bytes).unwrap();
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::RateLimit));
+    }
+
+    #[test]
+    fn classify_claude_error_type_table() {
+        let cases = [
+            ("authentication_error", RuntimeErrorKind::Auth),
+            ("permission_error", RuntimeErrorKind::Auth),
+            ("rate_limit_error", RuntimeErrorKind::RateLimit),
+            ("invalid_request_error", RuntimeErrorKind::BadRequest),
+            ("not_found_error", RuntimeErrorKind::BadRequest),
+            ("api_error", RuntimeErrorKind::Server),
+            ("overloaded_error", RuntimeErrorKind::Server),
+            ("not_a_real_type", RuntimeErrorKind::Unknown),
+        ];
+        for (ty, want) in cases {
+            assert_eq!(classify_claude_error_type(ty), want, "type {ty}");
+        }
     }
 
     #[test]
@@ -819,12 +932,13 @@ mod tests {
     #[test]
     fn parse_claude_json_matches_captured_fixture() {
         let bytes = include_bytes!("../tests/fixtures/claude-output.json");
-        let (text, tokens) = parse_claude_json(bytes).expect("fixture parses");
+        let (text, tokens, class) = parse_claude_json(bytes).expect("fixture parses");
         assert_eq!(text, "closed hew-e2i — done");
         assert_eq!(tokens.input, 6);
         assert_eq!(tokens.output, 14);
         assert_eq!(tokens.cache_read, 22827);
         assert_eq!(tokens.cache_create, 23362);
+        assert_eq!(class, SpawnFailureClass::Success);
         assert_eq!(detect_closed_task(&text).as_deref(), Some("hew-e2i"));
     }
 
