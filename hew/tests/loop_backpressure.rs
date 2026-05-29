@@ -19,7 +19,7 @@ use hew_core::error::Result as HewResult;
 use hew_core::loop_log::{IterLog, iter_log_path, run_dir};
 use hew_core::prompt::AssembledPrompt;
 use hew_core::runner::TokenSpend;
-use hew_core::runtime::{RuntimeSpawner, SpawnOutcome};
+use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOutcome};
 
 use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
 
@@ -47,6 +47,7 @@ impl RuntimeSpawner for CommitMakingSpawner {
             tokens: TokenSpend { input: 10, output: 5, cache_read: 0, cache_create: 0 },
             stderr_tail: String::new(),
             raw_text: "closed hew-fake — synthetic\n".into(),
+            failure_class: SpawnFailureClass::Success,
         })
     }
 }
@@ -201,6 +202,7 @@ impl RuntimeSpawner for DeferredWritingSpawner {
             tokens: TokenSpend::default(),
             stderr_tail: String::new(),
             raw_text: "closed hew-fake — synthetic\n".into(),
+            failure_class: SpawnFailureClass::Success,
         })
     }
 }
@@ -439,6 +441,7 @@ impl RuntimeSpawner for SilentlyClosingSpawner {
             tokens: TokenSpend { input: 5, output: 3, cache_read: 0, cache_create: 0 },
             stderr_tail: String::new(),
             raw_text: "Done; added the struct and tests.".into(),
+            failure_class: SpawnFailureClass::Success,
         })
     }
 }
@@ -467,6 +470,7 @@ impl RuntimeSpawner for DrainingSpawner {
             tokens: TokenSpend { input: 1, output: 1, cache_read: 0, cache_create: 0 },
             stderr_tail: String::new(),
             raw_text: "done".into(),
+            failure_class: SpawnFailureClass::Success,
         })
     }
 }

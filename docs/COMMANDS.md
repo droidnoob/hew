@@ -371,7 +371,7 @@ Not slashes, but referenced by skill bodies and worth knowing:
 | `hew check <skill>` | Exit 0 if the skill's prerequisites are met |
 | `hew doctor [--fix]` | Project + tooling health diagnostics |
 | `hew config {get,set,keys,list}` | Configuration |
-| `hew init [--runtime=<r>]` | Install hew into the current project |
+| `hew init [--runtime=<r>[,<r>...]]` | Install hew into the current project. `--runtime` accepts CSV (`--runtime=claude,codex`) or repeated flags (`--runtime=claude --runtime=codex`); omit to auto-detect or pick interactively. |
 | `hew uninstall [--runtime=<r>] [--purge]` | Reverse `hew init` |
 | `hew update` | Self-update binary + embedded artifacts |
 | `hew branch new --prefix=<type> --slug=<text>` | Create a conventional branch |

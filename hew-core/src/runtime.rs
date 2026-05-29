@@ -14,14 +14,93 @@
 //! exercised by an integration test gated on `HEW_LOOP_E2E=1`.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::error::Result;
 use crate::prompt::AssembledPrompt;
 use crate::runner::TokenSpend;
 
+/// Loop-side runtime selector. The two values are the subset of
+/// [`crate::install::Runtime`] (5 variants: Claude/Cursor/Codex/Windsurf/
+/// Generic) that the loop can actually drive — runtimes with a
+/// non-interactive `-p`-style invocation. Install-side enums one for
+/// methodology body fan-out; this one for spawner dispatch.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Claude,
+    Codex,
+}
+
+impl RuntimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// CLI-side accepted values for `--runtime`. Kept in sync with
+    /// the `FromStr` arms so clap valid-values lists never drift.
+    pub const VARIANTS: &'static [&'static str] = &["claude", "codex"];
+}
+
+impl FromStr for RuntimeKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            other => {
+                Err(format!("unknown runtime `{other}`; expected one of {:?}", Self::VARIANTS))
+            }
+        }
+    }
+}
+
 /// Environment variable that overrides the `claude` binary location.
 /// Used by tests and for pinning to a specific install.
 pub const CLAUDE_BIN_ENV: &str = "HEW_LOOP_CLAUDE_BIN";
+
+/// Sub-category of a runtime-level failure. Used to decide whether a
+/// fallback runtime might succeed (`Auth` / `RateLimit` / `Server` —
+/// usually yes) versus a deterministic refusal (`BadRequest` — usually
+/// no). `Spawn` covers OS-level errors (missing binary, ETXTBSY).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RuntimeErrorKind {
+    Spawn,
+    Auth,
+    RateLimit,
+    BadRequest,
+    Server,
+    Unknown,
+}
+
+/// Categorical classification of an iter's outcome. Sits alongside the
+/// raw `success` bool on [`SpawnOutcome`] so the runner can distinguish
+/// "the runtime broke" (try fallback) from "guard tripped" / "budget
+/// exhausted" (no point trying a different runtime).
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub enum SpawnFailureClass {
+    #[default]
+    Success,
+    RuntimeError(RuntimeErrorKind),
+    GuardTrip,
+    BudgetExhausted,
+}
+
+/// Map an HTTP status code observed in a runtime's failure payload
+/// (Claude `--output-format json` error envelope, Codex `turn.failed`
+/// nested status) to its [`RuntimeErrorKind`].
+pub fn classify_http_status(status: u16) -> RuntimeErrorKind {
+    match status {
+        401 | 403 => RuntimeErrorKind::Auth,
+        429 => RuntimeErrorKind::RateLimit,
+        400 | 404 | 422 => RuntimeErrorKind::BadRequest,
+        500..=599 => RuntimeErrorKind::Server,
+        _ => RuntimeErrorKind::Unknown,
+    }
+}
 
 /// Result of one iter's spawn. Richer than [`crate::runner::IterOutcome`]
 /// because the runner needs both the categorical outcome *and* the raw
@@ -41,6 +120,10 @@ pub struct SpawnOutcome {
     /// Raw result text from the runtime, post-JSON-unwrap. Logged
     /// verbatim into the iter record.
     pub raw_text: String,
+    /// Categorical outcome for fallback / cooldown decisions. Defaults
+    /// to [`SpawnFailureClass::Success`] for back-compat with existing
+    /// spawners that haven't been wired to surface classification yet.
+    pub failure_class: SpawnFailureClass,
 }
 
 /// Inject-at-runtime abstraction. Production wires [`ClaudeSpawner`];
@@ -104,7 +187,14 @@ impl RuntimeSpawner for ClaudeSpawner {
         match parse_claude_json(&output.stdout) {
             Ok((raw_text, tokens)) => {
                 let closed_task = detect_closed_task(&raw_text);
-                Ok(SpawnOutcome { success: exit_ok, closed_task, tokens, stderr_tail, raw_text })
+                Ok(SpawnOutcome {
+                    success: exit_ok,
+                    closed_task,
+                    tokens,
+                    stderr_tail,
+                    raw_text,
+                    failure_class: SpawnFailureClass::Success,
+                })
             }
             Err(_) if !exit_ok => Ok(SpawnOutcome {
                 success: false,
@@ -112,6 +202,7 @@ impl RuntimeSpawner for ClaudeSpawner {
                 tokens: TokenSpend::default(),
                 stderr_tail,
                 raw_text: String::from_utf8_lossy(&output.stdout).into_owned(),
+                failure_class: SpawnFailureClass::RuntimeError(RuntimeErrorKind::Unknown),
             }),
             Err(e) => Err(e),
         }
@@ -192,6 +283,7 @@ impl Default for SpawnOutcome {
             tokens: TokenSpend::default(),
             stderr_tail: String::new(),
             raw_text: String::new(),
+            failure_class: SpawnFailureClass::Success,
         }
     }
 }
@@ -200,6 +292,34 @@ impl Default for SpawnOutcome {
 mod tests {
     use super::*;
     use crate::prompt::assemble;
+
+    #[test]
+    fn runtime_kind_parses_known_values() {
+        assert_eq!("claude".parse::<RuntimeKind>().unwrap(), RuntimeKind::Claude);
+        assert_eq!("codex".parse::<RuntimeKind>().unwrap(), RuntimeKind::Codex);
+    }
+
+    #[test]
+    fn runtime_kind_rejects_unknown() {
+        let err = "cursor".parse::<RuntimeKind>().unwrap_err();
+        assert!(err.contains("cursor"));
+        assert!(err.contains("claude"));
+        assert!(err.contains("codex"));
+    }
+
+    #[test]
+    fn runtime_kind_variants_matches_parser() {
+        for v in RuntimeKind::VARIANTS {
+            assert!(v.parse::<RuntimeKind>().is_ok(), "variant {v} must parse");
+        }
+    }
+
+    #[test]
+    fn runtime_kind_as_str_roundtrip() {
+        for k in [RuntimeKind::Claude, RuntimeKind::Codex] {
+            assert_eq!(k.as_str().parse::<RuntimeKind>().unwrap(), k);
+        }
+    }
 
     #[test]
     fn build_args_includes_print_json_and_tools() {
@@ -303,6 +423,7 @@ mod tests {
             tokens: TokenSpend { input: 5, output: 3, cache_read: 1, cache_create: 0 },
             stderr_tail: String::new(),
             raw_text: "closed hew-x".into(),
+            failure_class: SpawnFailureClass::Success,
         };
         let m = MockSpawner::new(outcome.clone());
         let p = assemble("S", "P", "T");
@@ -358,6 +479,39 @@ mod tests {
             "expected closed_task to be detected from result text, raw={}",
             out.raw_text
         );
+    }
+
+    #[test]
+    fn classify_http_status_table() {
+        let cases = [
+            (200, RuntimeErrorKind::Unknown),
+            (301, RuntimeErrorKind::Unknown),
+            (400, RuntimeErrorKind::BadRequest),
+            (401, RuntimeErrorKind::Auth),
+            (403, RuntimeErrorKind::Auth),
+            (404, RuntimeErrorKind::BadRequest),
+            (422, RuntimeErrorKind::BadRequest),
+            (429, RuntimeErrorKind::RateLimit),
+            (500, RuntimeErrorKind::Server),
+            (502, RuntimeErrorKind::Server),
+            (503, RuntimeErrorKind::Server),
+            (599, RuntimeErrorKind::Server),
+            (0, RuntimeErrorKind::Unknown),
+            (999, RuntimeErrorKind::Unknown),
+        ];
+        for (status, want) in cases {
+            assert_eq!(classify_http_status(status), want, "status {status}");
+        }
+    }
+
+    #[test]
+    fn spawn_failure_class_defaults_success() {
+        assert_eq!(SpawnFailureClass::default(), SpawnFailureClass::Success);
+    }
+
+    #[test]
+    fn spawn_outcome_default_has_success_failure_class() {
+        assert_eq!(SpawnOutcome::default().failure_class, SpawnFailureClass::Success);
     }
 
     /// Regression test against a captured real `claude -p` response

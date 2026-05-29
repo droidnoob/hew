@@ -6,6 +6,23 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`hew init --runtime` accepts multiple runtimes.** Comma-separated
+  (`--runtime=claude,codex`) and repeated (`--runtime=claude
+  --runtime=codex`) forms both parse to the same list; the install loop
+  then iterates each runtime in order with a per-runtime stdout banner.
+  The interactive picker becomes a multi-select checkbox with
+  currently-detected runtimes pre-checked.
+
+### Changed
+
+- **`hew init` with no `--runtime` and multiple detected runtimes
+  refreshes them all** instead of erroring in non-interactive mode.
+  Useful for `hew update` re-runs and CI flows that want
+  every-installed-runtime regenerated without naming them. Zero detected
+  + non-interactive still errors with `MissingFlag` as today.
+
 ## [0.10.0] — 2026-05-28
 
 Makes the loop runner portable across language stacks and adds a way to
