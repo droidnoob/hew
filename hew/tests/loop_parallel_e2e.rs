@@ -59,6 +59,16 @@ impl HomeGuard {
         ] {
             unsafe { std::env::remove_var(v) };
         }
+        // Production `RealGit` invocations during merge_back create commits
+        // (`merge --no-ff`); without an identity those fail with "Please tell
+        // me who you are" before any conflict is detected, masking real
+        // conflict reporting. Ubuntu runners have no system git identity, so
+        // seed one into this HOME tempdir.
+        std::fs::write(
+            home.join(".gitconfig"),
+            b"[user]\n\tname = hew-test\n\temail = hew-test@example.com\n",
+        )
+        .expect("write .gitconfig");
         (Self { _lock: lock, prev, _tmp: tmp }, home)
     }
 }
