@@ -37,6 +37,30 @@ fn loop_runtime_rejects_bogus_at_clap() {
         .code(2);
 }
 
+/// `--fallback-runtime` accepts the same RuntimeKind values as
+/// `--runtime`. Rejecting at clap means the valid-values list is
+/// shared (RuntimeKind::VARIANTS), not duplicated by hand.
+#[test]
+fn loop_fallback_runtime_rejects_bogus_at_clap() {
+    hew()
+        .args(["loop", "run", "--fallback-runtime=cursor", "--dry-run", "--max-iter", "1"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("claude").and(contains("codex")));
+}
+
+#[test]
+fn loop_fallback_runtime_help_lists_both_flags() {
+    let out = hew().args(["loop", "run", "--help"]).assert().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--fallback-runtime"), "help missing --fallback-runtime:\n{stdout}");
+    assert!(
+        stdout.contains("--fallback-cooldown-iters"),
+        "help missing --fallback-cooldown-iters:\n{stdout}"
+    );
+}
+
 /// `--runtime=codex` must pass clap. We don't have bd in the test
 /// process's working dir, so the command may still fail downstream
 /// (bd discover) — but it must NOT exit via clap (code 2) and must

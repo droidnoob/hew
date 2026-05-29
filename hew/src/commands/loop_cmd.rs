@@ -28,8 +28,11 @@ use hew_core::loop_log::{
     write_json_atomic,
 };
 use hew_core::prompt;
-use hew_core::runner::{Iter, IterOutcome, Run, RunConfig};
-use hew_core::runtime::{ClaudeSpawner, RuntimeKind, RuntimeSpawner};
+use hew_core::runner::{CooldownState, Iter, IterOutcome, Run, RunConfig};
+use hew_core::runtime::{
+    ClaudeSpawner, CodexSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner, SpawnFailureClass,
+    SpawnOpts,
+};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
@@ -313,43 +316,112 @@ pub struct Args {
     /// `hew-execute` — the methodology body the loop drives.
     #[arg(long, default_value = "hew-execute")]
     pub skill: String,
+
+    /// Fallback runtime to switch to when the primary trips a runtime
+    /// error (auth / rate-limit / server). When set, the loop runs the
+    /// fallback for `--fallback-cooldown-iters` iters before retrying
+    /// the primary. Overrides `loop.fallback_runtime` config.
+    /// Example: `hew loop run --fallback-runtime codex`.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
+    )]
+    pub fallback_runtime: Option<String>,
+
+    /// Iters the loop stays on the fallback before retrying the
+    /// primary. Default 3 (DECISION:loop-fallback-policy). Overrides
+    /// `loop.fallback_cooldown_iters` config. Must be >= 1.
+    /// Example: `hew loop run --fallback-runtime codex --fallback-cooldown-iters 5`.
+    #[arg(long)]
+    pub fallback_cooldown_iters: Option<u32>,
 }
 
 pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let kind: RuntimeKind = args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
 
+    // Resolve fallback config: CLI > config > defaults. Surfaced into
+    // the logs only when set; today the loop runner doesn't consume it
+    // yet (hew-lc2 wires the cooldown state machine). Reading it here
+    // keeps the CLI/config surfaces honest — bad inputs fail at parse,
+    // not after the loop starts. The unused-binding warning is gone
+    // because we use the value below.
+    let cfg = hew_core::config::load().map_err(|e| miette::miette!("load hew config: {e}"))?;
+    let cli_fallback = args
+        .fallback_runtime
+        .as_deref()
+        .map(|s| s.parse::<RuntimeKind>())
+        .transpose()
+        .map_err(|e| miette::miette!("{e}"))?;
+    let fallback = FallbackConfig::resolve(
+        cli_fallback,
+        args.fallback_cooldown_iters,
+        cfg.loop_cfg.fallback_runtime.as_deref(),
+        cfg.loop_cfg.fallback_cooldown_iters,
+    )
+    .map_err(|e| miette::miette!("{e}"))?;
+    if fallback.runtime.is_some() {
+        tracing::debug!(
+            primary = kind.as_str(),
+            fallback = ?fallback.runtime.map(|r| r.as_str()),
+            cooldown_iters = fallback.cooldown_iters,
+            "loop: fallback resolved (runner wiring in hew-lc2)"
+        );
+    }
+
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
-    let spawner: Option<Box<dyn RuntimeSpawner>> = if args.dry_run {
-        None
-    } else {
-        match kind {
-            RuntimeKind::Claude => Some(Box::new(ClaudeSpawner::from_env())),
-            RuntimeKind::Codex => {
-                return Err(miette::miette!(
-                    "runtime `codex` spawner not yet wired (tracked by hew-9d4); \
-                     use --dry-run to exercise prompt assembly"
-                ));
-            }
-        }
-    };
+    let spawner: Option<Box<dyn RuntimeSpawner>> =
+        if args.dry_run { None } else { Some(build_spawner_for(kind)) };
+    let fallback_spawner: Option<Box<dyn RuntimeSpawner>> =
+        if args.dry_run { None } else { fallback.runtime.map(build_spawner_for) };
     let gate = AutoGateRunner;
-    run_loop_with(ctx, args, &bd, spawner.as_deref(), &gate, &project_root)
+    run_loop_with(
+        ctx,
+        args,
+        &bd,
+        spawner.as_deref(),
+        fallback_spawner.as_deref(),
+        fallback,
+        &gate,
+        &project_root,
+    )
+}
+
+/// Construct the production spawner for a given runtime kind. Codex
+/// is wired symmetrically to Claude: same `Default`/`from_env()` path
+/// (HEW_LOOP_*_BIN override → PATH fallback). The fallback path uses
+/// this directly; the primary path goes through here too so a future
+/// runtime addition has one place to extend.
+fn build_spawner_for(kind: RuntimeKind) -> Box<dyn RuntimeSpawner> {
+    match kind {
+        RuntimeKind::Claude => Box::new(ClaudeSpawner::from_env()),
+        RuntimeKind::Codex => Box::new(CodexSpawner::from_env()),
+    }
 }
 
 /// Testable inner. Production [`run_loop`] resolves `bd`, the spawner,
 /// the gate runner and the project root; tests construct mocks and call
 /// this directly. Returns the same `miette::Result` as `run_loop`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_loop_with(
     ctx: &Ctx,
     args: Args,
     bd: &dyn BdClient,
     spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
 ) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
+    let primary_kind: RuntimeKind =
+        args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
+    // CooldownState only matters when a fallback spawner is wired —
+    // otherwise the loop has nowhere to route and the state machine
+    // would just sit at `should_use_fallback() == true` forever.
+    let mut cooldown: Option<CooldownState> =
+        fallback_spawner.and(fallback.runtime.map(|_| CooldownState::new(fallback.cooldown_iters)));
 
     let cfg = RunConfig {
         max_iter: args.max_iter,
@@ -475,8 +547,26 @@ pub fn run_loop_with(
             );
         }
 
-        let (mut outcome, tokens, mut stderr_tail) = if let Some(s) = spawner {
-            match s.spawn(&assembled, &allowed) {
+        // Cooldown drives spawner selection when a fallback is wired:
+        // primary by default; fallback while `should_use_fallback()` is
+        // true. The same bool is needed AFTER the spawn to record the
+        // outcome on the correct side of the state machine, so capture
+        // it once.
+        let on_fallback = cooldown.as_ref().map(|c| c.should_use_fallback()).unwrap_or(false)
+            && fallback_spawner.is_some();
+        let active_spawner: Option<&dyn RuntimeSpawner> = match (spawner, on_fallback) {
+            (Some(_), true) => fallback_spawner,
+            (Some(p), false) => Some(p),
+            (None, _) => None,
+        };
+        let active_kind =
+            if on_fallback { fallback.runtime.unwrap_or(primary_kind) } else { primary_kind };
+
+        let (mut outcome, tokens, mut stderr_tail, failure_class) = if let Some(s) = active_spawner
+        {
+            // SpawnOpts::default() until Epic D wires per-task model
+            // resolution; opts is the future channel for that override.
+            match s.spawn(&assembled, &allowed, &SpawnOpts::default()) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
                         IterOutcome::Closed
@@ -485,17 +575,22 @@ pub fn run_loop_with(
                     } else {
                         IterOutcome::RuntimeError
                     };
-                    (oc, out.tokens, Some(out.stderr_tail))
+                    (oc, out.tokens, Some(out.stderr_tail), out.failure_class)
                 }
                 Err(e) => {
                     if !ctx.quiet {
                         eprintln!("iter {iter_number} runtime error: {e}");
                     }
-                    (IterOutcome::RuntimeError, Default::default(), Some(format!("{e}")))
+                    (
+                        IterOutcome::RuntimeError,
+                        Default::default(),
+                        Some(format!("{e}")),
+                        SpawnFailureClass::RuntimeError(hew_core::runtime::RuntimeErrorKind::Spawn),
+                    )
                 }
             }
         } else {
-            (IterOutcome::NoClose, Default::default(), None)
+            (IterOutcome::NoClose, Default::default(), None, SpawnFailureClass::Success)
         };
 
         // Out-of-band closure detection. detect_closed_task only
@@ -629,6 +724,22 @@ pub fn run_loop_with(
         iter.ended_at = Some(iso_now_utc());
         iter.stderr_tail = stderr_tail;
 
+        // Update cooldown machinery before we log the iter so
+        // `cooldown_engaged` reflects post-iter state.
+        if let Some(c) = cooldown.as_mut() {
+            // BackpressureFail / gate failures aren't a runtime issue
+            // — map only true RuntimeError outcomes through. Everything
+            // else feeds the original `failure_class` so Success keeps
+            // draining the cooldown window and GuardTrip/Budget pass
+            // through unchanged.
+            let class = if matches!(outcome, IterOutcome::RuntimeError) {
+                failure_class
+            } else {
+                SpawnFailureClass::Success
+            };
+            c.record_outcome(on_fallback, class);
+        }
+
         let prefix_hash_hex = Some(format!("{:016x}", assembled.prefix_hash));
         // Symbol-level changelog of the iter: blast against the
         // pre-iter sha when treesitter is compiled in and the iter
@@ -636,12 +747,28 @@ pub fn run_loop_with(
         // blast path collapses to an empty list — we never let an
         // observability signal block iter logging.
         let symbols_touched = compute_iter_symbols(project_root, pre_iter_sha.as_deref(), &outcome);
-        let log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
+        let mut log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
+        if active_spawner.is_some() {
+            log.runtime_used = Some(active_kind.as_str().to_string());
+        }
+        log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
         write_json_atomic(&iter_log_path(&dir, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
 
-        last_outcome = Some(outcome);
+        // When a fallback is wired and the cooldown machinery is
+        // actively routing iters, swallow RuntimeError from the
+        // stop-signal point of view — the loop should switch to the
+        // fallback on the next iter rather than aborting. The iter
+        // log still records the true outcome.
+        let stop_outcome = if cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false)
+            && matches!(outcome, IterOutcome::RuntimeError)
+        {
+            Some(IterOutcome::NoClose)
+        } else {
+            Some(outcome)
+        };
+        last_outcome = stop_outcome;
         run_state.iters.push(iter);
 
         // Rewrite run.json after each iter.

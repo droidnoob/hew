@@ -24,6 +24,8 @@ pub struct Config {
     pub testing: TestingConfig,
     pub craft: CraftConfig,
     pub compact: CompactConfig,
+    #[serde(rename = "loop")]
+    pub loop_cfg: LoopConfig,
 }
 
 impl Default for Config {
@@ -40,9 +42,30 @@ impl Default for Config {
             testing: TestingConfig::default(),
             craft: CraftConfig::default(),
             compact: CompactConfig::default(),
+            loop_cfg: LoopConfig::default(),
         }
     }
 }
+
+/// `hew loop` runtime knobs that persist across invocations. CLI flags
+/// on `hew loop run` always override these per-run. Per
+/// `DECISION:loop-fallback-policy`, both the CLI flag and this config
+/// knob ship together so the user can pick either surface.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LoopConfig {
+    /// Fallback runtime to switch to when the primary trips a
+    /// [`crate::runtime::SpawnFailureClass::RuntimeError`]. `None` =
+    /// no fallback (today's behavior). Accepts `"claude"` / `"codex"`.
+    pub fallback_runtime: Option<String>,
+    /// Iters the loop stays on the fallback before retrying the
+    /// primary. `None` → default 3 per `DECISION:loop-fallback-policy`.
+    pub fallback_cooldown_iters: Option<u32>,
+}
+
+/// Effective default for `fallback_cooldown_iters` when neither the
+/// CLI nor config provides one. Anchored in `DECISION:loop-fallback-policy`.
+pub const FALLBACK_COOLDOWN_ITERS_DEFAULT: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -316,6 +339,10 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
             Some(cfg.compact.allow_recompact_default.to_string())
         }
         "compact.exempt" => Some(cfg.compact.exempt.join(",")),
+        "loop.fallback_runtime" | "loop.fallback-runtime" => cfg.loop_cfg.fallback_runtime.clone(),
+        "loop.fallback_cooldown_iters" | "loop.fallback-cooldown-iters" => {
+            cfg.loop_cfg.fallback_cooldown_iters.map(|n| n.to_string())
+        }
         _ => None,
     }
 }
@@ -441,6 +468,36 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
             };
         }
+        "loop.fallback_runtime" | "loop.fallback-runtime" => {
+            if value.is_empty() {
+                cfg.loop_cfg.fallback_runtime = None;
+            } else {
+                if !crate::runtime::RuntimeKind::VARIANTS.contains(&value) {
+                    return Err(HewError::MissingFlag {
+                        flag: format!(
+                            "value (expected one of {}, got `{value}`)",
+                            crate::runtime::RuntimeKind::VARIANTS.join("|")
+                        ),
+                    });
+                }
+                cfg.loop_cfg.fallback_runtime = Some(value.to_string());
+            }
+        }
+        "loop.fallback_cooldown_iters" | "loop.fallback-cooldown-iters" => {
+            if value.is_empty() {
+                cfg.loop_cfg.fallback_cooldown_iters = None;
+            } else {
+                let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                    flag: format!("value (expected positive integer, got `{value}`)"),
+                })?;
+                if n == 0 {
+                    return Err(HewError::MissingFlag {
+                        flag: "value (loop.fallback_cooldown_iters must be >= 1)".to_string(),
+                    });
+                }
+                cfg.loop_cfg.fallback_cooldown_iters = Some(n);
+            }
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -472,6 +529,8 @@ pub fn keys() -> &'static [&'static str] {
         "compact.target_clusters_cap",
         "compact.allow_recompact_default",
         "compact.exempt",
+        "loop.fallback_runtime",
+        "loop.fallback_cooldown_iters",
     ]
 }
 
@@ -562,6 +621,8 @@ mod tests {
                 "compact.granularity_default" => "fine",
                 "compact.target_clusters_cap" => "8",
                 "compact.exempt" => "STATUS:custom,SOMETHING:else",
+                "loop.fallback_runtime" => "codex",
+                "loop.fallback_cooldown_iters" => "5",
                 k if k.starts_with("optional-skills.") => "yes",
                 _ => "true",
             };
@@ -839,6 +900,55 @@ security = false
         set(&mut cfg, "compact.allow-recompact-default", "true").unwrap();
         assert!(cfg.compact.allow_recompact_default);
         assert!(set(&mut cfg, "compact.dry_run_default", "later").is_err());
+    }
+
+    // ──────── loop.* ────────
+
+    #[test]
+    fn loop_defaults_are_off() {
+        let cfg = Config::default();
+        assert!(cfg.loop_cfg.fallback_runtime.is_none());
+        assert!(cfg.loop_cfg.fallback_cooldown_iters.is_none());
+        assert_eq!(FALLBACK_COOLDOWN_ITERS_DEFAULT, 3);
+    }
+
+    #[test]
+    fn loop_fallback_runtime_validates_runtime_kind() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.fallback_runtime", "codex").unwrap();
+        assert_eq!(cfg.loop_cfg.fallback_runtime.as_deref(), Some("codex"));
+        set(&mut cfg, "loop.fallback-runtime", "claude").unwrap();
+        assert_eq!(cfg.loop_cfg.fallback_runtime.as_deref(), Some("claude"));
+        assert!(set(&mut cfg, "loop.fallback_runtime", "cursor").is_err());
+        // Empty clears.
+        set(&mut cfg, "loop.fallback_runtime", "").unwrap();
+        assert!(cfg.loop_cfg.fallback_runtime.is_none());
+    }
+
+    #[test]
+    fn loop_fallback_cooldown_iters_rejects_zero() {
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.fallback_cooldown_iters", "5").unwrap();
+        assert_eq!(cfg.loop_cfg.fallback_cooldown_iters, Some(5));
+        assert!(set(&mut cfg, "loop.fallback_cooldown_iters", "0").is_err());
+        assert!(set(&mut cfg, "loop.fallback_cooldown_iters", "abc").is_err());
+        // Empty clears (falls back to default at use-site).
+        set(&mut cfg, "loop.fallback_cooldown_iters", "").unwrap();
+        assert!(cfg.loop_cfg.fallback_cooldown_iters.is_none());
+    }
+
+    #[test]
+    fn loop_fallback_runtime_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.fallback_runtime", "codex").unwrap();
+        set(&mut cfg, "loop.fallback_cooldown_iters", "7").unwrap();
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.loop_cfg.fallback_runtime.as_deref(), Some("codex"));
+        assert_eq!(loaded.loop_cfg.fallback_cooldown_iters, Some(7));
     }
 
     #[test]

@@ -306,6 +306,8 @@ mod tests {
             tool_calls: Vec::new(),
             stderr_tail: None,
             symbols_touched,
+            runtime_used: None,
+            cooldown_engaged: false,
         }
     }
 
