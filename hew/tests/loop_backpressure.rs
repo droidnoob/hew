@@ -21,7 +21,9 @@ use hew_core::prompt::AssembledPrompt;
 use hew_core::runner::TokenSpend;
 use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOpts, SpawnOutcome};
 
-use hew::commands::loop_cmd::{Args, StaticGateRunner, Worker, run_loop_with, run_worker_loop};
+use hew::commands::loop_cmd::{
+    Args, GateRunner, StaticGateRunner, Worker, run_loop_with, run_worker_loop,
+};
 use hew_core::runtime::FallbackConfig;
 
 /// Spawner that creates a second commit in `repo_dir` to simulate the
@@ -862,6 +864,143 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
     // (iters 2, 3, 4).
     assert_eq!(*primary.calls.borrow(), 2, "primary call count");
     assert_eq!(*fallback_spawner.calls.borrow(), 3, "fallback call count");
+}
+
+/// Gate runner that captures every `working_dir` it is invoked with.
+/// Used to assert per-worker backpressure scoping for hew-j4x.
+#[derive(Debug, Default)]
+struct RecordingGateRunner {
+    calls: std::sync::Mutex<Vec<PathBuf>>,
+    check: GateCheck,
+}
+
+impl RecordingGateRunner {
+    fn passing() -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            check: GateCheck { tests_passed: true, lint_passed: true, ..Default::default() },
+        }
+    }
+}
+
+impl GateRunner for RecordingGateRunner {
+    fn run_gate(&self, working_dir: &Path) -> GateCheck {
+        self.calls.lock().unwrap().push(working_dir.to_path_buf());
+        self.check.clone()
+    }
+}
+
+/// hew-j4x: `run_worker_loop` must invoke the backpressure gate against
+/// `worker.worktree_dir`, not the dispatcher's ambient project root.
+/// A future per-worker dispatcher (hew-9m5) trusts this contract to keep
+/// parallel workers' test/lint runs scoped to disjoint worktrees.
+#[test]
+fn gate_is_called_with_worker_worktree_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    std::fs::write(worktree.join("README.md"), b"seed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: worktree.clone() };
+    let gate = RecordingGateRunner::passing();
+
+    let args = args_one_iter();
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        log_dir: log_dir.clone(),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    let calls = gate.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly one gate invocation per iter, got {calls:?}");
+    assert_eq!(
+        calls[0], worktree,
+        "gate must run against worker.worktree_dir, not the dispatcher's ambient cwd",
+    );
+}
+
+/// hew-j4x: the single-worker fast path must keep its prior behavior —
+/// `run_loop_with` constructs a `Worker` with `worktree_dir =
+/// project_root`, so the gate is invoked at the project root just like
+/// before the per-worker plumbing landed.
+#[test]
+fn gate_falls_back_to_project_root_when_unspecified() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: repo.clone() };
+    let gate = RecordingGateRunner::passing();
+
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
+
+    let calls = gate.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], repo, "single-worker path should pass project_root to the gate");
 }
 
 /// `run_worker_loop` must target `worker.worktree_dir` for every git

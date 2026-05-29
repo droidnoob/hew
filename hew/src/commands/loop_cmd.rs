@@ -40,8 +40,14 @@ use hew_core::{Ctx, allowed_tools, skills};
 /// Runs the per-iter test+lint commands. Production wires the cargo
 /// invocations; tests inject a [`StaticGateRunner`] with a canned
 /// `GateCheck`.
+///
+/// `working_dir` is the directory the test/lint subprocesses run in.
+/// For the single-worker loop this is the project root; for per-worker
+/// parallel runs (hew-6az) the dispatcher passes the worker's worktree
+/// so each worker's gate checks its own commits in isolation — see
+/// hew-j4x.
 pub trait GateRunner {
-    fn run_gate(&self, project_root: &Path) -> GateCheck;
+    fn run_gate(&self, working_dir: &Path) -> GateCheck;
 }
 
 /// Production gate runner. Reads `(test, lint)` from project-authored
@@ -62,17 +68,17 @@ pub struct AutoGateRunner;
 pub type CargoGateRunner = AutoGateRunner;
 
 impl GateRunner for AutoGateRunner {
-    fn run_gate(&self, project_root: &Path) -> GateCheck {
-        let spec = hew_core::gate::detect(project_root);
+    fn run_gate(&self, working_dir: &Path) -> GateCheck {
+        let spec = hew_core::gate::detect(working_dir);
         if !spec.has_any() {
             eprintln!(
                 "hew loop: no gate signals (Makefile/justfile/package.json) at {} — gate skipped",
-                project_root.display()
+                working_dir.display()
             );
             return GateCheck { tests_passed: true, lint_passed: true, ..Default::default() };
         }
-        let tests_passed = run_gate_step("test", &spec.test_cmd, project_root);
-        let lint_passed = run_gate_step("lint", &spec.lint_cmd, project_root);
+        let tests_passed = run_gate_step("test", &spec.test_cmd, working_dir);
+        let lint_passed = run_gate_step("lint", &spec.lint_cmd, working_dir);
         GateCheck { tests_passed, lint_passed, ..Default::default() }
     }
 }
@@ -82,12 +88,12 @@ impl GateRunner for AutoGateRunner {
 /// the binary is treated as skip-pass with a breadcrumb so a missing
 /// optional toolchain (`ruff`, `pytest`) doesn't trap the loop. Any
 /// other spawn error or non-zero exit fails the step.
-fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
+fn run_gate_step(label: &str, cmd: &[String], working_dir: &Path) -> bool {
     if cmd.is_empty() {
         return true;
     }
     let mut command = std::process::Command::new(&cmd[0]);
-    command.args(&cmd[1..]).current_dir(project_root);
+    command.args(&cmd[1..]).current_dir(working_dir);
     match command.status() {
         Ok(s) => s.success(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -106,7 +112,7 @@ fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
 pub struct StaticGateRunner(pub GateCheck);
 
 impl GateRunner for StaticGateRunner {
-    fn run_gate(&self, _project_root: &Path) -> GateCheck {
+    fn run_gate(&self, _working_dir: &Path) -> GateCheck {
         self.0.clone()
     }
 }
