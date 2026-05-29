@@ -1276,6 +1276,33 @@ mod tests {
     }
 
     #[test]
+    fn install_multi_runtime_writes_both_layouts() {
+        // hew-zue / hew-fxp: the init loop calls `install` once per chosen
+        // runtime in sequence. This pins the low-level invariant that
+        // installs into the same root for two different runtimes coexist
+        // (no shared-file clash) and each produces its expected layout.
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_plan = install(Runtime::Claude, tmp.path()).expect("claude install");
+        let codex_plan = install(Runtime::Codex, tmp.path()).expect("codex install");
+
+        // Claude layout.
+        let claude_hew = tmp.path().join(".claude").join("skills").join("hew");
+        assert!(claude_hew.join("SKILL.md").exists());
+        assert!(tmp.path().join(".claude").join("settings.json").exists());
+
+        // Codex layout.
+        assert!(tmp.path().join(".codex").join("agents").join("hew-execute.toml").exists());
+        assert!(tmp.path().join("AGENTS.md").exists());
+
+        // Both plans report their own runtime + non-empty writes; they
+        // share the install root but report distinct write sets.
+        assert_eq!(claude_plan.runtime, Runtime::Claude);
+        assert_eq!(codex_plan.runtime, Runtime::Codex);
+        assert!(!claude_plan.written.is_empty());
+        assert!(!codex_plan.written.is_empty());
+    }
+
+    #[test]
     fn install_codex_writes_skill_md_per_skill() {
         let tmp = tempfile::tempdir().unwrap();
         install(Runtime::Codex, tmp.path()).expect("install");
