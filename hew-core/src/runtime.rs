@@ -265,6 +265,50 @@ impl RuntimeSpawner for ClaudeSpawner {
     }
 }
 
+/// Resolved fallback-runtime knob fed into the loop. CLI flags take
+/// precedence over `loop.fallback_runtime` / `loop.fallback_cooldown_iters`
+/// config; an unset runtime field disables fallback entirely (today's
+/// behavior). Cooldown count is always positive — falls back to
+/// [`crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT`] when unspecified.
+/// Per `DECISION:loop-fallback-policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FallbackConfig {
+    pub runtime: Option<RuntimeKind>,
+    pub cooldown_iters: u32,
+}
+
+impl FallbackConfig {
+    /// Resolve from a CLI override (already parsed to [`RuntimeKind`])
+    /// plus iters override, layered onto the persisted config strings.
+    /// CLI wins; config is fallback. An empty or `None` CLI runtime
+    /// and missing config means no fallback. The cooldown is clamped
+    /// to at least 1 and defaults to
+    /// [`crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT`].
+    pub fn resolve(
+        cli_runtime: Option<RuntimeKind>,
+        cli_cooldown: Option<u32>,
+        cfg_runtime: Option<&str>,
+        cfg_cooldown: Option<u32>,
+    ) -> std::result::Result<Self, String> {
+        let runtime = match (cli_runtime, cfg_runtime) {
+            (Some(r), _) => Some(r),
+            (None, Some(s)) if !s.is_empty() => Some(s.parse::<RuntimeKind>()?),
+            _ => None,
+        };
+        let cooldown = cli_cooldown
+            .or(cfg_cooldown)
+            .unwrap_or(crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT)
+            .max(1);
+        Ok(Self { runtime, cooldown_iters: cooldown })
+    }
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self { runtime: None, cooldown_iters: crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT }
+    }
+}
+
 /// Environment variable that overrides the `codex` binary location.
 /// Used by tests and for pinning to a specific install. Mirrors
 /// [`CLAUDE_BIN_ENV`].
@@ -1091,6 +1135,56 @@ mod tests {
                 None => std::env::remove_var(CODEX_BIN_ENV),
             }
         }
+    }
+
+    #[test]
+    fn fallback_config_default_no_runtime_default_cooldown() {
+        let fc = FallbackConfig::default();
+        assert!(fc.runtime.is_none());
+        assert_eq!(fc.cooldown_iters, crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT);
+    }
+
+    #[test]
+    fn fallback_config_resolve_cli_overrides_config() {
+        let fc =
+            FallbackConfig::resolve(Some(RuntimeKind::Codex), Some(5), Some("claude"), Some(11))
+                .unwrap();
+        assert_eq!(fc.runtime, Some(RuntimeKind::Codex));
+        assert_eq!(fc.cooldown_iters, 5);
+    }
+
+    #[test]
+    fn fallback_config_resolve_config_when_cli_missing() {
+        let fc = FallbackConfig::resolve(None, None, Some("codex"), Some(4)).unwrap();
+        assert_eq!(fc.runtime, Some(RuntimeKind::Codex));
+        assert_eq!(fc.cooldown_iters, 4);
+    }
+
+    #[test]
+    fn fallback_config_resolve_none_when_neither_set() {
+        let fc = FallbackConfig::resolve(None, None, None, None).unwrap();
+        assert!(fc.runtime.is_none());
+        assert_eq!(fc.cooldown_iters, crate::config::FALLBACK_COOLDOWN_ITERS_DEFAULT);
+    }
+
+    #[test]
+    fn fallback_config_resolve_empty_config_string_is_none() {
+        // Defensive: a config layer that hands back Some("") shouldn't
+        // parse — treat it the same as no fallback.
+        let fc = FallbackConfig::resolve(None, None, Some(""), None).unwrap();
+        assert!(fc.runtime.is_none());
+    }
+
+    #[test]
+    fn fallback_config_resolve_rejects_bogus_config_runtime() {
+        let err = FallbackConfig::resolve(None, None, Some("cursor"), None).unwrap_err();
+        assert!(err.contains("cursor"));
+    }
+
+    #[test]
+    fn fallback_config_resolve_zero_cooldown_clamps_to_one() {
+        let fc = FallbackConfig::resolve(Some(RuntimeKind::Codex), Some(0), None, None).unwrap();
+        assert_eq!(fc.cooldown_iters, 1);
     }
 
     #[test]

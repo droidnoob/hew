@@ -29,7 +29,7 @@ use hew_core::loop_log::{
 };
 use hew_core::prompt;
 use hew_core::runner::{Iter, IterOutcome, Run, RunConfig};
-use hew_core::runtime::{ClaudeSpawner, RuntimeKind, RuntimeSpawner};
+use hew_core::runtime::{ClaudeSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner};
 use hew_core::stop_signals::Collector;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
@@ -313,10 +313,57 @@ pub struct Args {
     /// `hew-execute` — the methodology body the loop drives.
     #[arg(long, default_value = "hew-execute")]
     pub skill: String,
+
+    /// Fallback runtime to switch to when the primary trips a runtime
+    /// error (auth / rate-limit / server). When set, the loop runs the
+    /// fallback for `--fallback-cooldown-iters` iters before retrying
+    /// the primary. Overrides `loop.fallback_runtime` config.
+    /// Example: `hew loop run --fallback-runtime codex`.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
+    )]
+    pub fallback_runtime: Option<String>,
+
+    /// Iters the loop stays on the fallback before retrying the
+    /// primary. Default 3 (DECISION:loop-fallback-policy). Overrides
+    /// `loop.fallback_cooldown_iters` config. Must be >= 1.
+    /// Example: `hew loop run --fallback-runtime codex --fallback-cooldown-iters 5`.
+    #[arg(long)]
+    pub fallback_cooldown_iters: Option<u32>,
 }
 
 pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     let kind: RuntimeKind = args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
+
+    // Resolve fallback config: CLI > config > defaults. Surfaced into
+    // the logs only when set; today the loop runner doesn't consume it
+    // yet (hew-lc2 wires the cooldown state machine). Reading it here
+    // keeps the CLI/config surfaces honest — bad inputs fail at parse,
+    // not after the loop starts. The unused-binding warning is gone
+    // because we use the value below.
+    let cfg = hew_core::config::load().map_err(|e| miette::miette!("load hew config: {e}"))?;
+    let cli_fallback = args
+        .fallback_runtime
+        .as_deref()
+        .map(|s| s.parse::<RuntimeKind>())
+        .transpose()
+        .map_err(|e| miette::miette!("{e}"))?;
+    let fallback = FallbackConfig::resolve(
+        cli_fallback,
+        args.fallback_cooldown_iters,
+        cfg.loop_cfg.fallback_runtime.as_deref(),
+        cfg.loop_cfg.fallback_cooldown_iters,
+    )
+    .map_err(|e| miette::miette!("{e}"))?;
+    if fallback.runtime.is_some() {
+        tracing::debug!(
+            primary = kind.as_str(),
+            fallback = ?fallback.runtime.map(|r| r.as_str()),
+            cooldown_iters = fallback.cooldown_iters,
+            "loop: fallback resolved (runner wiring in hew-lc2)"
+        );
+    }
 
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
