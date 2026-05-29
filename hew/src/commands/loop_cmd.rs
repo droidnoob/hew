@@ -1333,6 +1333,14 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
         return Err(miette::miette!("run-dir not found: {}", dir.display()));
     }
 
+    // Parallel runs ship a top-level manifest.json. When present, render
+    // the per-worker breakdown first, then fall through to the regular
+    // aggregate block built from the union of all workers' iter logs.
+    let manifest_path = hew_core::loop_log::manifest_path(&dir);
+    if manifest_path.exists() {
+        return run_summary_parallel(ctx, &dir, &manifest_path);
+    }
+
     // Load the persisted run header for id + stop reason.
     let rl_body = std::fs::read_to_string(run_log_path(&dir, None))
         .map_err(|e| miette::miette!("read run.json: {e}"))?;
@@ -1366,6 +1374,77 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
     };
 
     print_summary(ctx, &run, &iter_logs, &dir);
+    Ok(())
+}
+
+fn collect_worker_iter_logs(run_dir: &Path, worker_n: u32) -> Vec<IterLog> {
+    let dir = hew_core::loop_log::worker_dir(run_dir, worker_n);
+    if !dir.exists() {
+        return Vec::new();
+    }
+    collect_iter_logs(&dir).unwrap_or_default()
+}
+
+fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::Result<()> {
+    let body = std::fs::read_to_string(manifest_path)
+        .map_err(|e| miette::miette!("read manifest.json: {e}"))?;
+    let manifest: hew_core::loop_log::Manifest =
+        serde_json::from_str(&body).map_err(|e| miette::miette!("parse manifest.json: {e}"))?;
+
+    // Build per-worker slices for the breakdown table.
+    let mut slices = Vec::with_capacity(manifest.workers.len());
+    let mut aggregated_iters: Vec<IterLog> = Vec::new();
+    for row in &manifest.workers {
+        let iter_logs = collect_worker_iter_logs(dir, row.id);
+        slices.push(hew_core::loop_summary::worker_slice(row, &iter_logs));
+        aggregated_iters.extend(iter_logs);
+    }
+
+    if !ctx.quiet {
+        let colorize = std::env::var_os("NO_COLOR").is_none();
+        print!("{}", hew_core::loop_summary::render_parallel_breakdown(&slices, colorize));
+    }
+
+    // Aggregate block: synthesize a Run covering the whole parallel
+    // window so the existing summary renderer reports total tokens,
+    // outcomes, and cache stats across all workers.
+    aggregated_iters.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.number.cmp(&b.number)));
+    let stop_reason = manifest
+        .workers
+        .iter()
+        .find_map(|w| w.stop_reason.as_deref())
+        .and_then(hew_core::runner::StopReason::from_label);
+    let mut iters: Vec<Iter> = aggregated_iters
+        .iter()
+        .map(|l| Iter {
+            number: l.number,
+            task_id: l.task_id.clone(),
+            started_at: l.started_at.clone(),
+            ended_at: l.ended_at.clone(),
+            outcome: None,
+            cost: l.cost,
+            decisions: l.decisions.clone(),
+            deferred: l.deferred.clone(),
+            stderr_tail: l.stderr_tail.clone(),
+        })
+        .collect();
+    // Honest wall-clock window: manifest spans the whole parallel run
+    // even when individual workers started later or finished earlier.
+    if let Some(first) = iters.first_mut() {
+        first.started_at = manifest.started_at.clone();
+    }
+    if let Some(last) = iters.last_mut() {
+        last.ended_at = Some(manifest.completed_at.clone());
+    }
+    let run = Run {
+        id: manifest.run_id.clone(),
+        started_at: manifest.started_at.clone(),
+        config: RunConfig::default(),
+        iters,
+        stop_reason,
+    };
+
+    print_summary(ctx, &run, &aggregated_iters, dir);
     Ok(())
 }
 

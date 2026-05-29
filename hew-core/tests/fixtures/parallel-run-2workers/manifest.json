@@ -1,0 +1,24 @@
+{
+  "run_id": "loop-20260530T120000Z-fixture",
+  "jobs": 2,
+  "started_at": "2026-05-30T12:00:00Z",
+  "completed_at": "2026-05-30T12:05:00Z",
+  "workers": [
+    {
+      "id": 0,
+      "branch": "loop/loop-20260530T120000Z-fixture/w0",
+      "log_subdir": "worker-0",
+      "iter_count": 3,
+      "cumulative_tokens": 12000,
+      "stop_reason": "ready_empty"
+    },
+    {
+      "id": 1,
+      "branch": "loop/loop-20260530T120000Z-fixture/w1",
+      "log_subdir": "worker-1",
+      "iter_count": 2,
+      "cumulative_tokens": 8000,
+      "stop_reason": "ready_empty"
+    }
+  ]
+}
