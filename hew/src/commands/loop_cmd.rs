@@ -686,6 +686,12 @@ fn run_loop_parallel(
         } else {
             (project_root.to_path_buf(), String::new())
         };
+        // Materialize `<run-dir>/worker-<n>/` so the per-worker iter
+        // logs land somewhere — `iter_log_path` composes the path but
+        // doesn't mkdir, and the worker loop's `write_json_atomic`
+        // would otherwise ENOENT on first iter.
+        hew_core::loop_log::ensure_worker_dir(&dir, n)
+            .map_err(|e| miette::miette!("ensure worker-{n} log dir: {e}"))?;
         workers.push(Worker {
             id: n,
             worktree_dir: wt_dir,
