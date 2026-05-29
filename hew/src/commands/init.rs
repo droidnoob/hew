@@ -183,7 +183,8 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     crate::ui::banner::render(ctx);
 
-    let runtime = resolve_runtime(ctx, &args, &project_root)?;
+    let detected = install::detect_runtimes(&project_root);
+    let runtimes = resolve_runtimes(&args, detected, ctx.interactive, interactive_runtime_pick)?;
     let install_root = resolve_install_root(args.scope, &project_root)?;
 
     let bd = ensure_bd(ctx)?;
@@ -224,20 +225,28 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         cfg.review.after_epic = advanced.review_after_epic;
     });
 
-    let plan = install::install(runtime, &install_root)?;
+    let mut plans = Vec::with_capacity(runtimes.len());
+    for rt in &runtimes {
+        let plan = install::install(*rt, &install_root)?;
+        if ctx.quiet {
+            // Scripts get the one-liner per runtime; panel is for humans only.
+            println!(
+                "hew installed for {} ({:?} scope) → {} files under {}",
+                plan.runtime.as_str(),
+                args.scope,
+                plan.written.len(),
+                plan.root.display()
+            );
+        } else {
+            // Transitional per-runtime banner. hew-zue will format this richer.
+            println!("─ {}: {} files written", plan.runtime.as_str(), plan.written.len());
+        }
+        plans.push(plan);
+    }
 
-    if ctx.quiet {
-        // Scripts get the one-liner; panel is for humans only.
-        println!(
-            "hew installed for {} ({:?} scope) → {} files under {}",
-            plan.runtime.as_str(),
-            args.scope,
-            plan.written.len(),
-            plan.root.display()
-        );
-    } else {
+    if !ctx.quiet {
         print_summary_panel(
-            &plan,
+            &plans,
             args.scope,
             git_track,
             project_type,
@@ -252,7 +261,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
 #[allow(clippy::too_many_arguments)] // IV.13 refactor will collapse this into a FlowChoices struct.
 fn print_summary_panel(
-    plan: &install::InstallPlan,
+    plans: &[install::InstallPlan],
     scope: Scope,
     git_track: bool,
     project_type: ProjectTypeArg,
@@ -262,10 +271,13 @@ fn print_summary_panel(
     advanced: &AdvancedKnobs,
 ) {
     let bar = "──────────────────────────────";
+    let runtimes_str = plans.iter().map(|p| p.runtime.as_str()).collect::<Vec<_>>().join(", ");
+    let total_files: usize = plans.iter().map(|p| p.written.len()).sum();
+    let root_display = plans.first().map(|p| p.root.display().to_string()).unwrap_or_default();
     println!();
     println!("Setup complete");
     println!("{bar}");
-    println!("  runtime           {}", plan.runtime.as_str());
+    println!("  runtime           {runtimes_str}");
     println!(
         "  scope             {}",
         match scope {
@@ -273,8 +285,8 @@ fn print_summary_panel(
             Scope::Global => "global",
         }
     );
-    println!("  install root      {}", plan.root.display());
-    println!("  files written     {}", plan.written.len());
+    println!("  install root      {root_display}");
+    println!("  files written     {total_files}");
     println!(
         "  git track         {}",
         if git_track { "yes (.beads/ tracked)" } else { "no (.beads/ ignored)" }
@@ -489,57 +501,60 @@ fn resolve_project_type(ctx: &Ctx, args: &Args, project_root: &std::path::Path) 
     }
 }
 
-fn resolve_runtime(
-    ctx: &Ctx,
+/// Decide which runtimes to install for. Pure: no I/O. The interactive
+/// picker (if needed) is injected by the caller. Six-cell matrix over
+/// {empty,one,many} args × {interactive,non-interactive}:
+///
+/// - args non-empty → map RuntimeArg→Runtime, preserve order, dedupe.
+/// - args empty + interactive → invoke picker with detected as pre-checked.
+/// - args empty + non-interactive + zero detected → `MissingFlag`.
+/// - args empty + non-interactive + ≥1 detected → return all detected
+///   (refresh-all; was an error today, see hew-a41 / DECISION).
+fn resolve_runtimes<F>(
     args: &Args,
-    project_root: &std::path::Path,
-) -> miette::Result<Runtime> {
-    // Transitional: this task (hew-0tz) only widens the Args type. The
-    // multi-runtime install loop lands in hew-3mo/hew-zue; for now we keep
-    // single-runtime semantics by picking the first explicit value.
-    if let Some(r) = args.runtime.first().copied() {
-        return Ok(r.into());
-    }
-    let detected = install::detect_runtimes(project_root);
-
-    match detected.as_slice() {
-        [single] => Ok(*single),
-        [] => {
-            if !ctx.interactive {
-                return Err(HewError::MissingFlag { flag: "runtime".into() }.into());
+    detected: Vec<Runtime>,
+    interactive: bool,
+    picker: F,
+) -> miette::Result<Vec<Runtime>>
+where
+    F: FnOnce(&[Runtime]) -> miette::Result<Vec<Runtime>>,
+{
+    if !args.runtime.is_empty() {
+        let mut out: Vec<Runtime> = Vec::with_capacity(args.runtime.len());
+        for r in &args.runtime {
+            let rt: Runtime = (*r).into();
+            if !out.contains(&rt) {
+                out.push(rt);
             }
-            // Interactive path: ask. inquire blocks; non_interactive guard above
-            // means we only get here with a real human.
-            interactive_runtime_pick()
         }
-        many => {
-            if !ctx.interactive {
-                return Err(HewError::MissingFlag {
-                    flag: format!(
-                        "runtime (multiple detected: {})",
-                        many.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
-                    ),
-                }
-                .into());
-            }
-            interactive_runtime_pick()
-        }
+        return Ok(out);
     }
+    if interactive {
+        return picker(&detected);
+    }
+    if detected.is_empty() {
+        return Err(HewError::MissingFlag { flag: "runtime".into() }.into());
+    }
+    Ok(detected)
 }
 
-fn interactive_runtime_pick() -> miette::Result<Runtime> {
+/// Transitional single-select picker; hew-jdm replaces this with a
+/// MultiSelect that pre-checks `_pre_checked`. For now the parameter is
+/// accepted to lock the signature in place.
+fn interactive_runtime_pick(_pre_checked: &[Runtime]) -> miette::Result<Vec<Runtime>> {
     use inquire::Select;
     let opts = vec!["claude", "cursor", "codex", "windsurf", "generic"];
     let pick = Select::new("Which agent runtime?", opts)
         .prompt()
         .map_err(|e| miette::miette!("runtime pick: {e}"))?;
-    Ok(match pick {
+    let rt = match pick {
         "claude" => Runtime::Claude,
         "cursor" => Runtime::Cursor,
         "codex" => Runtime::Codex,
         "windsurf" => Runtime::Windsurf,
         _ => Runtime::Generic,
-    })
+    };
+    Ok(vec![rt])
 }
 
 fn resolve_install_root(scope: Scope, project_root: &std::path::Path) -> miette::Result<PathBuf> {
@@ -833,6 +848,94 @@ mod tests {
     fn runtime_absent_yields_empty_vec() {
         let args = parse(&[]).expect("parse");
         assert!(args.runtime.is_empty());
+    }
+
+    #[test]
+    fn runtime_csv_with_duplicates_is_deduped_in_resolver() {
+        let args = parse(&["--runtime=claude,claude,codex"]).expect("parse");
+        let panic_picker = |_: &[Runtime]| -> miette::Result<Vec<Runtime>> {
+            panic!("picker must not be called when args non-empty")
+        };
+        let out = resolve_runtimes(&args, vec![], false, panic_picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Claude, Runtime::Codex]);
+    }
+
+    // --- six-cell matrix: {empty,one,many} args × {interactive,non-interactive} ---
+
+    fn no_picker(_: &[Runtime]) -> miette::Result<Vec<Runtime>> {
+        panic!("picker called but should not be in this cell")
+    }
+
+    #[test]
+    fn resolve_one_arg_non_interactive() {
+        let args = parse(&["--runtime=claude"]).expect("parse");
+        let out = resolve_runtimes(&args, vec![], false, no_picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Claude]);
+    }
+
+    #[test]
+    fn resolve_one_arg_interactive_skips_picker() {
+        // Non-empty args short-circuits the picker even in interactive mode.
+        let args = parse(&["--runtime=codex"]).expect("parse");
+        let out = resolve_runtimes(&args, vec![Runtime::Claude], true, no_picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Codex]);
+    }
+
+    #[test]
+    fn resolve_many_args_non_interactive_preserves_order() {
+        let args = parse(&["--runtime=codex,claude,windsurf"]).expect("parse");
+        let out = resolve_runtimes(&args, vec![], false, no_picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Codex, Runtime::Claude, Runtime::Windsurf]);
+    }
+
+    #[test]
+    fn resolve_many_args_interactive_skips_picker() {
+        let args = parse(&["--runtime=codex,claude"]).expect("parse");
+        let out =
+            resolve_runtimes(&args, vec![Runtime::Windsurf], true, no_picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Codex, Runtime::Claude]);
+    }
+
+    #[test]
+    fn resolve_empty_args_non_interactive_zero_detected_errors() {
+        let args = parse(&[]).expect("parse");
+        let err = resolve_runtimes(&args, vec![], false, no_picker).expect_err("should error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("runtime"), "expected MissingFlag(runtime), got: {msg}");
+    }
+
+    #[test]
+    fn resolve_empty_args_non_interactive_with_detected_refreshes_all() {
+        // hew-a41: was an error today; now returns all detected.
+        let args = parse(&[]).expect("parse");
+        let detected = vec![Runtime::Claude, Runtime::Codex];
+        let out = resolve_runtimes(&args, detected.clone(), false, no_picker).expect("resolve");
+        assert_eq!(out, detected);
+    }
+
+    #[test]
+    fn resolve_empty_args_interactive_delegates_to_picker_with_detected() {
+        let args = parse(&[]).expect("parse");
+        let detected = vec![Runtime::Claude, Runtime::Codex];
+        let detected_seen = std::cell::RefCell::new(Vec::<Runtime>::new());
+        let picker = |pre: &[Runtime]| {
+            *detected_seen.borrow_mut() = pre.to_vec();
+            Ok(vec![Runtime::Windsurf])
+        };
+        let out = resolve_runtimes(&args, detected.clone(), true, picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Windsurf]);
+        assert_eq!(*detected_seen.borrow(), detected);
+    }
+
+    #[test]
+    fn resolve_empty_args_interactive_zero_detected_still_delegates() {
+        let args = parse(&[]).expect("parse");
+        let picker = |pre: &[Runtime]| {
+            assert!(pre.is_empty());
+            Ok(vec![Runtime::Generic])
+        };
+        let out = resolve_runtimes(&args, vec![], true, picker).expect("resolve");
+        assert_eq!(out, vec![Runtime::Generic]);
     }
 
     #[test]
