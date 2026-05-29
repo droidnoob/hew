@@ -163,6 +163,22 @@ impl RealGit {
     }
 }
 
+/// `git -C <worktree> reset --hard <sha>` — scoped rollback for one
+/// worktree only. The parallel loop calls this so a failing worker's
+/// gate-fail revert never touches sibling worktrees.
+pub fn reset_hard_in(git: &dyn GitClient, worktree: &std::path::Path, sha: &str) -> Result<()> {
+    let wt_os = worktree.as_os_str();
+    let sha_os = OsString::from(sha);
+    git.run_raw(&[
+        OsStr::new("-C"),
+        wt_os,
+        OsStr::new("reset"),
+        OsStr::new("--hard"),
+        sha_os.as_os_str(),
+    ])?;
+    Ok(())
+}
+
 impl GitClient for RealGit {
     fn current_branch(&self) -> Result<Option<String>> {
         // --quiet so a detached HEAD returns empty rather than printing to stderr.
@@ -266,6 +282,34 @@ mod tests {
         git.checkout_new_branch("feat/auth", Some("origin/main")).unwrap();
         let recorded = fs::read_to_string(&log).unwrap();
         assert_eq!(recorded.trim(), "checkout -b feat/auth origin/main");
+    }
+
+    #[test]
+    fn reset_hard_in_scopes_via_dash_capital_c() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("args.log");
+        write_stub(tmp.path(), &format!("#!/bin/sh\necho \"$@\" > {}\nexit 0\n", log.display()));
+        let git = RealGit::at(tmp.path().join("git"));
+        let wt = tmp.path().join("worker-0");
+        std::fs::create_dir_all(&wt).unwrap();
+        reset_hard_in(&git, &wt, "deadbeef").unwrap();
+        let recorded = fs::read_to_string(&log).unwrap();
+        assert_eq!(recorded.trim(), format!("-C {} reset --hard deadbeef", wt.display()));
+    }
+
+    #[test]
+    fn reset_hard_in_propagates_git_nonzero_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_stub(tmp.path(), "#!/bin/sh\necho 'fatal: ambiguous argument' >&2\nexit 128\n");
+        let git = RealGit::at(tmp.path().join("git"));
+        let err = reset_hard_in(&git, tmp.path(), "nonsense").expect_err("must error");
+        match err {
+            HewError::GitNonZero { code, stderr } => {
+                assert_eq!(code, 128);
+                assert!(stderr.contains("ambiguous"));
+            }
+            other => panic!("expected GitNonZero, got {other:?}"),
+        }
     }
 
     #[test]

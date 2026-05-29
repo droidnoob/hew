@@ -177,21 +177,15 @@ fn compute_iter_symbols(
     Vec::new()
 }
 
-/// `git reset --hard <sha>` in `project_root`. Used to revert an iter's
-/// commits when the backpressure gate fails.
-fn git_reset_hard(project_root: &Path, sha: &str) -> miette::Result<()> {
-    let out = std::process::Command::new("git")
-        .args(["reset", "--hard", sha])
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| miette::miette!("git reset: {e}"))?;
-    if !out.status.success() {
-        return Err(miette::miette!(
-            "git reset --hard {sha} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
+/// `git -C <worktree_dir> reset --hard <sha>` — scoped rollback for one
+/// worker's worktree only. Per DECISION:loop-parallel-overlap-policy the
+/// parallel loop's gate-fail revert must never touch sibling worktrees;
+/// delegating through [`hew_core::git::reset_hard_in`] keeps the scoping
+/// in one place and unit-tested.
+fn git_reset_hard(worktree_dir: &Path, sha: &str) -> miette::Result<()> {
+    let git = hew_core::git::RealGit::discover().map_err(|e| miette::miette!("git: {e}"))?;
+    hew_core::git::reset_hard_in(&git, worktree_dir, sha)
+        .map_err(|e| miette::miette!("git reset --hard {sha} failed: {e}"))
 }
 
 #[derive(Debug, ClapArgs)]

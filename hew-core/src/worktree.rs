@@ -62,11 +62,40 @@ pub fn worker_path(root: &Path, run_id: &str, worker_n: u32) -> PathBuf {
     root.join(run_id).join(worker_n.to_string())
 }
 
+/// Check whether `branch` already exists in `project_root`. Runs
+/// `git -C <project_root> rev-parse --verify --quiet refs/heads/<branch>`
+/// and maps the standard nonzero-exit-on-missing to `Ok(false)`. Any
+/// other failure surfaces as `Err`.
+pub fn branch_exists(git: &dyn GitClient, project_root: &Path, branch: &str) -> Result<bool> {
+    let refspec = format!("refs/heads/{branch}");
+    let project_root_s = project_root.as_os_str();
+    let refspec_os = OsStr::new(&refspec);
+    match git.run_raw(&[
+        OsStr::new("-C"),
+        project_root_s,
+        OsStr::new("rev-parse"),
+        OsStr::new("--verify"),
+        OsStr::new("--quiet"),
+        refspec_os,
+    ]) {
+        Ok(_) => Ok(true),
+        // `rev-parse --verify --quiet` on a missing ref exits 1 with empty
+        // stderr; treat as a clean "no such branch".
+        Err(HewError::GitNonZero { code: 1, .. }) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Lay down a fresh worktree for worker `worker_n` of `run_id`.
 ///
 /// Shells `git -C <project_root> worktree add -b <branch> <wt_path> <base_sha>`.
 /// Creates any missing parent dirs first so the branch / run-id namespace
 /// materialises lazily.
+///
+/// Pre-checks that `branch` does not already exist; on collision (e.g. a
+/// reused `run_id` after a crashed run) returns a `GitNonZero` with a
+/// clear message instead of letting `git worktree add -b` fail mid-way
+/// or silently land on a stale branch.
 pub fn create(
     git: &dyn GitClient,
     project_root: &Path,
@@ -76,6 +105,14 @@ pub fn create(
     base_sha: &str,
     branch: &str,
 ) -> Result<WorktreeHandle> {
+    if branch_exists(git, project_root, branch)? {
+        return Err(HewError::GitNonZero {
+            code: 128,
+            stderr: format!(
+                "branch `{branch}` already exists — refusing to overwrite (run_id `{run_id}` may have been reused after a crashed run; run `hew loop prune-worktrees` or delete the stale branch first)",
+            ),
+        });
+    }
     let path = worker_path(root, run_id, worker_n);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -210,9 +247,23 @@ mod tests {
     /// real `git worktree add` would create the dir as a side effect;
     /// the fake does that explicitly to mirror the post-condition tests
     /// rely on.
+    ///
+    /// `existing_branches` is consulted by the `rev-parse --verify` path
+    /// that backs `branch_exists`: hits return success (branch present),
+    /// misses return the canonical `GitNonZero{code:1}` that `branch_exists`
+    /// maps to `false`.
     #[derive(Debug, Default)]
     struct RecordingGit {
         calls: RefCell<Vec<Vec<OsString>>>,
+        existing_branches: RefCell<HashSet<String>>,
+    }
+
+    impl RecordingGit {
+        fn with_existing_branch(name: &str) -> Self {
+            let g = Self::default();
+            g.existing_branches.borrow_mut().insert(name.to_string());
+            g
+        }
     }
 
     impl GitClient for RecordingGit {
@@ -224,6 +275,22 @@ mod tests {
         }
         fn run_raw(&self, args: &[&OsStr]) -> HewResult<GitOutput> {
             let owned: Vec<OsString> = args.iter().map(|a| a.to_os_string()).collect();
+            // `rev-parse --verify --quiet refs/heads/<branch>` — branch existence probe.
+            if owned.iter().any(|a| a == "rev-parse")
+                && let Some(ref_arg) = owned
+                    .iter()
+                    .find_map(|a| a.to_str().and_then(|s| s.strip_prefix("refs/heads/")))
+            {
+                self.calls.borrow_mut().push(owned.clone());
+                if self.existing_branches.borrow().contains(ref_arg) {
+                    return Ok(GitOutput {
+                        stdout: format!("{}\n", "0".repeat(40)),
+                        stderr: String::new(),
+                    });
+                } else {
+                    return Err(HewError::GitNonZero { code: 1, stderr: String::new() });
+                }
+            }
             // Mirror `git worktree add <path>`'s on-disk side effect so
             // the post-call path-exists assertion holds without a real git.
             if owned.iter().any(|a| a == "add")
@@ -283,8 +350,11 @@ mod tests {
         create(&git, &project, &root, "r1", 2, "abc123", "loop/r1/w2").unwrap();
 
         let calls = git.calls.borrow();
-        assert_eq!(calls.len(), 1, "exactly one git call (worktree add)");
-        let argv = &calls[0];
+        assert_eq!(calls.len(), 2, "branch-exists probe then worktree add");
+        // First call: the rev-parse pre-check.
+        assert!(calls[0].iter().any(|a| a == "rev-parse"));
+        assert!(calls[0].iter().any(|a| a == "refs/heads/loop/r1/w2"));
+        let argv = &calls[1];
         let expected: Vec<OsString> = vec![
             os("-C"),
             project.clone().into_os_string(),
@@ -296,6 +366,54 @@ mod tests {
             os("abc123"),
         ];
         assert_eq!(argv, &expected);
+    }
+
+    #[test]
+    fn create_errors_on_branch_name_collision_when_run_id_reused() {
+        // Reusing a `run_id` after a crashed run would leave the stale
+        // branch behind; `create` must refuse rather than silently
+        // overwrite or land on an existing branch.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("wt");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let branch = branch_name("r-reused", 0);
+        let git = RecordingGit::with_existing_branch(&branch);
+
+        let err = create(&git, &project, &root, "r-reused", 0, "HEAD", &branch)
+            .expect_err("must refuse on collision");
+        match err {
+            HewError::GitNonZero { code, stderr } => {
+                assert_eq!(code, 128);
+                assert!(stderr.contains(&branch), "stderr should name the branch: {stderr}");
+                assert!(stderr.contains("already exists"), "stderr: {stderr}");
+            }
+            other => panic!("expected GitNonZero, got {other:?}"),
+        }
+
+        // And `worktree add` was never invoked — collision short-circuits.
+        let calls = git.calls.borrow();
+        assert_eq!(calls.len(), 1, "only the rev-parse probe ran");
+        assert!(calls[0].iter().any(|a| a == "rev-parse"));
+    }
+
+    #[test]
+    fn branch_exists_maps_nonzero_exit_to_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let git = RecordingGit::default();
+        assert!(!branch_exists(&git, &project, "loop/r/w0").unwrap());
+    }
+
+    #[test]
+    fn branch_exists_returns_true_when_branch_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let git = RecordingGit::with_existing_branch("loop/r/w0");
+        assert!(branch_exists(&git, &project, "loop/r/w0").unwrap());
     }
 
     #[test]

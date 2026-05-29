@@ -6,6 +6,20 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`hew_core::git::reset_hard_in(worktree, sha)`** — per-worker
+  rollback helper. Runs `git -C <worktree> reset --hard <sha>` so the
+  parallel loop's gate-fail revert is scoped to one worker's worktree
+  and never touches siblings (`DECISION:loop-parallel-overlap-policy`).
+  `loop_cmd::git_reset_hard` now delegates here.
+- **`hew_core::worktree::branch_exists` + `create()` collision guard.**
+  Reusing a `run_id` after a crashed run would land `git worktree add
+  -b` on a stale branch; `create()` now pre-checks via `rev-parse
+  --verify` and returns a clear `GitNonZero` rather than silently
+  overwriting. Branch naming stays the documented `loop/<run-id>/w<n>`
+  (see `worktree::branch_name`).
+
 ### Changed
 
 - **`hew-decompose` skill documents `bd create --graph` for batch task
