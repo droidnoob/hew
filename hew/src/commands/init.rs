@@ -538,23 +538,37 @@ where
     Ok(detected)
 }
 
-/// Transitional single-select picker; hew-jdm replaces this with a
-/// MultiSelect that pre-checks `_pre_checked`. For now the parameter is
-/// accepted to lock the signature in place.
-fn interactive_runtime_pick(_pre_checked: &[Runtime]) -> miette::Result<Vec<Runtime>> {
-    use inquire::Select;
-    let opts = vec!["claude", "cursor", "codex", "windsurf", "generic"];
-    let pick = Select::new("Which agent runtime?", opts)
-        .prompt()
-        .map_err(|e| miette::miette!("runtime pick: {e}"))?;
-    let rt = match pick {
-        "claude" => Runtime::Claude,
-        "cursor" => Runtime::Cursor,
-        "codex" => Runtime::Codex,
-        "windsurf" => Runtime::Windsurf,
-        _ => Runtime::Generic,
-    };
-    Ok(vec![rt])
+/// Multi-select picker for the interactive empty-args path. Items in
+/// `pre_checked` (typically `install::detect_runtimes()` output on re-runs)
+/// start checked; users toggle with space, confirm with enter. Empty
+/// selections re-prompt so the caller always gets at least one runtime.
+fn interactive_runtime_pick(pre_checked: &[Runtime]) -> miette::Result<Vec<Runtime>> {
+    use inquire::MultiSelect;
+    let options: Vec<Runtime> =
+        vec![Runtime::Claude, Runtime::Cursor, Runtime::Codex, Runtime::Windsurf, Runtime::Generic];
+    let labels: Vec<&'static str> = options.iter().map(|r| r.as_str()).collect();
+    let default_indices: Vec<usize> = options
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| pre_checked.contains(r))
+        .map(|(i, _)| i)
+        .collect();
+
+    loop {
+        let picked = MultiSelect::new("Which agent runtime(s)?", labels.clone())
+            .with_default(&default_indices)
+            .with_help_message("space to toggle, enter to confirm — at least one required")
+            .prompt()
+            .map_err(|e| miette::miette!("runtime pick: {e}"))?;
+        if picked.is_empty() {
+            eprintln!("hew init: pick at least one runtime.");
+            continue;
+        }
+        return Ok(picked
+            .iter()
+            .filter_map(|l| options.iter().find(|r| r.as_str() == *l).copied())
+            .collect());
+    }
 }
 
 fn resolve_install_root(scope: Scope, project_root: &std::path::Path) -> miette::Result<PathBuf> {
