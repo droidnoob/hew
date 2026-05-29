@@ -18,6 +18,7 @@ pub mod decide;
 pub mod diff_hunks;
 pub mod doctor;
 pub mod error;
+pub mod external_gate;
 pub mod gate;
 pub mod git;
 pub mod guard;

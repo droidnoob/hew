@@ -13,6 +13,7 @@ pub mod dep;
 pub mod doctor;
 pub mod epic;
 pub mod forget;
+pub mod gate;
 pub mod init;
 pub mod loop_cmd;
 pub mod manpage;
@@ -64,5 +65,6 @@ pub fn dispatch(cli: Cli) -> miette::Result<()> {
         Command::Statusline(a) => statusline::run(&ctx, a),
         Command::Blast(a) => blast::run(&ctx, a),
         Command::Loop(a) => loop_cmd::run(&ctx, a),
+        Command::Gate(a) => gate::run(&ctx, a),
     }
 }
