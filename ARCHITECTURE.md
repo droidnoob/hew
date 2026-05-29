@@ -444,14 +444,30 @@ chat session. Architecturally:
 - **Per-run logs.** Atomic temp-file-then-rename writes under
   `.hew/loop/<run-id>/run.json` + `iter-NNN.json`. `IterLog` shape
   in `hew_core::loop_log`; aggregate Summary in
-  `hew_core::loop_summary` (rendered post-run).
+  `hew_core::loop_summary` (rendered post-run). Parallel runs
+  additionally write `manifest.json` at the run-dir root and slot
+  per-worker logs under `worker-<n>/`.
+- **Parallel dispatch (Epic C).** `--jobs N >= 2` switches the runner
+  to a per-worker-worktree dispatcher path. `hew_core::dispatcher`
+  owns the slot machine (atomic `bd update --claim` per fill);
+  `hew_core::worktree` lays down + prunes worktrees under
+  `~/.hew/wt/<run-id>/<n>/` (out-of-tree per
+  `DECISION:loop-worktree-location`); `hew_core::merge_back`
+  consolidates each `loop/<run-id>/w<n>` branch onto launch HEAD at
+  shutdown, files `[merge-conflict]` bug tasks on conflict, and
+  leaves the conflicted worktree on disk for hand-resolution.
+  `hew loop prune-worktrees` GC's orphans whose run-dir has no
+  active `stop_reason = None` entry (active-set check via
+  `hew_core::loop_log::active_run_ids`).
 
 The CLI layer in `hew/src/commands/loop_cmd.rs` is a thin wiring
 shim: `run_loop_with(ctx, args, bd, spawner, gate, project_root)` is
 the testable inner — `hew/tests/loop_backpressure.rs` exercises the
 rollback, unattended-resolve, out-of-band-closure-detection, and
 prefix-hash-invariant paths against a tempdir git repo without
-burning real API tokens.
+burning real API tokens. `hew/tests/loop_parallel_e2e.rs` +
+`hew/tests/loop_prune_e2e.rs` cover the dispatcher path end-to-end
+with a stub spawner + planted orphan worktrees.
 
 Full design + troubleshooting in [`docs/LOOP.md`](./docs/LOOP.md).
 
