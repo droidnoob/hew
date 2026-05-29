@@ -108,13 +108,15 @@ hew loop run --budget-tokens 200000   # cap cumulative tokens
 hew loop run --dry-run --max-iter 1   # prompt-assemble smoke (no spawn)
 hew loop run --runtime=codex          # drive codex-cli instead of claude
 hew loop run --fallback-runtime=codex # primary=claude, swap to codex on RuntimeError
+hew loop run --jobs 2                 # parallel: 2 worker slots via per-worker worktrees
 
 hew loop list                         # recent runs + state
 hew loop logs --tail 5                # last 5 iters of latest run
 hew loop cancel                       # touch stop-file on latest run
+hew loop prune-worktrees [--apply]    # GC orphan worktrees from crashed parallel runs
 ```
 
-Each iter is a fresh `claude -p` (or `codex exec`) subprocess; the skill body + memory primer prefix is byte-stable across iters so the prompt cache hits (check `prompt_prefix_hash` in `.hew/loop/<run-id>/iter-NNN.json`). `--fallback-runtime` is primary-sticky with a configurable cooldown (`--fallback-cooldown-iters`, default 3) — see [docs/LOOP.md](./docs/LOOP.md#fallback-runtime) for the worked example.
+Each iter is a fresh `claude -p` (or `codex exec`) subprocess; the skill body + memory primer prefix is byte-stable across iters so the prompt cache hits (check `prompt_prefix_hash` in `.hew/loop/<run-id>/iter-NNN.json`). `--fallback-runtime` is primary-sticky with a configurable cooldown (`--fallback-cooldown-iters`, default 3) — see [docs/LOOP.md](./docs/LOOP.md#fallback-runtime) for the worked example. Parallel runs (`--jobs N`) lay down per-worker git worktrees under `~/.hew/wt/<run-id>/<n>/` and merge each `loop/<run-id>/w<n>` branch back at shutdown — see [docs/LOOP.md](./docs/LOOP.md#parallel-runs).
 
 `/hew:auto` now points at `hew loop run --until-empty`. The in-conversation walk is still reachable via `/hew:work`. Full guide: [docs/LOOP.md](./docs/LOOP.md).
 

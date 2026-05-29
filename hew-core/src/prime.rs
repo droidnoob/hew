@@ -519,6 +519,73 @@ pub fn collect_git_state(git: &dyn crate::git::GitClient) -> Option<GitState> {
 
 /// Render `ConfigInstructions` as a list of agent-readable directive
 /// lines. Each line is a self-contained instruction, not a config dump.
+/// Hew-wide command contracts that surface in every `hew prime resume`
+/// output, independent of project config. These are the "always do it this
+/// way" rules an agent should honor across every hew-using project — the
+/// places where a wrong invocation silently breaks a downstream flow.
+///
+/// Keep each line short (one screen line in a terminal); shape it as a
+/// concrete command, not advice. Add a new line only when an existing
+/// invocation pattern has caused a real bug we can cite — not for general
+/// guidance (that belongs in the skill bodies, loaded on invocation).
+pub fn agent_contracts() -> Vec<&'static str> {
+    vec![
+        // Auto-keys the canonical CHECKPOINT:<ISO> — <body> shape. Rolling it
+        // by hand with `hew remember --raw "CHECKPOINT:…"` produces malformed
+        // prefixes that silently shadow newer good checkpoints in
+        // `hew prime resume` (GitHub issue #40).
+        "Checkpoints: ALWAYS `hew checkpoint \"<body>\"` \
+         (or `hew checkpoint \"<body>\" --related-task <id>`). \
+         Never `hew remember --raw \"CHECKPOINT:…\"` — it silently shadows \
+         newer good checkpoints (#40).",
+        // bd's --type enum is closed (bug|feature|task|epic|chore|decision);
+        // there is no `--type=gate` and no `--await-*` flags. The dedicated
+        // `hew gate` subcommand owns external-state gating; pair with
+        // `hew gate poll` to flip resolved gates closed.
+        "External-state gates: `hew gate new --gh-pr=N --title=\"…\"` + \
+         `hew dep add <next-epic> <gate>`; poll with `hew gate poll`. \
+         There is no `bd create --type=gate` and no `--await-*` flags.",
+        // Looping `hew task new` for many tasks hits the zsh-cmd-substitution
+        // gotcha on apostrophes/quotes/backticks/$(). `bd create --graph`
+        // accepts a JSON plan (nodes + edges + parent_key) and runs it as
+        // one transaction with deps wired inline.
+        "Batch task creation (>3 tasks, or any multi-line description): \
+         write a graph-JSON plan (nodes + edges + parent_key) and run \
+         `bd create --graph plan.json` — one transaction, deps inline, \
+         content verbatim.",
+        // Heredoc + shell substitution is the recurring zsh-gotcha source.
+        // Every multi-line-input surface in hew accepts a file form:
+        //   hew task update --description-file <p>
+        //   hew remember --from-file <p>  (bulk JSON)
+        //   bd update --body-file <p>     (single body)
+        "Multi-line bodies: pass via `--description-file <p>` / \
+         `--from-file <p>` / `bd update --body-file <p>`. \
+         Never `\"$(cat <<EOF …)\"` — zsh blows up on embedded \
+         apostrophes / backticks / `$()`.",
+        // FEEDBACK:no-json-piping in the source repo: never pipe
+        // `hew … --json` through python/jq/sed. The text-default
+        // surfaces are the agent-facing contract.
+        "Inspection: use text-default surfaces (`hew memories --prefix=X`, \
+         `hew task show <id>`, `hew status`, `hew compact list-prefixes`). \
+         Never pipe `hew … --json` through `jq`/`python`/`sed`.",
+        // `hew loop run` defaults to `--until-empty` and unbounded
+        // iterations/tokens/wall. Unbounded loops on a noisy graph can burn
+        // hours and millions of tokens. Always set at least one cap.
+        "Loop runs: always cap. \
+         `hew loop run --max-iter N` and/or `--budget-wall 30m` / \
+         `--budget-tokens N`. Without bounds the loop runs until the queue \
+         drains or a stop-file appears.",
+        // The curated hew wrappers vs. raw bd: most daily-driver commands
+        // are wrapped. Documented hold-outs (raw `bd` is the path):
+        // `bd orphans`, `bd lint`, `bd history`, `bd update --unclaim`,
+        // `bd create --graph`.
+        "Prefer `hew task`/`hew dep`/`hew epic`/`hew memories`/`hew remember` \
+         over raw `bd`. Hold-outs (bd is the path): \
+         `bd orphans`, `bd lint`, `bd history`, `bd update --unclaim`, \
+         `bd create --graph`.",
+    ]
+}
+
 pub fn render_config_instructions(c: &ConfigInstructions) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -779,6 +846,13 @@ pub fn render_resume_text(out: &ResumeOutput) -> String {
     let _ = writeln!(s, "Project config — read as standing instructions");
     let _ = writeln!(s, "──────────────────────────────────");
     for line in render_config_instructions(&out.config) {
+        let _ = writeln!(s, "  • {line}");
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Agent contracts — always honor");
+    let _ = writeln!(s, "──────────────────────────────────");
+    for line in agent_contracts() {
         let _ = writeln!(s, "  • {line}");
     }
     let _ = writeln!(s);

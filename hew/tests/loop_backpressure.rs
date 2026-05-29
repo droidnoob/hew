@@ -21,7 +21,9 @@ use hew_core::prompt::AssembledPrompt;
 use hew_core::runner::TokenSpend;
 use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOpts, SpawnOutcome};
 
-use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
+use hew::commands::loop_cmd::{
+    Args, GateRunner, StaticGateRunner, Worker, run_loop_with, run_worker_loop,
+};
 use hew_core::runtime::FallbackConfig;
 
 /// Spawner that creates a second commit in `repo_dir` to simulate the
@@ -126,6 +128,7 @@ fn args_one_iter() -> Args {
         skill: "hew-execute".into(),
         fallback_runtime: None,
         fallback_cooldown_iters: None,
+        jobs: 1,
     }
 }
 
@@ -187,7 +190,7 @@ fn gate_fail_reverts_iter_commits_and_files_status_memory() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let iter_log_body =
-        std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json");
+        std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json");
     let log: IterLog = serde_json::from_str(&iter_log_body).expect("parse iter log");
     assert_eq!(log.outcome.as_deref(), Some("backpressure_fail"));
 }
@@ -345,7 +348,7 @@ fn unattended_resolves_deferred_via_memory_lookup() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse iter log");
     assert_eq!(log.decisions, vec!["auth-strategy".to_string()]);
@@ -569,11 +572,11 @@ fn prompt_prefix_hash_is_stable_across_iters() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log1: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse");
     let log2: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 2)).expect("read iter-002.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 2)).expect("read iter-002.json"),
     )
     .expect("parse");
     let h1 = log1.prompt_prefix_hash.as_deref().expect("iter-001 has prefix hash");
@@ -628,7 +631,7 @@ fn out_of_band_closure_promotes_no_close_to_closed() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse iter log");
     assert_eq!(
@@ -805,6 +808,7 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         skill: "hew-execute".into(),
         fallback_runtime: Some("codex".into()),
         fallback_cooldown_iters: Some(3),
+        jobs: 1,
     };
     let fallback_cfg =
         FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };
@@ -832,7 +836,7 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
 
     let load = |n: u32| -> IterLog {
-        let body = std::fs::read_to_string(iter_log_path(&dir, n)).expect("read iter log");
+        let body = std::fs::read_to_string(iter_log_path(&dir, None, n)).expect("read iter log");
         serde_json::from_str(&body).expect("parse iter log")
     };
     let iters: Vec<IterLog> = (1..=5).map(load).collect();
@@ -862,4 +866,310 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
     // (iters 2, 3, 4).
     assert_eq!(*primary.calls.borrow(), 2, "primary call count");
     assert_eq!(*fallback_spawner.calls.borrow(), 3, "fallback call count");
+}
+
+/// Gate runner that captures every `working_dir` it is invoked with.
+/// Used to assert per-worker backpressure scoping for hew-j4x.
+#[derive(Debug, Default)]
+struct RecordingGateRunner {
+    calls: std::sync::Mutex<Vec<PathBuf>>,
+    check: GateCheck,
+}
+
+impl RecordingGateRunner {
+    fn passing() -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            check: GateCheck { tests_passed: true, lint_passed: true, ..Default::default() },
+        }
+    }
+}
+
+impl GateRunner for RecordingGateRunner {
+    fn run_gate(&self, working_dir: &Path) -> GateCheck {
+        self.calls.lock().unwrap().push(working_dir.to_path_buf());
+        self.check.clone()
+    }
+}
+
+/// hew-j4x: `run_worker_loop` must invoke the backpressure gate against
+/// `worker.worktree_dir`, not the dispatcher's ambient project root.
+/// A future per-worker dispatcher (hew-9m5) trusts this contract to keep
+/// parallel workers' test/lint runs scoped to disjoint worktrees.
+#[test]
+fn gate_is_called_with_worker_worktree_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    std::fs::write(worktree.join("README.md"), b"seed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: worktree.clone() };
+    let gate = RecordingGateRunner::passing();
+
+    let args = args_one_iter();
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        worker_n: None,
+        log_dir: log_dir.clone(),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    let calls = gate.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly one gate invocation per iter, got {calls:?}");
+    assert_eq!(
+        calls[0], worktree,
+        "gate must run against worker.worktree_dir, not the dispatcher's ambient cwd",
+    );
+}
+
+/// hew-j4x: the single-worker fast path must keep its prior behavior —
+/// `run_loop_with` constructs a `Worker` with `worktree_dir =
+/// project_root`, so the gate is invoked at the project root just like
+/// before the per-worker plumbing landed.
+#[test]
+fn gate_falls_back_to_project_root_when_unspecified() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: repo.clone() };
+    let gate = RecordingGateRunner::passing();
+
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
+
+    let calls = gate.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0], repo, "single-worker path should pass project_root to the gate");
+}
+
+/// `run_worker_loop` must target `worker.worktree_dir` for every git
+/// call, and write iter logs under `worker.log_dir` — not whatever
+/// the dispatcher's `project_root` happened to be. Exercises the
+/// per-worker contract that the future parallel dispatcher relies on.
+#[test]
+fn run_worker_loop_uses_worker_worktree_for_git_calls() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    std::fs::write(worktree.join("README.md"), b"seed\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    git(&worktree, &["commit", "-q", "-m", "seed"]);
+    let initial_sha = head_sha(&worktree);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: worktree.clone() };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let args = args_one_iter();
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        worker_n: None,
+        log_dir: log_dir.clone(),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    let outcome = run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    // Spawner committed inside `worktree`; HEAD must have advanced.
+    assert_ne!(head_sha(&worktree), initial_sha, "expected commit in worker worktree");
+
+    // Iter log must land under worker.log_dir, NOT under any other
+    // ambient project root.
+    let iter_log = log_dir.join("iter-001.json");
+    assert!(iter_log.exists(), "iter-001.json must live under worker.log_dir");
+    let body = std::fs::read_to_string(&iter_log).expect("read iter log");
+    let log: IterLog = serde_json::from_str(&body).expect("parse iter log");
+    assert_eq!(log.task_id.as_deref(), Some("hew-test"));
+    // The returned outcome mirrors the on-disk run.
+    assert_eq!(outcome.iter_logs.len(), 1);
+    assert_eq!(outcome.run.iters.len(), 1);
+}
+
+#[test]
+fn jobs_default_is_1() {
+    // Pins the clap default + the test-fixture default the rest of the
+    // loop suite shares. Together with `loop_run_help_documents_jobs_flag`
+    // in tests/cli.rs this is the user-facing contract.
+    let args = args_one_iter();
+    assert_eq!(args.jobs, 1);
+}
+
+#[test]
+fn jobs_1_uses_serial_fast_path() {
+    // jobs=1 must keep the byte-identical N=1 layout: iter logs at the
+    // run-dir root (no worker-N subdir) and a manifest whose `jobs`
+    // field is 1. Indirectly proves run_loop_serial was taken — the
+    // parallel path always writes worker-N/ subdirs + Manifest::jobs
+    // == args.jobs (see `jobs_2_uses_dispatcher_path`).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd { ready: vec![], remembered: RefCell::new(Vec::new()) };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_one_iter();
+    args.jobs = 1;
+    args.dry_run = true;
+
+    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
+        .expect("serial loop runs");
+
+    let loop_root = repo.join(".hew/loop");
+    let entry = std::fs::read_dir(&loop_root)
+        .expect("read loop root")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("one run dir");
+    let run_dir = entry.path();
+
+    assert!(
+        !run_dir.join("worker-0").exists(),
+        "serial fast path must not create worker-N subdirs"
+    );
+    let manifest_path = run_dir.join("manifest.json");
+    assert!(manifest_path.exists(), "manifest.json should be written");
+    let body = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let m: serde_json::Value = serde_json::from_str(&body).expect("parse manifest");
+    assert_eq!(m["jobs"].as_u64(), Some(1), "serial path Manifest.jobs == 1");
+}
+
+#[test]
+fn jobs_2_uses_dispatcher_path() {
+    // Inverse of `jobs_1_uses_serial_fast_path`: --jobs 2 must invoke
+    // the Dispatcher path, evidenced by Manifest::jobs == 2.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd { ready: vec![], remembered: RefCell::new(Vec::new()) };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_one_iter();
+    args.jobs = 2;
+    args.dry_run = true;
+
+    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
+        .expect("parallel loop runs (dry-run)");
+
+    let loop_root = repo.join(".hew/loop");
+    let entry = std::fs::read_dir(&loop_root)
+        .expect("read loop root")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("one run dir");
+    let run_dir = entry.path();
+
+    let manifest_path = run_dir.join("manifest.json");
+    assert!(manifest_path.exists(), "manifest.json should be written");
+    let body = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let m: serde_json::Value = serde_json::from_str(&body).expect("parse manifest");
+    assert_eq!(m["jobs"].as_u64(), Some(2), "parallel path Manifest.jobs == args.jobs");
 }

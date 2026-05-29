@@ -3,13 +3,25 @@
 //! Layout (rooted at `<cwd>/.hew/loop/<run-id>/`):
 //!
 //! ```text
-//! run.json          — config + summary (rewritten after every iter)
-//! iter-001.json     — per-iter log (atomic write: temp + rename)
+//! run.json          — config + summary (rewritten after every iter; N=1 fast path)
+//! iter-001.json     — per-iter log (atomic write: temp + rename; N=1 fast path)
 //! iter-002.json
 //! ...
+//! manifest.json     — top-level worker manifest (parallel runs)
+//! worker-0/         — per-worker subdir (N>=2; absent in N=1 fast path)
+//!   run.json
+//!   iter-001.json
+//! worker-1/
+//!   ...
 //! ask-1.md          — interactive-mode ask-file (optional)
 //! .stop             — sentinel for `hew loop cancel` (optional)
 //! ```
+//!
+//! In the `--jobs=1` fast path (`worker_n = None`) iter + run logs land
+//! directly under the run dir, byte-identical to the pre-parallel
+//! layout. In parallel runs (`worker_n = Some(n)`) each worker's logs
+//! live under its own `worker-<n>/` subdir, and `manifest.json` at the
+//! run-dir root aggregates worker-final outcomes.
 //!
 //! Atomic writes use the temp-file + rename pattern so a kill -9 mid-
 //! write leaves either the old contents or the complete new contents
@@ -187,17 +199,140 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
-/// `<run-dir>/iter-NNN.json` with zero-padded 3-digit iter number.
-pub fn iter_log_path(run_dir: &Path, iter_number: u32) -> PathBuf {
-    run_dir.join(format!("iter-{iter_number:03}.json"))
+/// Pure path composer for a worker's log subdir under the run dir.
+/// `<run-dir>/worker-<n>/`. Does NOT touch the filesystem.
+pub fn worker_dir(run_dir: &Path, worker_n: u32) -> PathBuf {
+    run_dir.join(format!("worker-{worker_n}"))
 }
 
-pub fn run_log_path(run_dir: &Path) -> PathBuf {
-    run_dir.join("run.json")
+/// Create (`mkdir -p`) the worker log subdir and return its path. Use
+/// this at dispatcher setup time when constructing per-worker
+/// [`Worker`](crate::dispatcher) state.
+pub fn ensure_worker_dir(run_dir: &Path, worker_n: u32) -> Result<PathBuf> {
+    let dir = worker_dir(run_dir, worker_n);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Resolve `<run-dir>[/worker-<n>]/iter-NNN.json` with zero-padded
+/// 3-digit iter number.
+///
+/// `worker_n = None` keeps the pre-parallel layout (`--jobs=1` fast
+/// path); `worker_n = Some(n)` slots logs under the worker subdir.
+pub fn iter_log_path(run_dir: &Path, worker_n: Option<u32>, iter_number: u32) -> PathBuf {
+    let dir = match worker_n {
+        Some(n) => worker_dir(run_dir, n),
+        None => run_dir.to_path_buf(),
+    };
+    dir.join(format!("iter-{iter_number:03}.json"))
+}
+
+/// Resolve `<run-dir>[/worker-<n>]/run.json`. Mirror of [`iter_log_path`].
+pub fn run_log_path(run_dir: &Path, worker_n: Option<u32>) -> PathBuf {
+    let dir = match worker_n {
+        Some(n) => worker_dir(run_dir, n),
+        None => run_dir.to_path_buf(),
+    };
+    dir.join("run.json")
 }
 
 pub fn stop_file_path(run_dir: &Path) -> PathBuf {
     run_dir.join(".stop")
+}
+
+/// Top-level cross-worker manifest written at dispatcher shutdown.
+///
+/// One entry per worker that participated in the run; carries enough
+/// info for `hew loop summary` / `hew loop logs` to fold N
+/// `worker-<n>/` slices into a single report without re-walking the
+/// per-worker `run.json` files.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Manifest {
+    pub run_id: String,
+    pub jobs: u32,
+    pub started_at: String,
+    pub completed_at: String,
+    pub workers: Vec<ManifestWorker>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManifestWorker {
+    pub id: u32,
+    /// Branch the worker committed to. Empty for the single-slot fast
+    /// path where the loop runs on the project's checked-out branch.
+    #[serde(default)]
+    pub branch: String,
+    /// Worker subdir name (e.g. `"worker-0"`), or `None` when the
+    /// worker wrote logs directly under the run-dir root (N=1 fast
+    /// path).
+    #[serde(default)]
+    pub log_subdir: Option<String>,
+    pub iter_count: u32,
+    pub cumulative_tokens: u64,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+}
+
+pub fn manifest_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("manifest.json")
+}
+
+/// Atomically write the worker manifest at `<run-dir>/manifest.json`.
+pub fn write_manifest(run_dir: &Path, manifest: &Manifest) -> Result<()> {
+    write_json_atomic(&manifest_path(run_dir), manifest)
+}
+
+/// Run-ids under `loop_root` (`<project>/.hew/loop/`) whose `run.json`
+/// reports no `stop_reason` yet — i.e. the run never reached a clean
+/// shutdown.
+///
+/// Used by `hew loop prune-worktrees` to decide which worktrees under
+/// `~/.hew/wt/<run-id>/` may still be owned by a live process. A run
+/// without `run.json` is treated as active too (just starting up or
+/// crashed before the first iter wrote run.json — we err on the side of
+/// not deleting); a run with `stop_reason` set is considered finished
+/// and its worktrees are eligible for pruning.
+///
+/// Returns an empty set — not an error — when `loop_root` is absent.
+pub fn active_run_ids(loop_root: &Path) -> Result<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    let entries = match fs::read_dir(loop_root) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+        if !name.starts_with("loop-") {
+            continue;
+        }
+        let rl_path = path.join("run.json");
+        match fs::read_to_string(&rl_path) {
+            Ok(body) => match serde_json::from_str::<RunLog>(&body) {
+                Ok(rl) if rl.stop_reason.is_none() => {
+                    out.insert(name.to_string());
+                }
+                Ok(_) => {}
+                // Unparseable run.json: treat conservatively as active
+                // so we don't delete worktrees the operator may still
+                // need to triage by hand.
+                Err(_) => {
+                    out.insert(name.to_string());
+                }
+            },
+            // No run.json yet: a run that crashed before the first iter,
+            // or one mid-init. Treat as active — operator decides via
+            // `--force` (future flag) whether to clean up.
+            Err(_) => {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -261,10 +396,94 @@ mod tests {
 
     #[test]
     fn iter_log_path_is_zero_padded() {
-        let p = iter_log_path(Path::new("/tmp/r"), 7);
+        let p = iter_log_path(Path::new("/tmp/r"), None, 7);
         assert!(p.ends_with("iter-007.json"));
-        let p = iter_log_path(Path::new("/tmp/r"), 142);
+        let p = iter_log_path(Path::new("/tmp/r"), None, 142);
         assert!(p.ends_with("iter-142.json"));
+    }
+
+    #[test]
+    fn iter_log_path_omits_worker_dir_when_none() {
+        // Backward-compat with the --jobs=1 fast path: iter logs land
+        // directly under the run dir, byte-identical to the layout the
+        // pre-parallel loop wrote.
+        let p = iter_log_path(Path::new("/tmp/r"), None, 3);
+        assert_eq!(p, Path::new("/tmp/r/iter-003.json"));
+        let p = run_log_path(Path::new("/tmp/r"), None);
+        assert_eq!(p, Path::new("/tmp/r/run.json"));
+    }
+
+    #[test]
+    fn iter_log_path_includes_worker_dir_when_set() {
+        // Parallel layout: iter logs live under worker-<n>/.
+        let p = iter_log_path(Path::new("/tmp/r"), Some(0), 3);
+        assert_eq!(p, Path::new("/tmp/r/worker-0/iter-003.json"));
+        let p = iter_log_path(Path::new("/tmp/r"), Some(7), 42);
+        assert_eq!(p, Path::new("/tmp/r/worker-7/iter-042.json"));
+        let p = run_log_path(Path::new("/tmp/r"), Some(2));
+        assert_eq!(p, Path::new("/tmp/r/worker-2/run.json"));
+    }
+
+    #[test]
+    fn worker_dir_composes_path() {
+        assert_eq!(worker_dir(Path::new("/tmp/r"), 0), Path::new("/tmp/r/worker-0"));
+        assert_eq!(worker_dir(Path::new("/tmp/r"), 12), Path::new("/tmp/r/worker-12"));
+    }
+
+    #[test]
+    fn ensure_worker_dir_creates_subdir() {
+        let root = tmpdir();
+        let run = run_dir(&root, "loop-test-wd").unwrap();
+        let w = ensure_worker_dir(&run, 3).unwrap();
+        assert!(w.exists());
+        assert!(w.ends_with("worker-3"));
+        // Idempotent — second call doesn't error.
+        let w2 = ensure_worker_dir(&run, 3).unwrap();
+        assert_eq!(w, w2);
+    }
+
+    #[test]
+    fn manifest_lists_all_workers_after_shutdown() {
+        let root = tmpdir();
+        let run = run_dir(&root, "loop-test-mf").unwrap();
+        let manifest = Manifest {
+            run_id: "loop-test-mf".into(),
+            jobs: 2,
+            started_at: "2026-05-29T00:00:00Z".into(),
+            completed_at: "2026-05-29T00:01:00Z".into(),
+            workers: vec![
+                ManifestWorker {
+                    id: 0,
+                    branch: "loop/run-mf/w0".into(),
+                    log_subdir: Some("worker-0".into()),
+                    iter_count: 3,
+                    cumulative_tokens: 1500,
+                    stop_reason: Some("ready_empty".into()),
+                },
+                ManifestWorker {
+                    id: 1,
+                    branch: "loop/run-mf/w1".into(),
+                    log_subdir: Some("worker-1".into()),
+                    iter_count: 2,
+                    cumulative_tokens: 900,
+                    stop_reason: Some("ready_empty".into()),
+                },
+            ],
+        };
+        write_manifest(&run, &manifest).unwrap();
+        let path = manifest_path(&run);
+        assert!(path.exists());
+        assert!(path.ends_with("manifest.json"));
+        let body = std::fs::read(&path).unwrap();
+        let parsed: Manifest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.run_id, "loop-test-mf");
+        assert_eq!(parsed.jobs, 2);
+        assert_eq!(parsed.workers.len(), 2);
+        assert_eq!(parsed.workers[0].id, 0);
+        assert_eq!(parsed.workers[0].log_subdir.as_deref(), Some("worker-0"));
+        assert_eq!(parsed.workers[0].iter_count, 3);
+        assert_eq!(parsed.workers[1].id, 1);
+        assert_eq!(parsed.workers[1].cumulative_tokens, 900);
     }
 
     #[test]
@@ -335,6 +554,52 @@ mod tests {
             let l = outcome_label(o);
             assert!(!l.is_empty());
         }
+    }
+
+    #[test]
+    fn active_run_ids_includes_running_runs() {
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let running_dir = run_dir(&root, "loop-running").unwrap();
+        // run.json with no stop_reason → run is live.
+        let cfg = RunConfig::default();
+        let run = Run::new("loop-running", "2026-05-30T00:00:00Z", cfg);
+        write_json_atomic(&running_dir.join("run.json"), &RunLog::from_run(&run)).unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(active.contains("loop-running"), "running run must be flagged active");
+    }
+
+    #[test]
+    fn active_run_ids_excludes_completed_runs() {
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let completed_dir = run_dir(&root, "loop-completed").unwrap();
+        let mut run = Run::new("loop-completed", "2026-05-30T00:00:00Z", RunConfig::default());
+        run.stop_reason = Some(StopReason::ReadyEmpty);
+        write_json_atomic(&completed_dir.join("run.json"), &RunLog::from_run(&run)).unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(!active.contains("loop-completed"), "completed run must not be active");
+    }
+
+    #[test]
+    fn active_run_ids_treats_missing_run_json_as_active() {
+        // A run that crashed before the first iter wrote run.json: leave
+        // it in the active set so its worktree isn't auto-pruned.
+        let root = tmpdir();
+        let loop_root = root.join(LOOP_ROOT);
+        let _ = run_dir(&root, "loop-crashed").unwrap();
+
+        let active = active_run_ids(&loop_root).unwrap();
+        assert!(active.contains("loop-crashed"));
+    }
+
+    #[test]
+    fn active_run_ids_empty_when_loop_root_absent() {
+        let root = tmpdir();
+        let missing = root.join(LOOP_ROOT); // never created
+        assert!(active_run_ids(&missing).unwrap().is_empty());
     }
 
     #[test]
