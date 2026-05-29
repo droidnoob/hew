@@ -1,6 +1,9 @@
 .planning/
 .beads/
 .hew/loop/
+# Tests + CLI smoke runs spawn loop runs inside subcrates (`hew/.hew/loop/`,
+# `hew-core/.hew/loop/`); catch those too.
+**/.hew/loop/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

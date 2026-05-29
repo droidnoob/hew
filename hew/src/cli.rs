@@ -161,4 +161,11 @@ pub enum Command {
     /// loop cancel` / `logs` / `list` inspect or stop running and
     /// completed runs.
     Loop(crate::commands::loop_cmd::LoopCmd),
+
+    /// External-state gates: create a bd task that resolves when an
+    /// external condition fires (currently: a GitHub PR being merged).
+    /// `hew gate new --gh-pr=N --title="..."`, `hew gate poll`,
+    /// `hew gate list`. Pair with `hew dep add <next-epic> <gate-id>`
+    /// to block downstream work on the gate.
+    Gate(crate::commands::gate::Args),
 }

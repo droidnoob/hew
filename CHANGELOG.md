@@ -8,6 +8,25 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hew gate` — external-state gates for `/hew:ship` and friends.**
+  `hew gate new --gh-pr=N --title="…"` creates a bd task labelled
+  `hew-gate` with the wait condition stored as typed metadata.
+  `hew gate poll [<id>]` queries the external surface (currently
+  `gh pr view <N> --json state,mergedAt`) and closes any task whose
+  condition has fired — `MERGED` resolves, `OPEN` / `CLOSED-without-merge`
+  stay pending, unknown states surface as warnings. Pair with
+  `hew dep add <next-epic> <gate-id>` to block downstream work on a
+  PR merge. Future backends (`gh:issue`, `gh:run`, `cmd:`) are
+  scaffolded behind the same `GateKind` enum.
+
+### Changed
+
+- **`/hew:ship` skill body now uses `hew gate`.** Replaces the previous
+  step 3 (`bd create --type=gate --await-type=gh:pr --await-id=N`,
+  which referenced flags that don't exist in bd v1.0.3) with the
+  working `hew gate new --gh-pr=N` flow plus an explicit `hew gate
+  poll` step so resolved gates flip closed.
+
 - **`hew init --runtime` accepts multiple runtimes.** Comma-separated
   (`--runtime=claude,codex`) and repeated (`--runtime=claude
   --runtime=codex`) forms both parse to the same list; the install loop
