@@ -264,6 +264,144 @@ impl RuntimeSpawner for ClaudeSpawner {
     }
 }
 
+/// Environment variable that overrides the `codex` binary location.
+/// Used by tests and for pinning to a specific install. Mirrors
+/// [`CLAUDE_BIN_ENV`].
+pub const CODEX_BIN_ENV: &str = "HEW_LOOP_CODEX_BIN";
+
+/// Production spawner for `codex exec --json`. Symmetric to
+/// [`ClaudeSpawner`] — same trait, same shape, same reusability across
+/// iters. The sandbox field is the explicit floor; if left at
+/// [`SandboxPolicy::ReadOnly`] (default), per-iter `allowed_tools`
+/// widen it via [`map_allowed_tools_to_sandbox`]. An explicit
+/// `with_sandbox(...)` always takes precedence over the mapping.
+///
+/// Verified against `codex-cli 0.120.0` on 2026-05-29
+/// (RESEARCH:codex-exec-json-stream + RESEARCH:codex-sandbox-model).
+#[derive(Clone, Debug)]
+pub struct CodexSpawner {
+    /// Path to the `codex` binary. Defaults to `codex` (PATH lookup).
+    pub bin: PathBuf,
+    /// `-m <model>` override. None → omit flag (codex picks default).
+    pub model_override: Option<String>,
+    /// Explicit sandbox floor. ReadOnly = defer to the tools mapper.
+    pub sandbox: SandboxPolicy,
+    /// Extra CLI args appended after the computed flags and before
+    /// the `--` / prompt separator. Used to pass through `-c key=val`
+    /// overrides, `--add-dir`, `--profile`, etc.
+    pub extra_args: Vec<String>,
+    /// `-C <wd>` override. None → omit flag (codex uses CWD).
+    pub working_dir: Option<PathBuf>,
+}
+
+impl CodexSpawner {
+    /// Resolve the binary from `HEW_LOOP_CODEX_BIN`, falling back to
+    /// `codex` on PATH.
+    pub fn from_env() -> Self {
+        let bin =
+            std::env::var(CODEX_BIN_ENV).map(PathBuf::from).unwrap_or_else(|_| "codex".into());
+        Self {
+            bin,
+            model_override: None,
+            sandbox: SandboxPolicy::ReadOnly,
+            extra_args: Vec::new(),
+            working_dir: None,
+        }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model_override = Some(model.into());
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: SandboxPolicy) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    pub fn with_working_dir(mut self, wd: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(wd.into());
+        self
+    }
+
+    /// Effective sandbox for this call. An explicit non-ReadOnly value
+    /// on the spawner pins the policy; otherwise the per-iter tools
+    /// list governs via [`map_allowed_tools_to_sandbox`].
+    fn effective_sandbox(&self, tools: &[String]) -> SandboxPolicy {
+        match self.sandbox {
+            SandboxPolicy::ReadOnly => map_allowed_tools_to_sandbox(tools),
+            explicit => explicit,
+        }
+    }
+
+    /// Build the argv (excluding bin) passed to `codex exec`. The
+    /// canonical shape per RESEARCH:codex-useful-flags is
+    /// `exec --json --skip-git-repo-check --sandbox <X> [-m <model>]
+    /// [-C <wd>] <extra_args...> -- <prompt>`.
+    ///
+    /// `--` separates flags from the positional prompt so a prompt
+    /// starting with `-` cannot be mis-parsed as a flag.
+    pub fn build_args(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Vec<String> {
+        let mut args = vec![
+            "exec".to_string(),
+            "--json".to_string(),
+            "--skip-git-repo-check".to_string(),
+            "--sandbox".to_string(),
+            self.effective_sandbox(allowed_tools).as_str().to_string(),
+        ];
+        if let Some(model) = &self.model_override {
+            args.push("-m".to_string());
+            args.push(model.clone());
+        }
+        if let Some(wd) = &self.working_dir {
+            args.push("-C".to_string());
+            args.push(wd.display().to_string());
+        }
+        args.extend(self.extra_args.iter().cloned());
+        args.push("--".to_string());
+        args.push(prompt.full_text.clone());
+        args
+    }
+}
+
+impl Default for CodexSpawner {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl RuntimeSpawner for CodexSpawner {
+    fn spawn(&self, prompt: &AssembledPrompt, allowed_tools: &[String]) -> Result<SpawnOutcome> {
+        let args = self.build_args(prompt, allowed_tools);
+        let output = std::process::Command::new(&self.bin).args(&args).output()?;
+        let stderr_tail = tail_text(&String::from_utf8_lossy(&output.stderr), 16);
+        let exit_ok = output.status.success();
+        match parse_codex_jsonl(&output.stdout) {
+            Ok((raw_text, tokens, class)) => {
+                let success = exit_ok && matches!(class, SpawnFailureClass::Success);
+                let closed_task = detect_closed_task(&raw_text);
+                Ok(SpawnOutcome {
+                    success,
+                    closed_task,
+                    tokens,
+                    stderr_tail,
+                    raw_text,
+                    failure_class: class,
+                })
+            }
+            Err(_) if !exit_ok => Ok(SpawnOutcome {
+                success: false,
+                closed_task: None,
+                tokens: TokenSpend::default(),
+                stderr_tail,
+                raw_text: String::from_utf8_lossy(&output.stdout).into_owned(),
+                failure_class: SpawnFailureClass::RuntimeError(RuntimeErrorKind::Spawn),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Parse `claude --output-format json`. The JSON shape is
 /// `{ "result": "<text>", "usage": { "input_tokens": N, ... }, ... }`.
 /// Missing fields default to zero / empty so a partial response still
@@ -747,6 +885,98 @@ mod tests {
         let bytes = b"{\"type\":\"thread.started\"}\n{\"type\":\"error\",\"message\":\"boom\"}\n";
         let (_text, _tokens, class) = parse_codex_jsonl(bytes).expect("parses");
         assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Unknown));
+    }
+
+    fn arg_pair<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+    }
+
+    #[test]
+    fn codex_build_args_emits_exec_json_sandbox_model() {
+        let s = CodexSpawner::from_env().with_model("gpt-5.4");
+        let p = assemble("S", "P", "T");
+        let tools = vec!["Edit".to_string()];
+        let args = s.build_args(&p, &tools);
+        assert_eq!(args[0], "exec");
+        assert!(args.iter().any(|a| a == "--json"));
+        assert!(args.iter().any(|a| a == "--skip-git-repo-check"));
+        assert_eq!(arg_pair(&args, "--sandbox"), Some("workspace-write"));
+        assert_eq!(arg_pair(&args, "-m"), Some("gpt-5.4"));
+        // Prompt comes after `--`.
+        let dash = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[dash + 1], p.full_text);
+    }
+
+    #[test]
+    fn codex_build_args_omits_model_when_none() {
+        let s = CodexSpawner::from_env();
+        let p = assemble("", "", "");
+        let args = s.build_args(&p, &[]);
+        assert!(!args.iter().any(|a| a == "-m"), "args={args:?}");
+    }
+
+    #[test]
+    fn codex_build_args_omits_cd_when_no_working_dir() {
+        let s = CodexSpawner::from_env();
+        let p = assemble("", "", "");
+        let args = s.build_args(&p, &[]);
+        assert!(!args.iter().any(|a| a == "-C"), "args={args:?}");
+    }
+
+    #[test]
+    fn codex_build_args_emits_cd_when_working_dir_set() {
+        let s = CodexSpawner::from_env().with_working_dir("/tmp/wt");
+        let p = assemble("", "", "");
+        let args = s.build_args(&p, &[]);
+        assert_eq!(arg_pair(&args, "-C"), Some("/tmp/wt"));
+    }
+
+    #[test]
+    fn codex_build_args_sandbox_defaults_to_tool_mapping() {
+        let s = CodexSpawner::from_env();
+        // No write tools → read-only.
+        let args = s.build_args(&assemble("", "", ""), &["Read".to_string()]);
+        assert_eq!(arg_pair(&args, "--sandbox"), Some("read-only"));
+        // Write tool present → workspace-write via mapper.
+        let args = s.build_args(&assemble("", "", ""), &["Write".to_string()]);
+        assert_eq!(arg_pair(&args, "--sandbox"), Some("workspace-write"));
+    }
+
+    #[test]
+    fn codex_build_args_explicit_with_sandbox_overrides_mapper() {
+        // No write tools — mapper would say read-only — but an
+        // explicit DangerFullAccess wins.
+        let s = CodexSpawner::from_env().with_sandbox(SandboxPolicy::DangerFullAccess);
+        let args = s.build_args(&assemble("", "", ""), &[]);
+        assert_eq!(arg_pair(&args, "--sandbox"), Some("danger-full-access"));
+    }
+
+    #[test]
+    fn codex_build_args_extra_args_appear_before_dash_dash() {
+        let mut s = CodexSpawner::from_env();
+        s.extra_args = vec!["-c".into(), "model_reasoning_effort=high".into()];
+        let p = assemble("", "", "");
+        let args = s.build_args(&p, &[]);
+        let extra_idx = args.iter().position(|a| a == "-c").unwrap();
+        let dash = args.iter().position(|a| a == "--").unwrap();
+        assert!(extra_idx < dash, "extra_args must precede `--`: args={args:?}");
+    }
+
+    #[test]
+    fn codex_from_env_honors_override() {
+        let prev = std::env::var(CODEX_BIN_ENV).ok();
+        // SAFETY: same isolation argument as the claude env test above.
+        unsafe {
+            std::env::set_var(CODEX_BIN_ENV, "/usr/local/bin/codex-test");
+        }
+        let s = CodexSpawner::from_env();
+        assert_eq!(s.bin, PathBuf::from("/usr/local/bin/codex-test"));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(CODEX_BIN_ENV, v),
+                None => std::env::remove_var(CODEX_BIN_ENV),
+            }
+        }
     }
 
     #[test]
