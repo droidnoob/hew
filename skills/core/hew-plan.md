@@ -286,8 +286,10 @@ On "Skip" or after `/hew:research` completes:
 "Plan is approved. Calling `hew-decompose` to build the Beads graph."
 Then invoke `hew-decompose` with the plan in context.
 `hew-decompose` will read the same memories, plus the conversation it inherits
-from you, and produce `hew task new` / `hew dep add` calls (and `bd
-create --type=gate` for external blockers; gates aren't wrapped).
+from you, and produce `bd create --graph` for the task batch (or `hew task
+new` for one-offs), `hew dep add` for cross-task ordering, and
+`hew gate new --gh-pr=N` for external blockers (e.g. a downstream epic
+that waits on a PR merge).
 
 After `hew-decompose` finishes, write the phase marker:
 
