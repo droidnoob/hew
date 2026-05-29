@@ -24,8 +24,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use hew_core::backpressure::{self, GateCheck, Verdict};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::loop_log::{
-    IterLog, LOOP_ROOT, RunLog, iter_log_path, new_run_id, run_dir, run_log_path, stop_file_path,
-    write_json_atomic,
+    IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
+    run_log_path, stop_file_path, write_json_atomic, write_manifest,
 };
 use hew_core::prompt;
 use hew_core::runner::{CooldownState, Iter, IterOutcome, Run, RunConfig};
@@ -423,8 +423,17 @@ pub struct Worker {
     /// Branch the worker is committing to. Informational for v1; the
     /// parallel dispatcher uses this to scope `git reset --hard`.
     pub branch: String,
-    /// Where per-iter logs (`iter-NNN.json`, `run.json`) land.
+    /// Run-dir root the worker writes logs against (always
+    /// `<project>/.hew/loop/<run-id>/`). Per-iter paths are composed
+    /// against this + [`Self::worker_n`] via
+    /// [`hew_core::loop_log::iter_log_path`].
     pub log_dir: PathBuf,
+    /// Worker slot for path composition: `None` keeps the pre-parallel
+    /// layout (`<run-dir>/iter-NNN.json`); `Some(n)` slots logs under
+    /// `<run-dir>/worker-<n>/`. The N=1 fast path uses `None` so the
+    /// existing `hew loop summary` / `hew loop logs` surfaces continue
+    /// to find logs at the run-dir root.
+    pub worker_n: Option<u32>,
 }
 
 /// Final state returned by [`run_worker_loop`]. The dispatcher reads
@@ -492,8 +501,10 @@ pub fn run_loop_with(
         worktree_dir: project_root.to_path_buf(),
         branch: String::new(),
         log_dir: dir.clone(),
+        worker_n: None,
     };
 
+    let started_at = iso_now_utc();
     let outcome = run_worker_loop(
         ctx,
         &args,
@@ -510,8 +521,35 @@ pub fn run_loop_with(
         &stop_path,
     )?;
 
+    // Dispatcher-shutdown manifest: lists every worker that
+    // participated in the run + their final outcome. v1 has a single
+    // worker; the future parallel dispatcher folds N outcomes into the
+    // same shape so `hew loop summary` / `hew loop logs` can consume
+    // both layouts uniformly.
+    let workers = vec![worker_manifest_row(&worker, &outcome)];
+    let manifest = Manifest {
+        run_id: run_id.clone(),
+        jobs: workers.len() as u32,
+        started_at,
+        completed_at: iso_now_utc(),
+        workers,
+    };
+    write_manifest(&dir, &manifest).map_err(|e| miette::miette!("write manifest: {e}"))?;
+
     print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir);
     Ok(())
+}
+
+fn worker_manifest_row(worker: &Worker, outcome: &WorkerOutcome) -> ManifestWorker {
+    let summary = RunLog::from_run(&outcome.run);
+    ManifestWorker {
+        id: worker.id,
+        branch: worker.branch.clone(),
+        log_subdir: worker.worker_n.map(|n| format!("worker-{n}")),
+        iter_count: summary.iter_count,
+        cumulative_tokens: summary.cumulative_tokens,
+        stop_reason: summary.stop_reason,
+    }
 }
 
 /// One worker's iter loop. Pulls ready tasks from `bd`, drives the
@@ -855,7 +893,7 @@ pub fn run_worker_loop(
             log.runtime_used = Some(active_kind.as_str().to_string());
         }
         log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
-        write_json_atomic(&iter_log_path(&worker.log_dir, iter_number), &log)
+        write_json_atomic(&iter_log_path(&worker.log_dir, worker.worker_n, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
 
@@ -875,14 +913,17 @@ pub fn run_worker_loop(
         run_state.iters.push(iter);
 
         // Rewrite run.json after each iter.
-        write_json_atomic(&run_log_path(&worker.log_dir), &RunLog::from_run(&run_state))
-            .map_err(|e| miette::miette!("write run log: {e}"))?;
+        write_json_atomic(
+            &run_log_path(&worker.log_dir, worker.worker_n),
+            &RunLog::from_run(&run_state),
+        )
+        .map_err(|e| miette::miette!("write run log: {e}"))?;
     }
 
     // Final summary persisted to disk; the dispatcher renders the
     // pretty end-of-run report from the returned WorkerOutcome.
     let summary = RunLog::from_run(&run_state);
-    write_json_atomic(&run_log_path(&worker.log_dir), &summary)
+    write_json_atomic(&run_log_path(&worker.log_dir, worker.worker_n), &summary)
         .map_err(|e| miette::miette!("write final run log: {e}"))?;
 
     Ok(WorkerOutcome { run: run_state, iter_logs })
@@ -958,7 +999,9 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
     }
 
     if let Some(n) = args.iter {
-        let path = iter_log_path(&dir, n);
+        // v1 read surface only consults the run-dir root (single-worker
+        // layout). Per-worker reads land in hew-h0tu.
+        let path = iter_log_path(&dir, None, n);
         let body = std::fs::read_to_string(&path)
             .map_err(|e| miette::miette!("read {}: {e}", path.display()))?;
         if args.json {
@@ -987,7 +1030,7 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
         return Ok(());
     }
 
-    let run_log_path = run_log_path(&dir);
+    let run_log_path = run_log_path(&dir, None);
     if !ctx.quiet
         && run_log_path.exists()
         && let Ok(body) = std::fs::read_to_string(&run_log_path)
@@ -1019,7 +1062,7 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
     }
 
     // Load the persisted run header for id + stop reason.
-    let rl_body = std::fs::read_to_string(run_log_path(&dir))
+    let rl_body = std::fs::read_to_string(run_log_path(&dir, None))
         .map_err(|e| miette::miette!("read run.json: {e}"))?;
     let rl: RunLog =
         serde_json::from_str(&rl_body).map_err(|e| miette::miette!("parse run.json: {e}"))?;
@@ -1098,7 +1141,7 @@ struct RunListRow {
 
 fn load_run_list_row(dir: &std::path::Path) -> RunListRow {
     let stop_present = stop_file_path(dir).exists();
-    let rl_path = run_log_path(dir);
+    let rl_path = run_log_path(dir, None);
     let parsed = std::fs::read_to_string(&rl_path)
         .ok()
         .and_then(|s| serde_json::from_str::<RunLog>(&s).ok());

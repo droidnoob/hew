@@ -189,7 +189,7 @@ fn gate_fail_reverts_iter_commits_and_files_status_memory() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let iter_log_body =
-        std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json");
+        std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json");
     let log: IterLog = serde_json::from_str(&iter_log_body).expect("parse iter log");
     assert_eq!(log.outcome.as_deref(), Some("backpressure_fail"));
 }
@@ -347,7 +347,7 @@ fn unattended_resolves_deferred_via_memory_lookup() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse iter log");
     assert_eq!(log.decisions, vec!["auth-strategy".to_string()]);
@@ -571,11 +571,11 @@ fn prompt_prefix_hash_is_stable_across_iters() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log1: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse");
     let log2: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 2)).expect("read iter-002.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 2)).expect("read iter-002.json"),
     )
     .expect("parse");
     let h1 = log1.prompt_prefix_hash.as_deref().expect("iter-001 has prefix hash");
@@ -630,7 +630,7 @@ fn out_of_band_closure_promotes_no_close_to_closed() {
         .expect("run-id dir");
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
     let log: IterLog = serde_json::from_str(
-        &std::fs::read_to_string(iter_log_path(&dir, 1)).expect("read iter-001.json"),
+        &std::fs::read_to_string(iter_log_path(&dir, None, 1)).expect("read iter-001.json"),
     )
     .expect("parse iter log");
     assert_eq!(
@@ -834,7 +834,7 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
     let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
 
     let load = |n: u32| -> IterLog {
-        let body = std::fs::read_to_string(iter_log_path(&dir, n)).expect("read iter log");
+        let body = std::fs::read_to_string(iter_log_path(&dir, None, n)).expect("read iter log");
         serde_json::from_str(&body).expect("parse iter log")
     };
     let iters: Vec<IterLog> = (1..=5).map(load).collect();
@@ -929,6 +929,7 @@ fn gate_is_called_with_worker_worktree_dir() {
         id: 0,
         worktree_dir: worktree.clone(),
         branch: "loop/test/w0".into(),
+        worker_n: None,
         log_dir: log_dir.clone(),
     };
     let stop_path = log_dir.join(".stop");
@@ -1044,6 +1045,7 @@ fn run_worker_loop_uses_worker_worktree_for_git_calls() {
         id: 0,
         worktree_dir: worktree.clone(),
         branch: "loop/test/w0".into(),
+        worker_n: None,
         log_dir: log_dir.clone(),
     };
     let stop_path = log_dir.join(".stop");
