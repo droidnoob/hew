@@ -342,6 +342,21 @@ a task type — see Step 5.)
 Priority inflation kills the signal. Reserve P0 for the critical path. If
 everything is P0, you have not decomposed enough.
 
+### Optional — flag heavy tasks for a stronger model
+
+If one task in the batch is meaningfully harder than the rest
+(thorny refactor, gnarly algorithm, architectural call inside the
+slice), route just that task to a stronger model when `hew loop`
+spawns it. Two cheap surfaces, both per-task:
+
+- Add `<!-- hew:model=opus-4-7 -->` anywhere in the description.
+- Or `bd label add <id> model:opus-4-7` after the task lands.
+
+For batch-wide policy (e.g. "every P0 runs on opus-4-7"), use
+`hew config set loop.model.by_priority.P0 opus-4-7` once and skip
+the per-task annotation. See `docs/LOOP.md` "Per-task model
+selection" for the full precedence chain.
+
 ## Step 7 — concrete example, end to end
 
 User asks for "auth on an existing FastAPI app." Plan is approved.
