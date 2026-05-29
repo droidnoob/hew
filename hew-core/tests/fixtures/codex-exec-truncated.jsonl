@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"019e719c-52c2-7923-bc86-8ba5c4cec90a"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"partial reply, stream cut off"}}

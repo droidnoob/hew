@@ -227,6 +227,111 @@ pub fn parse_claude_json(bytes: &[u8]) -> Result<(String, TokenSpend)> {
     Ok((result_text, tokens))
 }
 
+/// Parse `codex exec --json` JSONL output.
+///
+/// The codex stream is line-delimited JSON; the terminus event decides
+/// success vs failure (exit code is unreliable — codex exec exits 0 on
+/// API 400). Per RESEARCH:codex-exec-json-stream:
+///
+/// - `turn.completed{usage:{input_tokens,cached_input_tokens,output_tokens}}`
+///   → [`SpawnFailureClass::Success`].
+/// - `turn.failed{error.message=<nested JSON string with status>}` →
+///   classify via [`classify_http_status`] on the extracted `status`.
+/// - `error` event with no following `turn.failed` →
+///   `RuntimeError(Unknown)`.
+/// - No terminus before EOF → `RuntimeError(Spawn)` (truncated stream).
+///
+/// The latest `item.completed{item.type=agent_message,text}` becomes the
+/// returned text. Unknown event types are skipped (lenient). Lines that
+/// fail to parse as JSON are skipped; if no event of any kind parses,
+/// returns `Err` so callers can distinguish "not JSONL at all" from
+/// "stream truncated mid-turn".
+pub fn parse_codex_jsonl(bytes: &[u8]) -> Result<(String, TokenSpend, SpawnFailureClass)> {
+    let text = std::str::from_utf8(bytes).unwrap_or("");
+
+    let mut latest_text = String::new();
+    let mut tokens = TokenSpend::default();
+    let mut class: Option<SpawnFailureClass> = None;
+    let mut saw_any_event = false;
+    let mut saw_error_event = false;
+    let mut first_parse_err: Option<serde_json::Error> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v = match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(v) => v,
+            Err(e) => {
+                if first_parse_err.is_none() {
+                    first_parse_err = Some(e);
+                }
+                continue;
+            }
+        };
+        let Some(ty) = v.get("type").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        saw_any_event = true;
+        match ty {
+            "item.completed" => {
+                if let Some(item) = v.get("item")
+                    && item.get("type").and_then(|x| x.as_str()) == Some("agent_message")
+                    && let Some(t) = item.get("text").and_then(|x| x.as_str())
+                {
+                    latest_text = t.to_string();
+                }
+            }
+            "turn.completed" => {
+                let usage = v.get("usage").cloned().unwrap_or(serde_json::Value::Null);
+                let pick = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                tokens = TokenSpend {
+                    input: pick("input_tokens"),
+                    output: pick("output_tokens"),
+                    cache_read: pick("cached_input_tokens"),
+                    cache_create: 0,
+                };
+                class = Some(SpawnFailureClass::Success);
+            }
+            "turn.failed" => {
+                let status = v
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|inner| inner.get("status").and_then(|x| x.as_u64()))
+                    .map(|n| n as u16);
+                let kind = match status {
+                    Some(s) => classify_http_status(s),
+                    None => RuntimeErrorKind::Unknown,
+                };
+                class = Some(SpawnFailureClass::RuntimeError(kind));
+            }
+            "error" => {
+                saw_error_event = true;
+            }
+            _ => {} // lenient — skip unknown events
+        }
+    }
+
+    if !saw_any_event {
+        return Err(first_parse_err
+            .unwrap_or_else(|| {
+                serde_json::from_str::<serde_json::Value>("").expect_err("empty parses to err")
+            })
+            .into());
+    }
+
+    let final_class = class.unwrap_or(if saw_error_event {
+        SpawnFailureClass::RuntimeError(RuntimeErrorKind::Unknown)
+    } else {
+        SpawnFailureClass::RuntimeError(RuntimeErrorKind::Spawn)
+    });
+
+    Ok((latest_text, tokens, final_class))
+}
+
 /// Scan `text` for `closed <id> —` markers (the literal line `hew task
 /// close` emits). Returns the first id, prefering hew-style ids. Returns
 /// `None` if no close marker is found.
@@ -528,5 +633,70 @@ mod tests {
         assert_eq!(tokens.cache_read, 22827);
         assert_eq!(tokens.cache_create, 23362);
         assert_eq!(detect_closed_task(&text).as_deref(), Some("hew-e2i"));
+    }
+
+    #[test]
+    fn parse_codex_jsonl_extracts_usage_on_success() {
+        let bytes = include_bytes!("../tests/fixtures/codex-exec-success.jsonl");
+        let (text, tokens, class) = parse_codex_jsonl(bytes).expect("fixture parses");
+        assert_eq!(text, "pong");
+        assert_eq!(tokens.input, 11549);
+        assert_eq!(tokens.cache_read, 3456);
+        assert_eq!(tokens.output, 20);
+        assert_eq!(tokens.cache_create, 0);
+        assert_eq!(class, SpawnFailureClass::Success);
+    }
+
+    #[test]
+    fn parse_codex_jsonl_classifies_turn_failed_400_as_badrequest() {
+        let bytes = include_bytes!("../tests/fixtures/codex-exec-turn-failed-400.jsonl");
+        let (_text, tokens, class) = parse_codex_jsonl(bytes).expect("fixture parses");
+        assert_eq!(tokens.total(), 0);
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::BadRequest));
+    }
+
+    #[test]
+    fn parse_codex_jsonl_classifies_truncated_stream_as_spawn_error() {
+        let bytes = include_bytes!("../tests/fixtures/codex-exec-truncated.jsonl");
+        let (text, _tokens, class) = parse_codex_jsonl(bytes).expect("fixture parses");
+        assert_eq!(text, "partial reply, stream cut off");
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Spawn));
+    }
+
+    #[test]
+    fn parse_codex_jsonl_rejects_non_jsonl() {
+        assert!(parse_codex_jsonl(b"not json at all\nstill not json").is_err());
+    }
+
+    #[test]
+    fn parse_codex_jsonl_handles_missing_trailing_newline() {
+        let bytes = b"{\"type\":\"turn.started\"}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":2,\"output_tokens\":3}}";
+        let (_text, tokens, class) = parse_codex_jsonl(bytes).expect("parses without trailing nl");
+        assert_eq!(tokens.input, 1);
+        assert_eq!(tokens.cache_read, 2);
+        assert_eq!(tokens.output, 3);
+        assert_eq!(class, SpawnFailureClass::Success);
+    }
+
+    #[test]
+    fn parse_codex_jsonl_skips_malformed_lines_when_other_events_parse() {
+        let bytes =
+            b"garbage line\n{\"type\":\"turn.completed\",\"usage\":{\"output_tokens\":7}}\n";
+        let (_text, tokens, class) = parse_codex_jsonl(bytes).expect("lenient skip");
+        assert_eq!(tokens.output, 7);
+        assert_eq!(class, SpawnFailureClass::Success);
+    }
+
+    #[test]
+    fn parse_codex_jsonl_error_without_turn_failed_is_unknown_runtime_error() {
+        let bytes = b"{\"type\":\"thread.started\"}\n{\"type\":\"error\",\"message\":\"boom\"}\n";
+        let (_text, _tokens, class) = parse_codex_jsonl(bytes).expect("parses");
+        assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Unknown));
+    }
+
+    #[test]
+    fn parse_codex_jsonl_no_panic_on_empty_input() {
+        assert!(parse_codex_jsonl(b"").is_err());
+        assert!(parse_codex_jsonl(b"\n\n\n").is_err());
     }
 }
