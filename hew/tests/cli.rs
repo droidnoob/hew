@@ -73,3 +73,28 @@ fn stub_prime_requires_skill() {
 // `hew prime` and `hew init` are exercised end-to-end against a stub `bd` in
 // `tests/prime_e2e.rs` and `tests/init_e2e.rs`. Keeping them out of the
 // generic suite avoids depending on whatever `bd` happens to be on PATH.
+
+#[test]
+fn loop_run_help_documents_jobs_flag() {
+    hew().args(["loop", "run", "--help"]).assert().success().stdout(contains("--jobs"));
+}
+
+#[test]
+fn jobs_zero_rejected_by_clap() {
+    // value_parser range 1..=16 should reject 0 at parse-time (exit 2).
+    hew()
+        .args(["loop", "run", "--jobs", "0", "--dry-run", "--max-iter", "1"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn jobs_17_rejected_by_clap() {
+    // value_parser range 1..=16 should reject 17 at parse-time (exit 2).
+    hew()
+        .args(["loop", "run", "--jobs", "17", "--dry-run", "--max-iter", "1"])
+        .assert()
+        .failure()
+        .code(2);
+}

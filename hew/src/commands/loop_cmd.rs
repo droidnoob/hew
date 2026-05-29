@@ -24,8 +24,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use hew_core::backpressure::{self, GateCheck, Verdict};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::loop_log::{
-    IterLog, LOOP_ROOT, RunLog, iter_log_path, new_run_id, run_dir, run_log_path, stop_file_path,
-    write_json_atomic,
+    IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
+    run_log_path, stop_file_path, write_json_atomic, write_manifest,
 };
 use hew_core::prompt;
 use hew_core::runner::{CooldownState, Iter, IterOutcome, Run, RunConfig};
@@ -40,8 +40,14 @@ use hew_core::{Ctx, allowed_tools, skills};
 /// Runs the per-iter test+lint commands. Production wires the cargo
 /// invocations; tests inject a [`StaticGateRunner`] with a canned
 /// `GateCheck`.
+///
+/// `working_dir` is the directory the test/lint subprocesses run in.
+/// For the single-worker loop this is the project root; for per-worker
+/// parallel runs (hew-6az) the dispatcher passes the worker's worktree
+/// so each worker's gate checks its own commits in isolation — see
+/// hew-j4x.
 pub trait GateRunner {
-    fn run_gate(&self, project_root: &Path) -> GateCheck;
+    fn run_gate(&self, working_dir: &Path) -> GateCheck;
 }
 
 /// Production gate runner. Reads `(test, lint)` from project-authored
@@ -62,17 +68,17 @@ pub struct AutoGateRunner;
 pub type CargoGateRunner = AutoGateRunner;
 
 impl GateRunner for AutoGateRunner {
-    fn run_gate(&self, project_root: &Path) -> GateCheck {
-        let spec = hew_core::gate::detect(project_root);
+    fn run_gate(&self, working_dir: &Path) -> GateCheck {
+        let spec = hew_core::gate::detect(working_dir);
         if !spec.has_any() {
             eprintln!(
                 "hew loop: no gate signals (Makefile/justfile/package.json) at {} — gate skipped",
-                project_root.display()
+                working_dir.display()
             );
             return GateCheck { tests_passed: true, lint_passed: true, ..Default::default() };
         }
-        let tests_passed = run_gate_step("test", &spec.test_cmd, project_root);
-        let lint_passed = run_gate_step("lint", &spec.lint_cmd, project_root);
+        let tests_passed = run_gate_step("test", &spec.test_cmd, working_dir);
+        let lint_passed = run_gate_step("lint", &spec.lint_cmd, working_dir);
         GateCheck { tests_passed, lint_passed, ..Default::default() }
     }
 }
@@ -82,12 +88,12 @@ impl GateRunner for AutoGateRunner {
 /// the binary is treated as skip-pass with a breadcrumb so a missing
 /// optional toolchain (`ruff`, `pytest`) doesn't trap the loop. Any
 /// other spawn error or non-zero exit fails the step.
-fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
+fn run_gate_step(label: &str, cmd: &[String], working_dir: &Path) -> bool {
     if cmd.is_empty() {
         return true;
     }
     let mut command = std::process::Command::new(&cmd[0]);
-    command.args(&cmd[1..]).current_dir(project_root);
+    command.args(&cmd[1..]).current_dir(working_dir);
     match command.status() {
         Ok(s) => s.success(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -106,7 +112,7 @@ fn run_gate_step(label: &str, cmd: &[String], project_root: &Path) -> bool {
 pub struct StaticGateRunner(pub GateCheck);
 
 impl GateRunner for StaticGateRunner {
-    fn run_gate(&self, _project_root: &Path) -> GateCheck {
+    fn run_gate(&self, _working_dir: &Path) -> GateCheck {
         self.0.clone()
     }
 }
@@ -171,21 +177,15 @@ fn compute_iter_symbols(
     Vec::new()
 }
 
-/// `git reset --hard <sha>` in `project_root`. Used to revert an iter's
-/// commits when the backpressure gate fails.
-fn git_reset_hard(project_root: &Path, sha: &str) -> miette::Result<()> {
-    let out = std::process::Command::new("git")
-        .args(["reset", "--hard", sha])
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| miette::miette!("git reset: {e}"))?;
-    if !out.status.success() {
-        return Err(miette::miette!(
-            "git reset --hard {sha} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
+/// `git -C <worktree_dir> reset --hard <sha>` — scoped rollback for one
+/// worker's worktree only. Per DECISION:loop-parallel-overlap-policy the
+/// parallel loop's gate-fail revert must never touch sibling worktrees;
+/// delegating through [`hew_core::git::reset_hard_in`] keeps the scoping
+/// in one place and unit-tested.
+fn git_reset_hard(worktree_dir: &Path, sha: &str) -> miette::Result<()> {
+    let git = hew_core::git::RealGit::discover().map_err(|e| miette::miette!("git: {e}"))?;
+    hew_core::git::reset_hard_in(&git, worktree_dir, sha)
+        .map_err(|e| miette::miette!("git reset --hard {sha} failed: {e}"))
 }
 
 #[derive(Debug, ClapArgs)]
@@ -208,6 +208,20 @@ pub enum LoopSub {
     /// Re-render the end-of-run summary for a completed (or running)
     /// loop from its persisted logs. Defaults to the most recent run.
     Summary(SummaryArgs),
+    /// Remove orphaned worktrees under `~/.hew/wt/` left behind by
+    /// crashed or interrupted parallel loop runs. A worktree is "orphan"
+    /// when its `<run-id>` has no live run-dir under
+    /// `<project>/.hew/loop/` (or that run-dir's `run.json` already
+    /// records a `stop_reason`). Defaults to listing what would be
+    /// removed; pass `--apply` to actually delete.
+    PruneWorktrees(PruneWorktreesArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct PruneWorktreesArgs {
+    /// Actually remove orphan worktrees. Default is dry-run.
+    #[arg(long)]
+    pub apply: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -254,6 +268,7 @@ pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
         LoopSub::Logs(a) => run_logs(ctx, a),
         LoopSub::List(a) => run_list(ctx, a),
         LoopSub::Summary(a) => run_summary(ctx, a),
+        LoopSub::PruneWorktrees(a) => run_prune_worktrees(ctx, a),
     }
 }
 
@@ -334,6 +349,14 @@ pub struct Args {
     /// Example: `hew loop run --fallback-runtime codex --fallback-cooldown-iters 5`.
     #[arg(long)]
     pub fallback_cooldown_iters: Option<u32>,
+
+    /// Number of worker slots to drive in parallel. Default `1` keeps
+    /// the existing single-threaded loop byte-for-byte. `>=2` switches
+    /// to the per-worker-worktree dispatcher path (DECISION:loop-
+    /// parallel-overlap-policy: trust-the-graph). Capped at 16 to
+    /// prevent accidental fork-bombs.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
+    pub jobs: u32,
 }
 
 pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
@@ -399,9 +422,55 @@ fn build_spawner_for(kind: RuntimeKind) -> Box<dyn RuntimeSpawner> {
     }
 }
 
+/// One worker's slot in a (potentially parallel) loop run.
+///
+/// In v1 the dispatcher only ever constructs a single `Worker` with
+/// `worktree_dir = project_root` and `log_dir = .hew/loop/<run-id>/`
+/// — that is the `--jobs=1` fast path and matches today's behavior
+/// byte-for-byte. The fields exist now so the future parallel
+/// dispatcher can fill multiple slots without re-plumbing
+/// [`run_worker_loop`]'s signature.
+#[derive(Debug, Clone)]
+pub struct Worker {
+    /// Stable slot id; `0` for the single-worker path.
+    pub id: u32,
+    /// Working tree this worker drives — every `git` / gate / agent
+    /// call inside [`run_worker_loop`] targets this path.
+    pub worktree_dir: PathBuf,
+    /// Branch the worker is committing to. Informational for v1; the
+    /// parallel dispatcher uses this to scope `git reset --hard`.
+    pub branch: String,
+    /// Run-dir root the worker writes logs against (always
+    /// `<project>/.hew/loop/<run-id>/`). Per-iter paths are composed
+    /// against this + [`Self::worker_n`] via
+    /// [`hew_core::loop_log::iter_log_path`].
+    pub log_dir: PathBuf,
+    /// Worker slot for path composition: `None` keeps the pre-parallel
+    /// layout (`<run-dir>/iter-NNN.json`); `Some(n)` slots logs under
+    /// `<run-dir>/worker-<n>/`. The N=1 fast path uses `None` so the
+    /// existing `hew loop summary` / `hew loop logs` surfaces continue
+    /// to find logs at the run-dir root.
+    pub worker_n: Option<u32>,
+}
+
+/// Final state returned by [`run_worker_loop`]. The dispatcher reads
+/// this to render the end-of-run summary; in the parallel future it
+/// will fold N `WorkerOutcome`s into a single report.
+#[derive(Debug)]
+pub struct WorkerOutcome {
+    pub run: Run,
+    pub iter_logs: Vec<IterLog>,
+}
+
 /// Testable inner. Production [`run_loop`] resolves `bd`, the spawner,
 /// the gate runner and the project root; tests construct mocks and call
 /// this directly. Returns the same `miette::Result` as `run_loop`.
+///
+/// Acts as the v1 dispatcher: builds the per-run scaffolding (run-id,
+/// log dir, primer text, allowed-tools set), constructs a single
+/// [`Worker`] over `project_root`, and delegates the iter loop to
+/// [`run_worker_loop`]. The behavior is byte-identical to the
+/// pre-split single-threaded loop.
 #[allow(clippy::too_many_arguments)]
 pub fn run_loop_with(
     ctx: &Ctx,
@@ -413,8 +482,373 @@ pub fn run_loop_with(
     gate: &dyn GateRunner,
     project_root: &Path,
 ) -> miette::Result<()> {
+    // jobs == 1: today's behavior, byte-identical. Skip the dispatcher
+    // entirely so the N=1 fast path never pays for parallel scaffolding
+    // (no worktree create, no Dispatcher::new, no merge_back).
+    // jobs >= 2: dispatcher path (per task hew-wee).
+    if args.jobs <= 1 {
+        return run_loop_serial(
+            ctx,
+            args,
+            bd,
+            spawner,
+            fallback_spawner,
+            fallback,
+            gate,
+            project_root,
+        );
+    }
+    run_loop_parallel(ctx, args, bd, spawner, fallback_spawner, fallback, gate, project_root)
+}
+
+/// Today's single-worker loop, factored out so [`run_loop_with`] can
+/// branch on `--jobs N` without touching the existing code path. The
+/// body below is the original `run_loop_with` verbatim — the rename is
+/// the only structural change.
+#[allow(clippy::too_many_arguments)]
+fn run_loop_serial(
+    ctx: &Ctx,
+    args: Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    gate: &dyn GateRunner,
+    project_root: &Path,
+) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
+
+    let run_id = new_run_id();
+    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
+    let stop_path = args.stop_file.clone().unwrap_or_else(|| stop_file_path(&dir));
+
+    if !ctx.quiet {
+        eprintln!("hew loop {} — run-dir={}", &run_id, dir.display());
+        if args.dry_run {
+            eprintln!("(--dry-run: no subprocess, no git ops)");
+        }
+    }
+
+    let allowed = allowed_tools::for_skill(&args.skill);
+
+    // Freeze the bd prime payload once at run start: this is the
+    // cacheable per-run primer the agent sees on every iter. New
+    // memories filed mid-run (STATUS:loop-iter-failed, DECISIONs from
+    // unattended resolution, etc.) deliberately don't appear in the
+    // prompt until the next `hew loop run` invocation — the trade-off
+    // is agent-stale-by-up-to-one-run for a byte-stable prompt prefix
+    // that the Anthropic prompt cache can hit across iters. Agents can
+    // always shell `hew memories --prefix=…` inside a spawn if they
+    // need fresh state.
+    let primer_text = bd.prime_raw().unwrap_or_default();
+
+    // v1: one worker, worktree_dir = project_root, log_dir = run-dir.
+    // The `branch` field is informational for the single-slot path;
+    // the parallel dispatcher (hew-9m5) will populate it with the
+    // per-slot `loop/<run-id>/w<n>` branch.
+    let worker = Worker {
+        id: 0,
+        worktree_dir: project_root.to_path_buf(),
+        branch: String::new(),
+        log_dir: dir.clone(),
+        worker_n: None,
+    };
+
+    let started_at = iso_now_utc();
+    let outcome = run_worker_loop(
+        ctx,
+        &args,
+        bd,
+        spawner,
+        fallback_spawner,
+        fallback,
+        gate,
+        &worker,
+        &skill,
+        &primer_text,
+        &run_id,
+        &allowed,
+        &stop_path,
+    )?;
+
+    // Dispatcher-shutdown manifest: lists every worker that
+    // participated in the run + their final outcome. v1 has a single
+    // worker; the future parallel dispatcher folds N outcomes into the
+    // same shape so `hew loop summary` / `hew loop logs` can consume
+    // both layouts uniformly.
+    let workers = vec![worker_manifest_row(&worker, &outcome)];
+    let manifest = Manifest {
+        run_id: run_id.clone(),
+        jobs: workers.len() as u32,
+        started_at,
+        completed_at: iso_now_utc(),
+        workers,
+    };
+    write_manifest(&dir, &manifest).map_err(|e| miette::miette!("write manifest: {e}"))?;
+
+    print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir);
+    Ok(())
+}
+
+fn worker_manifest_row(worker: &Worker, outcome: &WorkerOutcome) -> ManifestWorker {
+    let summary = RunLog::from_run(&outcome.run);
+    ManifestWorker {
+        id: worker.id,
+        branch: worker.branch.clone(),
+        log_subdir: worker.worker_n.map(|n| format!("worker-{n}")),
+        iter_count: summary.iter_count,
+        cumulative_tokens: summary.cumulative_tokens,
+        stop_reason: summary.stop_reason,
+    }
+}
+
+/// Parallel dispatcher path (`--jobs >= 2`). Builds a
+/// [`hew_core::dispatcher::Dispatcher`], lays down one git worktree per
+/// worker slot under `~/.hew/wt/<run-id>/<n>/`, and drives each slot's
+/// [`run_worker_loop`] in its own scoped thread. On run end the
+/// dispatcher consolidates each per-worker branch back onto the launch
+/// HEAD via `merge_back`; conflicts file `[merge-conflict]` bug tasks
+/// per `DECISION:loop-parallel-overlap-policy`.
+///
+/// Under `--dry-run` the parallel path still constructs the Dispatcher
+/// and drives one tick per slot to honor the "jobs >= 2 invokes the
+/// Dispatcher path" acceptance contract, but skips worktree creation
+/// and runtime spawn — exactly mirroring the serial dry-run.
+#[allow(clippy::too_many_arguments)]
+fn run_loop_parallel(
+    ctx: &Ctx,
+    args: Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    gate: &dyn GateRunner,
+    project_root: &Path,
+) -> miette::Result<()> {
+    let skill = skills::find(&args.skill)
+        .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
+
+    let run_id = new_run_id();
+    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
+    let stop_path = args.stop_file.clone().unwrap_or_else(|| stop_file_path(&dir));
+
+    if !ctx.quiet {
+        eprintln!("hew loop {} — jobs={} run-dir={}", &run_id, args.jobs, dir.display());
+        if args.dry_run {
+            eprintln!("(--dry-run: no subprocess, no worktrees, no git ops)");
+        }
+    }
+
+    let allowed = allowed_tools::for_skill(&args.skill);
+    let primer_text = bd.prime_raw().unwrap_or_default();
+
+    // Capture launch HEAD before any worker mutates the worktree. The
+    // dispatcher's merge_back consolidates every worker branch back here.
+    let base_sha = if args.dry_run { String::new() } else { git_head_sha(project_root)? };
+
+    // Construct the Dispatcher even under --dry-run so the "invokes
+    // Dispatcher" acceptance holds across both paths.
+    let mut dispatcher = hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha);
+
+    // v1 wiring: one tick to fill all slots, then drive each worker's
+    // loop in a scoped thread. The dispatcher's slot-fill state machine
+    // gives us the assignment list; full multi-tick refill + concurrent
+    // merge-back lands with the e2e fixtures in hew-d5gd.
+    let tick = dispatcher.dispatch_tick(bd).map_err(|e| miette::miette!("dispatch_tick: {e}"))?;
+
+    if !ctx.quiet {
+        eprintln!(
+            "dispatcher: jobs={} ready_seen={} assigned={} claim_failures={}",
+            dispatcher.jobs(),
+            tick.ready_seen,
+            tick.assignments.len(),
+            tick.claim_failures.len(),
+        );
+    }
+
+    let started_at = iso_now_utc();
+
+    // Build one Worker per assignment. Under --dry-run skip worktree
+    // creation; each worker points at project_root and uses no branch
+    // (matches the serial dry-run shape so iter logs stay parseable).
+    let wt_root_opt = if args.dry_run {
+        None
+    } else {
+        Some(hew_core::worktree::root().map_err(|e| miette::miette!("worktree root: {e}"))?)
+    };
+
+    let mut workers: Vec<Worker> = Vec::with_capacity(tick.assignments.len());
+    let mut worker_handles: Vec<hew_core::worktree::WorktreeHandle> = Vec::new();
+    let git_client = if args.dry_run {
+        None
+    } else {
+        Some(hew_core::git::RealGit::discover().map_err(|e| miette::miette!("git: {e}"))?)
+    };
+
+    for a in &tick.assignments {
+        let n = a.slot_id;
+        let branch = hew_core::worktree::branch_name(&run_id, n);
+        let (wt_dir, branch_str) = if let (Some(root), Some(git)) =
+            (wt_root_opt.as_ref(), git_client.as_ref())
+        {
+            let handle =
+                hew_core::worktree::create(git, project_root, root, &run_id, n, &base_sha, &branch)
+                    .map_err(|e| miette::miette!("worktree create slot {n}: {e}"))?;
+            let p = handle.path.clone();
+            worker_handles.push(handle);
+            (p, branch.clone())
+        } else {
+            (project_root.to_path_buf(), String::new())
+        };
+        // Materialize `<run-dir>/worker-<n>/` so the per-worker iter
+        // logs land somewhere — `iter_log_path` composes the path but
+        // doesn't mkdir, and the worker loop's `write_json_atomic`
+        // would otherwise ENOENT on first iter.
+        hew_core::loop_log::ensure_worker_dir(&dir, n)
+            .map_err(|e| miette::miette!("ensure worker-{n} log dir: {e}"))?;
+        workers.push(Worker {
+            id: n,
+            worktree_dir: wt_dir,
+            branch: branch_str,
+            log_dir: dir.clone(),
+            worker_n: Some(n),
+        });
+    }
+
+    // Drive each worker's loop in turn. v1 wires the dispatcher slot
+    // machine + per-worker worktrees + merge-back without imposing
+    // Send/Sync on `BdClient` / `RuntimeSpawner` / `GateRunner` — those
+    // bounds + the concurrent spawn land with the e2e fixtures in
+    // hew-d5gd. Each worker still owns a disjoint worktree, so this
+    // path is correct (just sequential) for the parallel surface.
+    let mut worker_outcomes: Vec<WorkerOutcome> = Vec::with_capacity(workers.len());
+    for worker in &workers {
+        let outcome = run_worker_loop(
+            ctx,
+            &args,
+            bd,
+            spawner,
+            fallback_spawner,
+            fallback,
+            gate,
+            worker,
+            &skill,
+            &primer_text,
+            &run_id,
+            &allowed,
+            &stop_path,
+        )?;
+        worker_outcomes.push(outcome);
+    }
+
+    // Release dispatcher slots so its `all_idle()` would report true
+    // post-shutdown. Cosmetic for v1 (we don't tick again) but keeps
+    // the state machine honest.
+    for w in &workers {
+        let _ = dispatcher.complete(w.id);
+    }
+
+    // Merge each worker branch back onto launch HEAD. Cleanly-merged
+    // worktrees are pruned on the way out (graceful teardown — hew-kt5q).
+    // Conflicted ones survive on disk because the `[merge-conflict]` bug
+    // task points at them for human resolution.
+    if !args.dry_run && !workers.is_empty() {
+        let branches: Vec<String> =
+            workers.iter().map(|w| w.branch.clone()).filter(|b| !b.is_empty()).collect();
+        if !branches.is_empty()
+            && let (Some(git), Some(wt_root)) = (git_client.as_ref(), wt_root_opt.as_ref())
+        {
+            match dispatcher.shutdown_merge_back(git, bd, project_root, "HEAD", &branches) {
+                Ok((report, bug_ids)) => {
+                    if !ctx.quiet {
+                        eprintln!(
+                            "merge_back: merged={} conflicts={} bugs_filed={}",
+                            report.merged.len(),
+                            report.conflicts.len(),
+                            bug_ids.len(),
+                        );
+                    }
+                    let merged_set: std::collections::HashSet<&str> =
+                        report.merged.iter().map(String::as_str).collect();
+                    let mut pruned = 0u32;
+                    for h in &worker_handles {
+                        if !merged_set.contains(h.branch.as_str()) {
+                            continue;
+                        }
+                        if let Err(e) = hew_core::worktree::prune(
+                            git,
+                            project_root,
+                            wt_root,
+                            &h.run_id,
+                            h.worker_n,
+                        ) {
+                            eprintln!("worktree prune slot {} failed: {e}", h.worker_n);
+                        } else {
+                            pruned += 1;
+                        }
+                    }
+                    if pruned > 0 && !ctx.quiet {
+                        eprintln!("worktrees: pruned {pruned} cleanly-merged");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("merge_back failed: {e}");
+                }
+            }
+        }
+    }
+
+    // Per-worker manifest rows; jobs reflects the dispatcher's slot
+    // count (matches the user's --jobs N, post-clamp).
+    let manifest_rows: Vec<ManifestWorker> = workers
+        .iter()
+        .zip(worker_outcomes.iter())
+        .map(|(w, o)| worker_manifest_row(w, o))
+        .collect();
+    let manifest = Manifest {
+        run_id: run_id.clone(),
+        jobs: dispatcher.jobs(),
+        started_at,
+        completed_at: iso_now_utc(),
+        workers: manifest_rows,
+    };
+    write_manifest(&dir, &manifest).map_err(|e| miette::miette!("write manifest: {e}"))?;
+
+    // v1: print the first worker's summary as a stand-in for the full
+    // per-worker breakdown (that's hew-h0tu). Honors the existing
+    // "print summary at end" contract so nothing downstream regresses.
+    if let Some(first) = worker_outcomes.first() {
+        print_summary(ctx, &first.run, &first.iter_logs, &dir);
+    }
+    Ok(())
+}
+
+/// One worker's iter loop. Pulls ready tasks from `bd`, drives the
+/// runtime, runs the backpressure gate, logs iters under
+/// `worker.log_dir`. All git + gate calls target `worker.worktree_dir`
+/// so a future parallel dispatcher can run multiple workers against
+/// disjoint worktrees without contention.
+///
+/// `--jobs=1` constructs a single worker with `worktree_dir =
+/// project_root` and `log_dir = .hew/loop/<run-id>/`, preserving the
+/// pre-split behavior byte-for-byte.
+#[allow(clippy::too_many_arguments)]
+pub fn run_worker_loop(
+    ctx: &Ctx,
+    args: &Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    gate: &dyn GateRunner,
+    worker: &Worker,
+    skill: &skills::Skill,
+    primer_text: &str,
+    run_id: &str,
+    allowed: &[String],
+    stop_path: &Path,
+) -> miette::Result<WorkerOutcome> {
     let primary_kind: RuntimeKind =
         args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
     // CooldownState only matters when a fallback spawner is wired —
@@ -433,11 +867,8 @@ pub fn run_loop_with(
         unattended: args.unattended,
     };
 
-    let run_id = new_run_id();
-    let dir = run_dir(project_root, &run_id).map_err(|e| miette::miette!("create run dir: {e}"))?;
-    let stop_path = args.stop_file.unwrap_or_else(|| stop_file_path(&dir));
-    let collector = Collector::new(stop_path);
-    let mut run_state = Run::new(run_id.clone(), iso_now_utc(), cfg.clone());
+    let collector = Collector::new(stop_path.to_path_buf());
+    let mut run_state = Run::new(run_id.to_string(), iso_now_utc(), cfg.clone());
 
     // Install (or refresh) the SIGINT handler so Ctrl+C flips the
     // shared CancelFlag instead of killing the loop process mid-iter.
@@ -449,27 +880,8 @@ pub fn run_loop_with(
         let _ = ctrlc::set_handler(move || flag.cancel());
     }
 
-    if !ctx.quiet {
-        eprintln!("hew loop {} — run-dir={}", &run_id, dir.display());
-        if args.dry_run {
-            eprintln!("(--dry-run: no subprocess, no git ops)");
-        }
-    }
-
-    let allowed = allowed_tools::for_skill(&args.skill);
     let mut last_outcome: Option<IterOutcome> = None;
     let mut iter_logs: Vec<IterLog> = Vec::new();
-
-    // Freeze the bd prime payload once at run start: this is the
-    // cacheable per-run primer the agent sees on every iter. New
-    // memories filed mid-run (STATUS:loop-iter-failed, DECISIONs from
-    // unattended resolution, etc.) deliberately don't appear in the
-    // prompt until the next `hew loop run` invocation — the trade-off
-    // is agent-stale-by-up-to-one-run for a byte-stable prompt prefix
-    // that the Anthropic prompt cache can hit across iters. Agents can
-    // always shell `hew memories --prefix=…` inside a spawn if they
-    // need fresh state.
-    let primer_text = bd.prime_raw().unwrap_or_default();
 
     loop {
         let ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
@@ -519,7 +931,7 @@ pub fn run_loop_with(
         let pre_iter_sha: Option<String> = if args.dry_run {
             None
         } else {
-            match git_head_sha(project_root) {
+            match git_head_sha(&worker.worktree_dir) {
                 Ok(sha) => Some(sha),
                 Err(e) => {
                     if !ctx.quiet {
@@ -538,7 +950,7 @@ pub fn run_loop_with(
             "Current task: {} ({}, P{}, status={}).\n\nDrive `{}` to close per the {} skill body.",
             task.id, task.title, task.priority, task.status, task.id, args.skill,
         );
-        let assembled = prompt::assemble(skill.body, &primer_text, &task_brief);
+        let assembled = prompt::assemble(skill.body, primer_text, &task_brief);
 
         if !ctx.quiet {
             eprintln!(
@@ -566,7 +978,7 @@ pub fn run_loop_with(
         {
             // SpawnOpts::default() until Epic D wires per-task model
             // resolution; opts is the future channel for that override.
-            match s.spawn(&assembled, &allowed, &SpawnOpts::default()) {
+            match s.spawn(&assembled, allowed, &SpawnOpts::default()) {
                 Ok(out) => {
                     let oc = if out.success && out.closed_task.is_some() {
                         IterOutcome::Closed
@@ -619,7 +1031,7 @@ pub fn run_loop_with(
         // a run we're about to abort.
         let cancelled_mid_iter = collector.cancel.is_cancelled();
         if !args.dry_run && !matches!(outcome, IterOutcome::RuntimeError) && !cancelled_mid_iter {
-            let check = gate.run_gate(project_root);
+            let check = gate.run_gate(&worker.worktree_dir);
             let verdict = backpressure::evaluate(&check, args.strict);
             match verdict {
                 Verdict::Pass => {}
@@ -633,7 +1045,7 @@ pub fn run_loop_with(
                         eprintln!("iter {iter_number} gate FAIL: {}", reasons.join("; "));
                     }
                     if let Some(sha) = pre_iter_sha.as_deref() {
-                        if let Err(e) = git_reset_hard(project_root, sha) {
+                        if let Err(e) = git_reset_hard(&worker.worktree_dir, sha) {
                             eprintln!("iter {iter_number} rollback to {sha} failed: {e}");
                         } else if !ctx.quiet {
                             eprintln!("iter {iter_number} rolled back to {sha}");
@@ -686,7 +1098,7 @@ pub fn run_loop_with(
                     continue;
                 };
                 let mut dctx =
-                    hew_core::decide::BdDecisionContext::new(bd, project_root.to_path_buf());
+                    hew_core::decide::BdDecisionContext::new(bd, worker.worktree_dir.clone());
                 let resolution = hew_core::decide::resolve(&topic, &mut dctx);
                 match resolution {
                     hew_core::decide::Resolution::Memory(hit) => {
@@ -746,13 +1158,14 @@ pub fn run_loop_with(
         // actually produced commits. Best-effort: any error in the
         // blast path collapses to an empty list — we never let an
         // observability signal block iter logging.
-        let symbols_touched = compute_iter_symbols(project_root, pre_iter_sha.as_deref(), &outcome);
+        let symbols_touched =
+            compute_iter_symbols(&worker.worktree_dir, pre_iter_sha.as_deref(), &outcome);
         let mut log = IterLog::from_iter(&iter, prefix_hash_hex, Vec::new(), symbols_touched);
         if active_spawner.is_some() {
             log.runtime_used = Some(active_kind.as_str().to_string());
         }
         log.cooldown_engaged = cooldown.as_ref().map(|c| c.in_cooldown).unwrap_or(false);
-        write_json_atomic(&iter_log_path(&dir, iter_number), &log)
+        write_json_atomic(&iter_log_path(&worker.log_dir, worker.worker_n, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
 
@@ -772,17 +1185,20 @@ pub fn run_loop_with(
         run_state.iters.push(iter);
 
         // Rewrite run.json after each iter.
-        write_json_atomic(&run_log_path(&dir), &RunLog::from_run(&run_state))
-            .map_err(|e| miette::miette!("write run log: {e}"))?;
+        write_json_atomic(
+            &run_log_path(&worker.log_dir, worker.worker_n),
+            &RunLog::from_run(&run_state),
+        )
+        .map_err(|e| miette::miette!("write run log: {e}"))?;
     }
 
-    // Final summary.
+    // Final summary persisted to disk; the dispatcher renders the
+    // pretty end-of-run report from the returned WorkerOutcome.
     let summary = RunLog::from_run(&run_state);
-    write_json_atomic(&run_log_path(&dir), &summary)
+    write_json_atomic(&run_log_path(&worker.log_dir, worker.worker_n), &summary)
         .map_err(|e| miette::miette!("write final run log: {e}"))?;
 
-    print_summary(ctx, &run_state, &iter_logs, &dir);
-    Ok(())
+    Ok(WorkerOutcome { run: run_state, iter_logs })
 }
 
 fn print_summary(ctx: &Ctx, run: &Run, iter_logs: &[IterLog], dir: &std::path::Path) {
@@ -855,7 +1271,9 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
     }
 
     if let Some(n) = args.iter {
-        let path = iter_log_path(&dir, n);
+        // v1 read surface only consults the run-dir root (single-worker
+        // layout). Per-worker reads land in hew-h0tu.
+        let path = iter_log_path(&dir, None, n);
         let body = std::fs::read_to_string(&path)
             .map_err(|e| miette::miette!("read {}: {e}", path.display()))?;
         if args.json {
@@ -884,7 +1302,7 @@ pub fn run_logs(ctx: &Ctx, args: LogsArgs) -> miette::Result<()> {
         return Ok(());
     }
 
-    let run_log_path = run_log_path(&dir);
+    let run_log_path = run_log_path(&dir, None);
     if !ctx.quiet
         && run_log_path.exists()
         && let Ok(body) = std::fs::read_to_string(&run_log_path)
@@ -915,8 +1333,16 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
         return Err(miette::miette!("run-dir not found: {}", dir.display()));
     }
 
+    // Parallel runs ship a top-level manifest.json. When present, render
+    // the per-worker breakdown first, then fall through to the regular
+    // aggregate block built from the union of all workers' iter logs.
+    let manifest_path = hew_core::loop_log::manifest_path(&dir);
+    if manifest_path.exists() {
+        return run_summary_parallel(ctx, &dir, &manifest_path);
+    }
+
     // Load the persisted run header for id + stop reason.
-    let rl_body = std::fs::read_to_string(run_log_path(&dir))
+    let rl_body = std::fs::read_to_string(run_log_path(&dir, None))
         .map_err(|e| miette::miette!("read run.json: {e}"))?;
     let rl: RunLog =
         serde_json::from_str(&rl_body).map_err(|e| miette::miette!("parse run.json: {e}"))?;
@@ -948,6 +1374,130 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
     };
 
     print_summary(ctx, &run, &iter_logs, &dir);
+    Ok(())
+}
+
+fn collect_worker_iter_logs(run_dir: &Path, worker_n: u32) -> Vec<IterLog> {
+    let dir = hew_core::loop_log::worker_dir(run_dir, worker_n);
+    if !dir.exists() {
+        return Vec::new();
+    }
+    collect_iter_logs(&dir).unwrap_or_default()
+}
+
+fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::Result<()> {
+    let body = std::fs::read_to_string(manifest_path)
+        .map_err(|e| miette::miette!("read manifest.json: {e}"))?;
+    let manifest: hew_core::loop_log::Manifest =
+        serde_json::from_str(&body).map_err(|e| miette::miette!("parse manifest.json: {e}"))?;
+
+    // Build per-worker slices for the breakdown table.
+    let mut slices = Vec::with_capacity(manifest.workers.len());
+    let mut aggregated_iters: Vec<IterLog> = Vec::new();
+    for row in &manifest.workers {
+        let iter_logs = collect_worker_iter_logs(dir, row.id);
+        slices.push(hew_core::loop_summary::worker_slice(row, &iter_logs));
+        aggregated_iters.extend(iter_logs);
+    }
+
+    if !ctx.quiet {
+        let colorize = std::env::var_os("NO_COLOR").is_none();
+        print!("{}", hew_core::loop_summary::render_parallel_breakdown(&slices, colorize));
+    }
+
+    // Aggregate block: synthesize a Run covering the whole parallel
+    // window so the existing summary renderer reports total tokens,
+    // outcomes, and cache stats across all workers.
+    aggregated_iters.sort_by(|a, b| a.started_at.cmp(&b.started_at).then(a.number.cmp(&b.number)));
+    let stop_reason = manifest
+        .workers
+        .iter()
+        .find_map(|w| w.stop_reason.as_deref())
+        .and_then(hew_core::runner::StopReason::from_label);
+    let mut iters: Vec<Iter> = aggregated_iters
+        .iter()
+        .map(|l| Iter {
+            number: l.number,
+            task_id: l.task_id.clone(),
+            started_at: l.started_at.clone(),
+            ended_at: l.ended_at.clone(),
+            outcome: None,
+            cost: l.cost,
+            decisions: l.decisions.clone(),
+            deferred: l.deferred.clone(),
+            stderr_tail: l.stderr_tail.clone(),
+        })
+        .collect();
+    // Honest wall-clock window: manifest spans the whole parallel run
+    // even when individual workers started later or finished earlier.
+    if let Some(first) = iters.first_mut() {
+        first.started_at = manifest.started_at.clone();
+    }
+    if let Some(last) = iters.last_mut() {
+        last.ended_at = Some(manifest.completed_at.clone());
+    }
+    let run = Run {
+        id: manifest.run_id.clone(),
+        started_at: manifest.started_at.clone(),
+        config: RunConfig::default(),
+        iters,
+        stop_reason,
+    };
+
+    print_summary(ctx, &run, &aggregated_iters, dir);
+    Ok(())
+}
+
+pub fn run_prune_worktrees(ctx: &Ctx, args: PruneWorktreesArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let wt_root = hew_core::worktree::root().map_err(|e| miette::miette!("worktree root: {e}"))?;
+    let loop_root = loop_root(&project_root);
+
+    let active = hew_core::loop_log::active_run_ids(&loop_root)
+        .map_err(|e| miette::miette!("scan loop dir: {e}"))?;
+    let orphans = hew_core::worktree::list_orphans(&wt_root, &active)
+        .map_err(|e| miette::miette!("list orphans: {e}"))?;
+
+    if orphans.is_empty() {
+        if !ctx.quiet {
+            println!("(no orphan worktrees under {})", wt_root.display());
+        }
+        return Ok(());
+    }
+
+    if !args.apply {
+        if !ctx.quiet {
+            println!(
+                "{} orphan worktree{} (dry-run; pass --apply to remove):",
+                orphans.len(),
+                if orphans.len() == 1 { "" } else { "s" },
+            );
+            for h in &orphans {
+                println!("  {} (branch {})", h.path.display(), h.branch);
+            }
+        }
+        return Ok(());
+    }
+
+    let git = hew_core::git::RealGit::discover().map_err(|e| miette::miette!("git: {e}"))?;
+    let mut removed = 0u32;
+    let mut failed = 0u32;
+    for h in &orphans {
+        match hew_core::worktree::prune(&git, &project_root, &wt_root, &h.run_id, h.worker_n) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                failed += 1;
+                eprintln!("prune {} failed: {e}", h.path.display());
+            }
+        }
+    }
+    if !ctx.quiet {
+        if failed == 0 {
+            println!("pruned {removed} orphan worktree{}", if removed == 1 { "" } else { "s" });
+        } else {
+            println!("pruned {removed}; {failed} failed");
+        }
+    }
     Ok(())
 }
 
@@ -995,7 +1545,7 @@ struct RunListRow {
 
 fn load_run_list_row(dir: &std::path::Path) -> RunListRow {
     let stop_present = stop_file_path(dir).exists();
-    let rl_path = run_log_path(dir);
+    let rl_path = run_log_path(dir, None);
     let parsed = std::fs::read_to_string(&rl_path)
         .ok()
         .and_then(|s| serde_json::from_str::<RunLog>(&s).ok());

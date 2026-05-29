@@ -6,6 +6,43 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`hew loop --jobs N` — parallel worker slots via per-worker git
+  worktrees.** Default `1` keeps today's single-threaded loop
+  byte-for-byte (no worktree, no merge-back, no manifest). `N >= 2`
+  switches to a dispatcher path that lays down one git worktree per
+  slot at `~/.hew/wt/<run-id>/<n>/`, drains the ready queue in
+  parallel, then merges each `loop/<run-id>/w<n>` branch back onto
+  launch HEAD at shutdown. Clean merges prune the worktree on the way
+  out (`hew-kt5q`); conflicted merges file a `[merge-conflict]` bug
+  task and leave the worktree for hand-resolution. Trust-the-graph
+  per `DECISION:loop-parallel-overlap-policy`: any `bd ready` task is
+  parallelizable; ordering belongs in dep edges, not overlap
+  metadata.
+- **`hew loop prune-worktrees [--apply]`** — garbage-collect orphan
+  worktrees left behind by crashed parallel runs. Dry-run by default
+  (lists what would be removed); `--apply` actually deletes. A
+  worktree is "orphan" when its `<run-id>` has no live run-dir under
+  `<project>/.hew/loop/` (or that run-dir's `run.json` already
+  records a `stop_reason`). Per-worker branches survive in the
+  project's git history.
+- **`hew loop summary` per-worker breakdown.** Parallel runs render a
+  `wkr | iters | closed | runtime | tokens | stop` table with a
+  totals row before the aggregate summary block (`hew-h0tu`). Serial
+  runs (no `manifest.json`) are unchanged.
+- **`hew_core::git::reset_hard_in(worktree, sha)`** — per-worker
+  rollback helper. Runs `git -C <worktree> reset --hard <sha>` so the
+  parallel loop's gate-fail revert is scoped to one worker's worktree
+  and never touches siblings (`DECISION:loop-parallel-overlap-policy`).
+  `loop_cmd::git_reset_hard` now delegates here.
+- **`hew_core::worktree::branch_exists` + `create()` collision guard.**
+  Reusing a `run_id` after a crashed run would land `git worktree add
+  -b` on a stale branch; `create()` now pre-checks via `rev-parse
+  --verify` and returns a clear `GitNonZero` rather than silently
+  overwriting. Branch naming stays the documented `loop/<run-id>/w<n>`
+  (see `worktree::branch_name`).
+
 ### Changed
 
 - **`hew-decompose` skill documents `bd create --graph` for batch task

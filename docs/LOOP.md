@@ -39,6 +39,7 @@ Use the in-conversation flow (`/hew:auto`, `/hew:work`) when:
 --runtime       = claude  one of {claude, codex}; see Runtimes below
 --fallback-runtime  = unset  on primary RuntimeError, route iters to this runtime
 --fallback-cooldown-iters = 3  iters to stick on fallback before retrying primary
+--jobs              = 1     parallel worker slots (1 = serial fast-path)
 ```
 
 Override via CLI flags; see `hew loop run --help` for the full list.
@@ -155,6 +156,172 @@ The loop categorizes each iter's outcome before deciding what to do:
 > 400 errors — the stream's `turn.failed` event is the source of truth.
 > Hew's parser reads the event, not the exit code, when classifying
 > failures. Per `RESEARCH:codex-exec-exit-code`.
+
+---
+
+## Parallel runs
+
+`--jobs N` (range `1..=16`) launches `N` worker slots that drain the
+ready queue concurrently. The default is `1`, which preserves today's
+single-threaded loop byte-for-byte (no worktrees, no merge-back, no
+manifest). `N >= 2` switches to the dispatcher path.
+
+Per `DECISION:loop-parallel-overlap-policy` v1 is **trust-the-graph**:
+any `bd ready` task is parallelizable. No "touches" predicate, no
+overlap heuristic. The decomposer already encodes ordering as
+dependency edges; if two ready tasks shouldn't run together, file a
+dep instead of annotating overlap metadata. Merge conflicts surface
+as `[merge-conflict]` bug tasks at run end.
+
+### Layout
+
+```text
+~/.hew/wt/                                 ← out-of-tree per worker
+  <run-id>/
+    0/                                     ← worker 0 checkout
+    1/                                     ← worker 1 checkout
+
+<project>/.hew/loop/<run-id>/              ← run-dir (unchanged location)
+  manifest.json                            ← cross-worker manifest (parallel only)
+  worker-0/
+    run.json
+    iter-001.json
+    iter-002.json
+  worker-1/
+    run.json
+    iter-001.json
+```
+
+Per `DECISION:loop-worktree-location` worktrees live under `~/.hew/wt/`
+rather than inside the project (the project's `.hew/loop/` directory
+is tracked in git on this repo; an in-tree worktree would pollute
+`git status` or force gitignore drift).
+
+Each worker gets a fresh branch `loop/<run-id>/w<n>` cut from the
+launch HEAD's sha. Iters commit there; the dispatcher merges every
+branch back at shutdown.
+
+### Branch naming
+
+```text
+loop/<run-id>/w<n>
+```
+
+Stable per worker, deterministic per run. A `branch_exists` pre-check
+refuses to overwrite if you reuse a `run-id` (which can happen if the
+previous run crashed before cleanup) — run `hew loop prune-worktrees`
+first.
+
+### Merge-back
+
+At shutdown the dispatcher checks each `loop/<run-id>/w<n>` back onto
+the launch HEAD with `git merge --no-ff --no-edit`. Each branch lands
+as its own merge commit so worker history survives in `git log
+--graph`. Behavior is sequential and short-circuit-free: one
+conflicting merge does not stop later workers from being attempted.
+
+- **Clean merge:** worker branch becomes a merge commit on HEAD; the
+  worktree is pruned in the same shutdown pass (`hew-kt5q`). Branch
+  reference stays.
+- **Conflict:** the in-progress merge is aborted (`git merge --abort`),
+  a `[merge-conflict]` bug task is filed via `bd q` with the unmerged
+  file list, and the worker's worktree **stays on disk** so the
+  operator can resolve by hand. Hint in the bug body points at
+  `~/.hew/wt/<run-id>/<n>/`.
+
+### `--jobs N` worked example (N=2)
+
+```text
+$ bd ready
+hew-r1  Refactor TodoStore::insert path
+hew-r2  Add  cli flag --json to todo list
+hew-r3  Fix typo in README
+hew-r4  Drop dead helper in cli.rs
+
+$ hew loop run --jobs 2 --max-iter 4
+hew loop loop-2026-05-30T12:30:00Z-deadbeef — jobs=2 \
+  run-dir=.hew/loop/loop-2026-05-30T12:30:00Z-deadbeef
+dispatcher: jobs=2 ready_seen=4 assigned=2 claim_failures=0
+
+# Dispatcher claims hew-r1 → slot 0, hew-r2 → slot 1.
+# Worktrees created at:
+#   ~/.hew/wt/loop-2026-05-30T12:30:00Z-deadbeef/0  (branch loop/.../w0)
+#   ~/.hew/wt/loop-2026-05-30T12:30:00Z-deadbeef/1  (branch loop/.../w1)
+# Worker 0 drains its remaining ready queue (hew-r3); worker 1 hits
+# the agent and closes hew-r2, then picks up hew-r4 next iter.
+
+merge_back: merged=2 conflicts=0 bugs_filed=0
+worktrees: pruned 2 cleanly-merged
+
+  per-worker:
+             wkr  iters  closed runtime       tokens stop
+             0        2       2 claude         12,500 ready_empty
+             1        2       2 claude         11,800 ready_empty
+             all      4       4               24,300
+
+  hew loop summary — total tokens 24,300 …
+```
+
+Read the manifest directly:
+
+```sh
+cat .hew/loop/<run-id>/manifest.json
+```
+
+### Concurrency caveats
+
+- **Anthropic tier rate limits.** Each worker is a separate `claude -p`
+  subprocess. Two workers running at the same tier double the
+  per-minute rate request load. Start at `--jobs 2`; only increase
+  once you've watched a run and confirmed you're not throttling.
+- **Prompt-cache pool fragmentation.** Each worker assembles its own
+  prompt. With identical `--skill` + identical bd primer the prefix
+  hash will match across workers (verify in `iter-001.json::
+  prompt_prefix_hash`), so cache lookups hit. Mixing models or skills
+  across workers fragments the cache pool; expect higher per-iter
+  input tokens.
+- **Disk pressure.** Each worktree is a full checkout of the project.
+  For a 500 MB repo at `--jobs 8` that's 4 GB of working trees under
+  `~/.hew/wt/`. Prune after crashed runs.
+- **Token budgets are global.** `--budget-tokens N` caps the
+  cumulative spend across **all** workers, not per worker.
+
+### Recommendation
+
+Start at `--jobs 2`. The graph-trust assumption holds up best when the
+two slots target genuinely disjoint task sets; if you see frequent
+`[merge-conflict]` bug tasks, that's a signal your decomposer is
+under-specifying deps — fix the graph, not the loop.
+
+---
+
+## Recovering from a crashed parallel run
+
+If the loop process dies (panic, kill -9, host reboot) mid-run:
+
+1. Worker worktrees under `~/.hew/wt/<run-id>/<n>/` stay on disk
+   because no shutdown pass ran.
+2. `<project>/.hew/loop/<run-id>/run.json` either is missing
+   (crashed before first iter) or has `stop_reason = None`. Either
+   way, `hew_core::loop_log::active_run_ids` flags the run as still
+   "active" and won't auto-prune its worktrees.
+3. Inspect the crashed worktrees by hand if you need to. Per-worker
+   branches `loop/<run-id>/w<n>` are intact — you can `git checkout`
+   any of them.
+4. Once you've extracted what you need, mark the run completed by
+   either deleting `<project>/.hew/loop/<run-id>/` or by hand-setting
+   a stop reason in its `run.json`. Then run:
+
+   ```sh
+   hew loop prune-worktrees           # dry-run; lists orphans
+   hew loop prune-worktrees --apply   # delete them
+   ```
+
+`hew loop prune-worktrees` walks `~/.hew/wt/` and removes worktrees
+whose `<run-id>` has no matching active run-dir under the current
+project's `.hew/loop/`. It does **not** delete the per-worker branches
+— those live in the project's git history and remain rebaseable
+material until you `git branch -D` them yourself.
 
 ---
 

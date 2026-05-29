@@ -1,0 +1,16 @@
+{
+  "number": 3,
+  "task_id": "hew-w0-t3",
+  "started_at": "2026-05-30T12:02:30Z",
+  "ended_at": "2026-05-30T12:03:30Z",
+  "outcome": "closed",
+  "prompt_prefix_hash": "abc1",
+  "cost": { "input": 2000, "output": 1000, "cache_read": 1500, "cache_create": 0 },
+  "decisions": [],
+  "deferred": [],
+  "tool_calls": [],
+  "stderr_tail": null,
+  "symbols_touched": [],
+  "runtime_used": "claude",
+  "cooldown_engaged": false
+}

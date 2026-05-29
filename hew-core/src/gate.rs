@@ -42,13 +42,21 @@ impl GateSpec {
     }
 }
 
-/// Resolve the gate for `root` from project-authored signals.
+/// Resolve the gate for `working_dir` from project-authored signals.
+///
+/// `working_dir` is the directory the gate will run *in* — for the
+/// single-worker loop this is the project root; for a per-worker
+/// parallel loop it is the worker's worktree (see hew-j4x). Per-worker
+/// `target/` (cargo) and `node_modules/` (npm/pnpm) stay isolated by
+/// virtue of separate worktrees; this module just reads signals from
+/// the right place.
 ///
 /// Always returns a `GateSpec` (possibly empty). Empty vec on a step
 /// means "no signal for this step, skip it" — the runner treats that
 /// as pass with a breadcrumb, not as a failure.
-pub fn detect(root: &Path) -> GateSpec {
+pub fn detect(working_dir: &Path) -> GateSpec {
     let mut spec = GateSpec::default();
+    let root = working_dir;
 
     if let Some(path) = first_existing(root, &["justfile", ".justfile", "Justfile"]) {
         let recipes = parse_justfile(&path);

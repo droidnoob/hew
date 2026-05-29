@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::loop_log::IterLog;
+use crate::loop_log::{IterLog, ManifestWorker};
 use crate::runner::{Run, StopReason, TokenSpend};
 use crate::time::parse_iso_utc;
 
@@ -216,6 +216,100 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
         summary.stop_reason.map(|r| format!("{r:?}")).unwrap_or_else(|| "(none)".to_string());
     let _ = writeln!(s, "  {bold}stop{reset}:      {stop}");
     let _ = writeln!(s, "  {bold}logs{reset}:      {dim}{logs_path}{reset}");
+    s
+}
+
+/// Per-worker slice of a parallel loop run: enough to render one row
+/// of the breakdown table without re-walking the full per-iter logs at
+/// render time. Built from a [`ManifestWorker`] + that worker's iter
+/// logs by [`worker_slice`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerSlice {
+    pub worker_n: u32,
+    pub iter_count: u32,
+    /// Iters whose outcome was `closed` — a proxy for "tasks this
+    /// worker pushed across the line."
+    pub tasks_closed: u32,
+    /// Last non-`None` `runtime_used` seen in the worker's iters.
+    /// Reflects the runtime the worker ended on (post-cooldown for
+    /// fallback runs); `None` when no iter recorded one (dry-run).
+    pub runtime_used: Option<String>,
+    pub total_tokens: u64,
+    pub stop_reason: Option<String>,
+}
+
+/// Build a [`WorkerSlice`] from the manifest row + the worker's
+/// per-iter logs. `iter_count` and `total_tokens` mirror the manifest
+/// row (authoritative — written at shutdown); `tasks_closed` /
+/// `runtime_used` come from walking the logs.
+pub fn worker_slice(row: &ManifestWorker, iter_logs: &[IterLog]) -> WorkerSlice {
+    let tasks_closed =
+        iter_logs.iter().filter(|l| l.outcome.as_deref() == Some("closed")).count() as u32;
+    let runtime_used =
+        iter_logs.iter().rev().find_map(|l| l.runtime_used.clone()).filter(|s| !s.is_empty());
+    WorkerSlice {
+        worker_n: row.id,
+        iter_count: row.iter_count,
+        tasks_closed,
+        runtime_used,
+        total_tokens: row.cumulative_tokens,
+        stop_reason: row.stop_reason.clone(),
+    }
+}
+
+/// Render a per-worker breakdown table with totals row. Empty input
+/// returns an empty string (caller decides whether to print the
+/// section header).
+pub fn render_parallel_breakdown(slices: &[WorkerSlice], colorize: bool) -> String {
+    use std::fmt::Write;
+    if slices.is_empty() {
+        return String::new();
+    }
+    let bold = if colorize { "\x1b[1m" } else { "" };
+    let dim = if colorize { "\x1b[2m" } else { "" };
+    let reset = if colorize { "\x1b[0m" } else { "" };
+
+    let mut s = String::new();
+    let _ = writeln!(s, "  {bold}per-worker{reset}:");
+    // Column widths sized for the common case (10s of iters, <10M
+    // tokens, runtime ∈ {claude, codex}). Stop column truncates at 16.
+    let _ = writeln!(
+        s,
+        "             {dim}{:<4} {:>6} {:>7} {:<8} {:>11} {:<16}{reset}",
+        "wkr", "iters", "closed", "runtime", "tokens", "stop",
+    );
+
+    let mut total_iters = 0u32;
+    let mut total_closed = 0u32;
+    let mut total_tokens = 0u64;
+    for sl in slices {
+        let runtime = sl.runtime_used.as_deref().unwrap_or("-");
+        let stop = sl.stop_reason.as_deref().unwrap_or("-");
+        let stop_trunc: String = stop.chars().take(16).collect();
+        let _ = writeln!(
+            s,
+            "             {:<4} {:>6} {:>7} {:<8} {:>11} {:<16}",
+            sl.worker_n,
+            sl.iter_count,
+            sl.tasks_closed,
+            runtime,
+            fmt_int(sl.total_tokens),
+            stop_trunc,
+        );
+        total_iters += sl.iter_count;
+        total_closed += sl.tasks_closed;
+        total_tokens += sl.total_tokens;
+    }
+    let _ = writeln!(
+        s,
+        "             {dim}{:<4} {:>6} {:>7} {:<8} {:>11} {:<16}{reset}",
+        "all",
+        total_iters,
+        total_closed,
+        "",
+        fmt_int(total_tokens),
+        "",
+    );
     s
 }
 
