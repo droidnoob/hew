@@ -74,6 +74,18 @@ pub struct IterLog {
     /// enabled and the iter produced commits; empty otherwise.
     #[serde(default)]
     pub symbols_touched: Vec<String>,
+    /// Which runtime drove this iter, as the [`crate::runtime::RuntimeKind`]
+    /// string (`"claude"` / `"codex"`). `None` for dry-run iters where
+    /// no spawner ran. Populated by `hew loop` so multi-runtime runs
+    /// stay debuggable in the per-iter log.
+    #[serde(default)]
+    pub runtime_used: Option<String>,
+    /// True iff the cooldown state machine had primary on hold when
+    /// this iter completed (i.e. the loop was routing iters to the
+    /// fallback runtime, or about to retry the primary after a window).
+    /// Always `false` when no fallback is configured.
+    #[serde(default)]
+    pub cooldown_engaged: bool,
 }
 
 impl IterLog {
@@ -98,6 +110,8 @@ impl IterLog {
             tool_calls,
             stderr_tail: it.stderr_tail.clone(),
             symbols_touched,
+            runtime_used: None,
+            cooldown_engaged: false,
         }
     }
 }

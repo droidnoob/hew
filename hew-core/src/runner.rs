@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use crate::runtime::{RuntimeSpawner, SpawnFailureClass};
+
 /// Per-run configuration. Set once at `hew loop` invocation, immutable
 /// for the duration of the run.
 #[derive(Clone, Debug)]
@@ -233,9 +235,84 @@ impl Run {
     }
 }
 
+/// Primary-sticky cooldown state machine for the multi-runtime loop.
+/// Tracks whether the loop is currently routing iters to the fallback
+/// spawner after a primary `RuntimeError`, and how many fallback iters
+/// remain before retrying the primary. Pure — no I/O, no spawner calls;
+/// the caller threads spawner outcomes in via [`Self::record_outcome`].
+///
+/// Per `DECISION:loop-fallback-policy`:
+/// - Primary `RuntimeError` enters cooldown (`iters_remaining = quantum`).
+/// - Fallback `RuntimeError` while in cooldown extends the window.
+/// - Fallback successes decrement the window; when it reaches 0 the
+///   next iter retries the primary.
+/// - Primary `Success` in cooldown with `iters_remaining == 0` exits
+///   cooldown.
+/// - `GuardTrip` / `BudgetExhausted` do not change state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CooldownState {
+    pub in_cooldown: bool,
+    pub iters_remaining: u32,
+    pub cooldown_quantum: u32,
+}
+
+impl CooldownState {
+    pub fn new(cooldown_quantum: u32) -> Self {
+        Self { in_cooldown: false, iters_remaining: 0, cooldown_quantum: cooldown_quantum.max(1) }
+    }
+
+    /// True iff the next iter should route to the fallback spawner.
+    pub fn should_use_fallback(&self) -> bool {
+        self.in_cooldown && self.iters_remaining > 0
+    }
+
+    /// Pick the spawner for the next iter. Returns `primary` whenever
+    /// fallback is `None` (the cooldown can engage but has nowhere to
+    /// route, so the caller stays on primary).
+    pub fn next_spawner<'a>(
+        &self,
+        primary: &'a dyn RuntimeSpawner,
+        fallback: Option<&'a dyn RuntimeSpawner>,
+    ) -> &'a dyn RuntimeSpawner {
+        match (self.should_use_fallback(), fallback) {
+            (true, Some(fb)) => fb,
+            _ => primary,
+        }
+    }
+
+    /// Update state after an iter completes. `on_fallback` is whatever
+    /// [`Self::should_use_fallback`] returned for the iter that just
+    /// ran — the caller must remember it because the bool can flip
+    /// between successive iters.
+    pub fn record_outcome(&mut self, on_fallback: bool, class: SpawnFailureClass) {
+        match class {
+            SpawnFailureClass::RuntimeError(_) => {
+                if on_fallback {
+                    // Fallback errored — extend the cooldown window.
+                    self.iters_remaining = self.cooldown_quantum;
+                } else {
+                    // Primary errored — enter (or re-enter) cooldown.
+                    self.in_cooldown = true;
+                    self.iters_remaining = self.cooldown_quantum;
+                }
+            }
+            SpawnFailureClass::Success => {
+                if on_fallback && self.in_cooldown {
+                    self.iters_remaining = self.iters_remaining.saturating_sub(1);
+                } else if !on_fallback && self.in_cooldown && self.iters_remaining == 0 {
+                    // Retry-once primary succeeded — leave cooldown.
+                    self.in_cooldown = false;
+                }
+            }
+            SpawnFailureClass::GuardTrip | SpawnFailureClass::BudgetExhausted => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{MockSpawner, RuntimeErrorKind, SpawnOutcome};
 
     fn cfg() -> RunConfig {
         RunConfig::default()
@@ -365,5 +442,98 @@ mod tests {
     fn token_spend_total_sums_all_buckets() {
         let s = TokenSpend { input: 1, output: 2, cache_read: 4, cache_create: 8 };
         assert_eq!(s.total(), 15);
+    }
+
+    fn mock(class: SpawnFailureClass) -> MockSpawner {
+        MockSpawner::new(SpawnOutcome {
+            failure_class: class,
+            success: matches!(class, SpawnFailureClass::Success),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn cooldown_starts_disengaged() {
+        let c = CooldownState::new(3);
+        assert!(!c.in_cooldown);
+        assert_eq!(c.iters_remaining, 0);
+        assert_eq!(c.cooldown_quantum, 3);
+        assert!(!c.should_use_fallback());
+
+        let primary = mock(SpawnFailureClass::Success);
+        let fb = mock(SpawnFailureClass::Success);
+        // With nothing in cooldown, next_spawner returns primary even
+        // when fallback is supplied.
+        let s = c.next_spawner(&primary, Some(&fb));
+        assert!(std::ptr::eq(s as *const _ as *const (), &primary as *const _ as *const ()));
+    }
+
+    #[test]
+    fn runtime_error_engages_cooldown_for_n_iters() {
+        let mut c = CooldownState::new(3);
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::RateLimit));
+        assert!(c.in_cooldown);
+        assert_eq!(c.iters_remaining, 3);
+        assert!(c.should_use_fallback());
+    }
+
+    #[test]
+    fn success_in_cooldown_returns_to_primary_after_n() {
+        let mut c = CooldownState::new(3);
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+        // Three fallback successes drain the window.
+        for expected in [2u32, 1, 0] {
+            assert!(c.should_use_fallback());
+            c.record_outcome(true, SpawnFailureClass::Success);
+            assert_eq!(c.iters_remaining, expected);
+        }
+        // Window drained — next iter routes to primary for a retry.
+        assert!(!c.should_use_fallback());
+        assert!(c.in_cooldown);
+        // Primary retry succeeds → exit cooldown.
+        c.record_outcome(false, SpawnFailureClass::Success);
+        assert!(!c.in_cooldown);
+    }
+
+    #[test]
+    fn runtime_error_in_cooldown_extends_window() {
+        let mut c = CooldownState::new(3);
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Auth));
+        assert_eq!(c.iters_remaining, 3);
+        // One fallback success: 3 → 2.
+        c.record_outcome(true, SpawnFailureClass::Success);
+        assert_eq!(c.iters_remaining, 2);
+        // Fallback errors → window reset back to quantum.
+        c.record_outcome(true, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+        assert_eq!(c.iters_remaining, 3);
+        assert!(c.in_cooldown);
+    }
+
+    #[test]
+    fn guard_trip_does_not_engage_cooldown() {
+        let mut c = CooldownState::new(3);
+        c.record_outcome(false, SpawnFailureClass::GuardTrip);
+        assert!(!c.in_cooldown);
+        assert_eq!(c.iters_remaining, 0);
+        c.record_outcome(false, SpawnFailureClass::BudgetExhausted);
+        assert!(!c.in_cooldown);
+        // And once engaged, neither outcome decrements the window.
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+        assert_eq!(c.iters_remaining, 3);
+        c.record_outcome(true, SpawnFailureClass::GuardTrip);
+        assert_eq!(c.iters_remaining, 3);
+    }
+
+    #[test]
+    fn no_fallback_configured_never_switches() {
+        let mut c = CooldownState::new(3);
+        let primary = mock(SpawnFailureClass::Success);
+        // Drive primary into cooldown.
+        c.record_outcome(false, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Server));
+        assert!(c.should_use_fallback());
+        // With fallback=None, next_spawner still returns primary —
+        // there is nowhere else to route.
+        let s = c.next_spawner(&primary, None);
+        assert!(std::ptr::eq(s as *const _ as *const (), &primary as *const _ as *const ()));
     }
 }

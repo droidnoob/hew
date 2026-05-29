@@ -22,6 +22,7 @@ use hew_core::runner::TokenSpend;
 use hew_core::runtime::{RuntimeSpawner, SpawnFailureClass, SpawnOutcome};
 
 use hew::commands::loop_cmd::{Args, StaticGateRunner, run_loop_with};
+use hew_core::runtime::FallbackConfig;
 
 /// Spawner that creates a second commit in `repo_dir` to simulate the
 /// agent making changes during the iter, then returns a `Closed`
@@ -156,7 +157,17 @@ fn gate_fail_reverts_iter_commits_and_files_status_memory() {
         ..Default::default()
     });
 
-    run_loop_with(&ctx(), args_one_iter(), &bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     assert_eq!(head_sha(&repo), initial_sha, "expected HEAD to be rolled back to the pre-iter sha");
 
@@ -286,7 +297,17 @@ fn unattended_resolves_deferred_via_memory_lookup() {
     let mut args = args_one_iter();
     args.unattended = true;
 
-    run_loop_with(&ctx(), args, &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args,
+        &*bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     let final_mems = bd.memories().unwrap();
     let new_decisions: Vec<&String> = final_mems
@@ -359,7 +380,17 @@ fn without_unattended_deferred_is_left_alone() {
         StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
 
     // unattended = false (default).
-    run_loop_with(&ctx(), args_one_iter(), &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &*bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     let final_mems = bd.memories().unwrap();
     let new_decisions = final_mems.values().filter(|v| v.starts_with("DECISION:")).count();
@@ -513,7 +544,17 @@ fn prompt_prefix_hash_is_stable_across_iters() {
     let mut args = args_one_iter();
     args.max_iter = Some(2);
 
-    run_loop_with(&ctx(), args, &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args,
+        &*bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     let runs_root = repo.join(".hew/loop");
     let run_id = std::fs::read_dir(&runs_root)
@@ -562,7 +603,17 @@ fn out_of_band_closure_promotes_no_close_to_closed() {
     let gate =
         StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
 
-    run_loop_with(&ctx(), args_one_iter(), &*bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &*bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     let runs_root = repo.join(".hew/loop");
     let run_id = std::fs::read_dir(&runs_root)
@@ -609,7 +660,17 @@ fn gate_pass_keeps_iter_commit() {
     let gate =
         StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
 
-    run_loop_with(&ctx(), args_one_iter(), &bd, Some(&spawner), &gate, &repo).expect("loop runs");
+    run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
 
     assert_ne!(
         head_sha(&repo),
@@ -617,4 +678,183 @@ fn gate_pass_keeps_iter_commit() {
         "expected the iter commit to remain (Pass verdict does not reset)"
     );
     assert!(bd.remembered.borrow().is_empty(), "Pass verdict should not emit memories");
+}
+
+/// Spawner whose outcome is scripted per-call. Each `spawn` consumes
+/// the next entry; if the script is exhausted the last entry is
+/// reused. Used by the cooldown integration test to flip a mock
+/// primary from `RuntimeError` → `Success` without touching git.
+#[derive(Debug)]
+struct ScriptedSpawner {
+    label: &'static str,
+    outcomes: RefCell<Vec<SpawnOutcome>>,
+    fallback_default: SpawnOutcome,
+    calls: RefCell<u32>,
+}
+
+impl ScriptedSpawner {
+    fn new(
+        label: &'static str,
+        outcomes: Vec<SpawnOutcome>,
+        fallback_default: SpawnOutcome,
+    ) -> Self {
+        Self { label, outcomes: RefCell::new(outcomes), fallback_default, calls: RefCell::new(0) }
+    }
+}
+
+impl RuntimeSpawner for ScriptedSpawner {
+    fn spawn(
+        &self,
+        _prompt: &AssembledPrompt,
+        _allowed_tools: &[String],
+    ) -> hew_core::error::Result<SpawnOutcome> {
+        *self.calls.borrow_mut() += 1;
+        let mut q = self.outcomes.borrow_mut();
+        let out = if q.is_empty() { self.fallback_default.clone() } else { q.remove(0) };
+        eprintln!(
+            "scripted spawner `{}` call → success={} class={:?}",
+            self.label, out.success, out.failure_class
+        );
+        Ok(out)
+    }
+}
+
+fn ok_outcome(closed: Option<&str>) -> SpawnOutcome {
+    SpawnOutcome {
+        success: true,
+        closed_task: closed.map(|s| s.to_string()),
+        tokens: TokenSpend::default(),
+        stderr_tail: String::new(),
+        raw_text: closed.map(|s| format!("closed {s} — synthetic\n")).unwrap_or_default(),
+        failure_class: SpawnFailureClass::Success,
+    }
+}
+
+fn rate_limit_outcome() -> SpawnOutcome {
+    SpawnOutcome {
+        success: false,
+        closed_task: None,
+        tokens: TokenSpend::default(),
+        stderr_tail: "synthetic 429\n".into(),
+        raw_text: String::new(),
+        failure_class: SpawnFailureClass::RuntimeError(
+            hew_core::runtime::RuntimeErrorKind::RateLimit,
+        ),
+    }
+}
+
+/// Cooldown end-to-end: a primary that errors with rate-limit on its
+/// first call (then would succeed) routes to the fallback for
+/// `cooldown_iters=3` iters before retrying the primary. Asserts the
+/// per-iter `runtime_used` + `cooldown_engaged` log fields trace the
+/// expected sequence.
+#[test]
+fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    // No git repo needed — every iter is non-erroring on the fallback
+    // path (the gate is a static pass and the spawner never touches
+    // the worktree). git_head_sha will fail and log a breadcrumb;
+    // that's the expected non-git tolerance branch.
+
+    let primary = ScriptedSpawner::new(
+        "primary",
+        vec![rate_limit_outcome()],
+        ok_outcome(Some("hew-primary-success")),
+    );
+    let fallback_spawner =
+        ScriptedSpawner::new("fallback", Vec::new(), ok_outcome(Some("hew-fallback-iter")));
+
+    // Five identical ready tasks; bd.ready() returns the head each
+    // iter and out-of-band detection promotes NoClose→Closed when
+    // the task drops from the ready set. Because nothing actually
+    // closes tasks here, every iter logs as `no_close` — that's fine
+    // for the cooldown-routing assertions below.
+    let ready: Vec<ReadyTask> = (0..5)
+        .map(|i| ReadyTask {
+            id: format!("hew-r{i}"),
+            title: format!("synthetic ready {i}"),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        })
+        .collect();
+    let bd = CapturingBd { ready, remembered: RefCell::new(Vec::new()) };
+
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let args = Args {
+        max_iter: Some(5),
+        until_empty: false,
+        budget_tokens: None,
+        budget_wall: None,
+        strict: true,
+        interactive: false,
+        unattended: false,
+        runtime: "claude".into(),
+        stop_file: None,
+        dry_run: false,
+        skill: "hew-execute".into(),
+        fallback_runtime: Some("codex".into()),
+        fallback_cooldown_iters: Some(3),
+    };
+    let fallback_cfg =
+        FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };
+
+    run_loop_with(
+        &ctx(),
+        args,
+        &bd,
+        Some(&primary),
+        Some(&fallback_spawner),
+        fallback_cfg,
+        &gate,
+        &repo,
+    )
+    .expect("loop runs");
+
+    // Find the run dir.
+    let runs_root = repo.join(".hew/loop");
+    let run_id = std::fs::read_dir(&runs_root)
+        .expect("loop runs dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.starts_with("loop-"))
+        .expect("run-id dir");
+    let dir = run_dir(&repo, &run_id).expect("resolve run-dir");
+
+    let load = |n: u32| -> IterLog {
+        let body = std::fs::read_to_string(iter_log_path(&dir, n)).expect("read iter log");
+        serde_json::from_str(&body).expect("parse iter log")
+    };
+    let iters: Vec<IterLog> = (1..=5).map(load).collect();
+
+    // iter 1: primary, errors, cooldown engages.
+    assert_eq!(iters[0].runtime_used.as_deref(), Some("claude"));
+    assert!(iters[0].cooldown_engaged, "primary error should engage cooldown");
+    assert_eq!(iters[0].outcome.as_deref(), Some("runtime_error"));
+
+    // iters 2..=4: fallback drains the window.
+    for (idx, log) in iters[1..=3].iter().enumerate() {
+        assert_eq!(
+            log.runtime_used.as_deref(),
+            Some("codex"),
+            "iter {} should route to fallback",
+            idx + 2,
+        );
+        assert!(log.cooldown_engaged, "iter {} cooldown should still be engaged", idx + 2);
+    }
+
+    // iter 5: primary retry — cooldown exits on success.
+    assert_eq!(iters[4].runtime_used.as_deref(), Some("claude"));
+    assert!(!iters[4].cooldown_engaged, "successful primary retry should exit cooldown");
+
+    // Sanity: spawner call counts. Primary should be invoked exactly
+    // twice (iter 1 + iter 5 retry); fallback exactly three times
+    // (iters 2, 3, 4).
+    assert_eq!(*primary.calls.borrow(), 2, "primary call count");
+    assert_eq!(*fallback_spawner.calls.borrow(), 3, "fallback call count");
 }
