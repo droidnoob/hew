@@ -36,6 +36,23 @@ pub struct Summary {
     /// All symbols the run touched across every iter, deduplicated.
     /// Empty when treesitter is off or no commits were made.
     pub symbols_touched: Vec<String>,
+    /// Per-model token breakdown, in first-seen order. Empty when no
+    /// iter populated the `model` field (legacy / pre-Epic-D runs).
+    pub per_model: Vec<ModelBreakdown>,
+}
+
+/// One row of the per-model breakdown table. `model` is the resolved
+/// label as written to `IterLog.model`; iters with `model=None` are
+/// grouped under `"(default)"`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelBreakdown {
+    pub model: String,
+    pub iter_count: u32,
+    pub tasks_closed: u32,
+    pub input: u64,
+    pub cached: u64,
+    pub output: u64,
+    pub total: u64,
 }
 
 /// Build a [`Summary`] from the run + its iter logs. `iter_logs` is
@@ -81,6 +98,8 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         }
     }
 
+    let per_model = aggregate_per_model(iter_logs);
+
     let cache_stable_from = iter_logs.windows(2).enumerate().find_map(|(i, pair)| {
         match (&pair[0].prompt_prefix_hash, &pair[1].prompt_prefix_hash) {
             (Some(a), Some(b)) if a == b => Some((i + 2) as u32),
@@ -100,7 +119,48 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         per_iter_tokens,
         stop_reason: run.stop_reason,
         symbols_touched,
+        per_model,
     }
+}
+
+/// Group iters by their `model` label and sum tokens + iter/task counts.
+/// Returns rows in first-seen order. When no iter has `model=Some(_)`
+/// we return an empty Vec — the render side hides the section entirely.
+fn aggregate_per_model(iter_logs: &[IterLog]) -> Vec<ModelBreakdown> {
+    let any_populated = iter_logs.iter().any(|l| l.model.is_some());
+    if !any_populated {
+        return Vec::new();
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut rows: BTreeMap<String, ModelBreakdown> = BTreeMap::new();
+    for log in iter_logs {
+        let key = log.model.clone().unwrap_or_else(|| "(default)".to_string());
+        if !rows.contains_key(&key) {
+            order.push(key.clone());
+            rows.insert(
+                key.clone(),
+                ModelBreakdown {
+                    model: key.clone(),
+                    iter_count: 0,
+                    tasks_closed: 0,
+                    input: 0,
+                    cached: 0,
+                    output: 0,
+                    total: 0,
+                },
+            );
+        }
+        let row = rows.get_mut(&key).expect("inserted above");
+        row.iter_count += 1;
+        if log.outcome.as_deref() == Some("closed") {
+            row.tasks_closed += 1;
+        }
+        row.input += log.cost.input;
+        row.cached += log.cost.cache_read + log.cost.cache_create;
+        row.output += log.cost.output;
+        row.total += log.cost.total();
+    }
+    order.into_iter().map(|k| rows.remove(&k).expect("present")).collect()
 }
 
 /// Render the summary as a coloured terminal block. Pass `colorize=false`
@@ -204,6 +264,47 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
             String::new()
         };
         let _ = writeln!(s, "  {bold}symbols{reset}:   {}{footer}", shown.join(", "));
+    }
+
+    // Per-model breakdown (hidden when no iter recorded a model).
+    if !summary.per_model.is_empty() {
+        let _ = writeln!(s, "  {bold}by model{reset}:");
+        let headers = ["model", "iters", "tasks", "input", "cached", "output", "total"];
+        let mut widths: [usize; 7] = std::array::from_fn(|i| headers[i].chars().count());
+        let rendered_rows: Vec<[String; 7]> = summary
+            .per_model
+            .iter()
+            .map(|m| {
+                [
+                    m.model.clone(),
+                    m.iter_count.to_string(),
+                    m.tasks_closed.to_string(),
+                    fmt_int(m.input),
+                    fmt_int(m.cached),
+                    fmt_int(m.output),
+                    fmt_int(m.total),
+                ]
+            })
+            .collect();
+        for row in &rendered_rows {
+            for (i, cell) in row.iter().enumerate() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+        let fmt_row = |cells: &[&str; 7]| -> String {
+            // First column left-aligned, numeric columns right-aligned.
+            let mut out = format!("    {:<w$}", cells[0], w = widths[0]);
+            for i in 1..7 {
+                out.push_str(&format!("  {:>w$}", cells[i], w = widths[i]));
+            }
+            out
+        };
+        let header_refs: [&str; 7] = std::array::from_fn(|i| headers[i]);
+        let _ = writeln!(s, "{dim}{}{reset}", fmt_row(&header_refs));
+        for row in &rendered_rows {
+            let refs: [&str; 7] = std::array::from_fn(|i| row[i].as_str());
+            let _ = writeln!(s, "{}", fmt_row(&refs));
+        }
     }
 
     // Sparkline (skip when only one iter).
@@ -638,6 +739,103 @@ mod tests {
         assert!(txt.contains("symbols:"), "missing symbols row:\n{txt}");
         assert!(txt.contains("src/x.rs:fn_a"));
         assert!(txt.contains("src/y.rs:fn_b"));
+    }
+
+    fn iter_log_with_model(
+        n: u32,
+        label: &str,
+        tokens: TokenSpend,
+        model: Option<&str>,
+    ) -> IterLog {
+        let mut log = iter_log(n, label, Some("h"), tokens);
+        log.model = model.map(str::to_string);
+        log
+    }
+
+    #[test]
+    fn summarize_per_model_groups_and_sums_mixed_run() {
+        let t = |i, o, cr, cc| TokenSpend { input: i, output: o, cache_read: cr, cache_create: cc };
+        let logs = vec![
+            iter_log_with_model(1, "closed", t(100, 50, 0, 1000), Some("opus")),
+            iter_log_with_model(2, "no_close", t(80, 40, 200, 0), Some("opus")),
+            iter_log_with_model(3, "closed", t(200, 100, 5000, 0), Some("sonnet")),
+            iter_log_with_model(4, "closed", t(150, 75, 0, 500), Some("sonnet")),
+            iter_log_with_model(5, "closed", t(50, 25, 0, 0), Some("sonnet")),
+        ];
+        let run = run_with(Vec::new());
+        let sum = summarize(&run, &logs);
+        assert_eq!(sum.per_model.len(), 2);
+        // First-seen order: opus then sonnet.
+        let opus = &sum.per_model[0];
+        assert_eq!(opus.model, "opus");
+        assert_eq!(opus.iter_count, 2);
+        assert_eq!(opus.tasks_closed, 1);
+        assert_eq!(opus.input, 180);
+        assert_eq!(opus.cached, 1200);
+        assert_eq!(opus.output, 90);
+        assert_eq!(opus.total, 180 + 90 + 1200);
+
+        let sonnet = &sum.per_model[1];
+        assert_eq!(sonnet.model, "sonnet");
+        assert_eq!(sonnet.iter_count, 3);
+        assert_eq!(sonnet.tasks_closed, 3);
+        assert_eq!(sonnet.input, 400);
+        assert_eq!(sonnet.cached, 5500);
+        assert_eq!(sonnet.output, 200);
+        assert_eq!(sonnet.total, 400 + 200 + 5500);
+    }
+
+    #[test]
+    fn summarize_per_model_hides_section_when_no_model_recorded() {
+        let logs = vec![
+            iter_log(1, "closed", Some("h1"), TokenSpend::default()),
+            iter_log(2, "closed", Some("h1"), TokenSpend::default()),
+        ];
+        let run = run_with(Vec::new());
+        let sum = summarize(&run, &logs);
+        assert!(sum.per_model.is_empty(), "per_model must be empty when no iter set model");
+        let txt = render(&sum, "/x", false);
+        assert!(!txt.contains("by model"), "section must be hidden:\n{txt}");
+    }
+
+    #[test]
+    fn summarize_per_model_default_label_for_unlabeled_iters() {
+        // Mixed: one iter has model=None, one has Some("opus"). The None
+        // group should appear as "(default)".
+        let logs = vec![
+            iter_log_with_model(1, "closed", TokenSpend::default(), None),
+            iter_log_with_model(2, "closed", TokenSpend::default(), Some("opus")),
+        ];
+        let run = run_with(Vec::new());
+        let sum = summarize(&run, &logs);
+        assert_eq!(sum.per_model.len(), 2);
+        assert_eq!(sum.per_model[0].model, "(default)");
+        assert_eq!(sum.per_model[1].model, "opus");
+    }
+
+    #[test]
+    fn render_per_model_table_appears_with_columns() {
+        let t = |i, o, cr, cc| TokenSpend { input: i, output: o, cache_read: cr, cache_create: cc };
+        let logs = vec![
+            iter_log_with_model(1, "closed", t(100, 50, 0, 0), Some("opus")),
+            iter_log_with_model(2, "closed", t(200, 100, 1000, 0), Some("sonnet")),
+        ];
+        let run = run_with(Vec::new());
+        let sum = summarize(&run, &logs);
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("by model"), "missing per-model header:\n{txt}");
+        assert!(txt.contains("opus"));
+        assert!(txt.contains("sonnet"));
+        // Header row.
+        assert!(txt.contains("model"));
+        assert!(txt.contains("iters"));
+        assert!(txt.contains("tasks"));
+        assert!(txt.contains("input"));
+        assert!(txt.contains("cached"));
+        assert!(txt.contains("output"));
+        assert!(txt.contains("total"));
+        // Cached column for sonnet row = 1000 (cache_read+cache_create).
+        assert!(txt.contains("1,000"), "expected cached sum to render with separator:\n{txt}");
     }
 
     #[test]
