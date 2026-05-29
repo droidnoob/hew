@@ -62,6 +62,61 @@ impl FromStr for RuntimeKind {
 /// Used by tests and for pinning to a specific install.
 pub const CLAUDE_BIN_ENV: &str = "HEW_LOOP_CLAUDE_BIN";
 
+/// Codex sandbox enum, mirroring the three values accepted by
+/// `codex exec --sandbox`. The CLI string form (via [`Display`]) MUST
+/// match exactly — codex rejects unknown values.
+///
+/// Per `DECISION:codex-sandbox-mapping` + `RESEARCH:codex-allowedtools-mapping`:
+/// hew's per-iter `allowed_tools` list (a Claude concept) has no 1:1
+/// codex equivalent. The mapping is lossy but deterministic — see
+/// [`map_allowed_tools_to_sandbox`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SandboxPolicy {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl SandboxPolicy {
+    /// CLI string accepted by `codex exec -s/--sandbox`. Stable per
+    /// `RESEARCH:codex-sandbox-model` (codex-cli 0.120.0, 2026-05-29).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Map hew's `allowed_tools` (Claude tool names) to a codex sandbox
+/// policy. If any element matches a known write-class tool name
+/// (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, case-sensitive) the
+/// sandbox is widened to [`SandboxPolicy::WorkspaceWrite`]; otherwise
+/// the iter runs [`SandboxPolicy::ReadOnly`].
+///
+/// Known lossy translation: Bash subcommand restrictions like
+/// `Bash(git:*)` cannot be expressed in codex's sandbox enum — they
+/// are silently broadened to whatever bash the chosen sandbox allows.
+/// Documented in `DECISION:codex-sandbox-mapping`. If this matters for
+/// a future iter, the right fix is finer-grained codex gating, not a
+/// per-call shell wrapper.
+pub fn map_allowed_tools_to_sandbox(tools: &[String]) -> SandboxPolicy {
+    const WRITE_CLASS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+    for t in tools {
+        if WRITE_CLASS.contains(&t.as_str()) {
+            return SandboxPolicy::WorkspaceWrite;
+        }
+    }
+    SandboxPolicy::ReadOnly
+}
+
 /// Sub-category of a runtime-level failure. Used to decide whether a
 /// fallback runtime might succeed (`Auth` / `RateLimit` / `Server` —
 /// usually yes) versus a deterministic refusal (`BadRequest` — usually
@@ -692,6 +747,34 @@ mod tests {
         let bytes = b"{\"type\":\"thread.started\"}\n{\"type\":\"error\",\"message\":\"boom\"}\n";
         let (_text, _tokens, class) = parse_codex_jsonl(bytes).expect("parses");
         assert_eq!(class, SpawnFailureClass::RuntimeError(RuntimeErrorKind::Unknown));
+    }
+
+    #[test]
+    fn sandbox_policy_display_matches_codex_cli() {
+        assert_eq!(SandboxPolicy::ReadOnly.to_string(), "read-only");
+        assert_eq!(SandboxPolicy::WorkspaceWrite.to_string(), "workspace-write");
+        assert_eq!(SandboxPolicy::DangerFullAccess.to_string(), "danger-full-access");
+    }
+
+    #[test]
+    fn map_allowed_tools_to_sandbox_table() {
+        let cases: &[(&[&str], SandboxPolicy)] = &[
+            (&[], SandboxPolicy::ReadOnly),
+            (&["Read"], SandboxPolicy::ReadOnly),
+            (&["Read", "Edit"], SandboxPolicy::WorkspaceWrite),
+            // Bash subcommand restriction is silently broadened to read-only:
+            // the mapper has no way to express "git only" in codex's sandbox enum.
+            (&["Bash(git:*)"], SandboxPolicy::ReadOnly),
+            (&["NotebookEdit"], SandboxPolicy::WorkspaceWrite),
+            (&["Write"], SandboxPolicy::WorkspaceWrite),
+            (&["MultiEdit"], SandboxPolicy::WorkspaceWrite),
+            // Case-sensitive: lowercase doesn't trigger write-class.
+            (&["edit"], SandboxPolicy::ReadOnly),
+        ];
+        for (tools, want) in cases {
+            let owned: Vec<String> = tools.iter().map(|s| s.to_string()).collect();
+            assert_eq!(map_allowed_tools_to_sandbox(&owned), *want, "tools={tools:?}");
+        }
     }
 
     #[test]
