@@ -46,6 +46,7 @@ pub mod testing;
 pub mod time;
 pub mod treesitter;
 pub mod tty;
+pub mod worktree;
 
 pub use ctx::{Ctx, OutputMode};
 pub use error::HewError;
