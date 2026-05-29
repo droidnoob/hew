@@ -238,8 +238,7 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
                 plan.root.display()
             );
         } else {
-            // Transitional per-runtime banner. hew-zue will format this richer.
-            println!("─ {}: {} files written", plan.runtime.as_str(), plan.written.len());
+            print_runtime_block(&plan);
         }
         plans.push(plan);
     }
@@ -257,6 +256,39 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         );
     }
     Ok(())
+}
+
+/// One-line banner per runtime install: `<Name>: ✓ N files into <artifact>`.
+/// Called once per element of the runtimes vec; the aggregate panel below
+/// shows the cross-runtime totals.
+fn print_runtime_block(plan: &install::InstallPlan) {
+    let artifact = runtime_artifact_label(plan.runtime);
+    let title = runtime_display_name(plan.runtime);
+    if artifact.is_empty() {
+        println!("─ {}: ✓ {} files written", title, plan.written.len());
+    } else {
+        println!("─ {}: ✓ {} files written into {}", title, plan.written.len(), artifact);
+    }
+}
+
+fn runtime_display_name(rt: Runtime) -> &'static str {
+    match rt {
+        Runtime::Claude => "Claude",
+        Runtime::Cursor => "Cursor",
+        Runtime::Codex => "Codex",
+        Runtime::Windsurf => "Windsurf",
+        Runtime::Generic => "Generic",
+    }
+}
+
+fn runtime_artifact_label(rt: Runtime) -> &'static str {
+    match rt {
+        Runtime::Claude => ".claude/",
+        Runtime::Cursor => ".cursorrules",
+        Runtime::Codex => ".codex/ + AGENTS.md",
+        Runtime::Windsurf => ".windsurfrules",
+        Runtime::Generic => "",
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // IV.13 refactor will collapse this into a FlowChoices struct.
@@ -950,6 +982,24 @@ mod tests {
         };
         let out = resolve_runtimes(&args, vec![], true, picker).expect("resolve");
         assert_eq!(out, vec![Runtime::Generic]);
+    }
+
+    #[test]
+    fn runtime_display_names_cover_all_variants() {
+        assert_eq!(runtime_display_name(Runtime::Claude), "Claude");
+        assert_eq!(runtime_display_name(Runtime::Cursor), "Cursor");
+        assert_eq!(runtime_display_name(Runtime::Codex), "Codex");
+        assert_eq!(runtime_display_name(Runtime::Windsurf), "Windsurf");
+        assert_eq!(runtime_display_name(Runtime::Generic), "Generic");
+    }
+
+    #[test]
+    fn runtime_artifact_labels_match_install_layout() {
+        assert_eq!(runtime_artifact_label(Runtime::Claude), ".claude/");
+        assert_eq!(runtime_artifact_label(Runtime::Cursor), ".cursorrules");
+        assert_eq!(runtime_artifact_label(Runtime::Codex), ".codex/ + AGENTS.md");
+        assert_eq!(runtime_artifact_label(Runtime::Windsurf), ".windsurfrules");
+        assert_eq!(runtime_artifact_label(Runtime::Generic), "");
     }
 
     #[test]

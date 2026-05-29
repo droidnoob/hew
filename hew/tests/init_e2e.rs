@@ -705,3 +705,57 @@ fn init_does_not_warn_when_git_present() {
         .success()
         .stderr(predicates::str::contains("`git` not on PATH").not());
 }
+
+#[test]
+fn init_multi_runtime_csv_installs_both() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude,codex"])
+        .assert()
+        .success()
+        .stdout(contains("Claude: ✓"))
+        .stdout(contains("Codex: ✓"))
+        .stdout(contains("runtime           claude, codex"));
+
+    let claude_hew = project.path().join(".claude").join("skills").join("hew");
+    assert!(claude_hew.join("SKILL.md").exists());
+    assert!(project.path().join("AGENTS.md").exists());
+    assert!(project.path().join(".codex").exists());
+}
+
+#[test]
+fn init_multi_runtime_repeated_flag_form_equivalent_to_csv() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude", "--runtime", "codex"])
+        .assert()
+        .success()
+        .stdout(contains("Claude: ✓"))
+        .stdout(contains("Codex: ✓"));
+
+    assert!(project.path().join(".claude").join("skills").join("hew").join("SKILL.md").exists());
+    assert!(project.path().join("AGENTS.md").exists());
+}
+
+#[test]
+fn init_no_flag_with_multiple_detected_refreshes_all() {
+    // hew-a41: previously errored on multi-detected non-interactive; now refreshes all.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::create_dir(project.path().join(".codex")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive"])
+        .assert()
+        .success()
+        .stdout(contains("Claude: ✓"))
+        .stdout(contains("Codex: ✓"));
+}
