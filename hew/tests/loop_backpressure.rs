@@ -128,6 +128,7 @@ fn args_one_iter() -> Args {
         skill: "hew-execute".into(),
         fallback_runtime: None,
         fallback_cooldown_iters: None,
+        jobs: 1,
     }
 }
 
@@ -807,6 +808,7 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         skill: "hew-execute".into(),
         fallback_runtime: Some("codex".into()),
         fallback_cooldown_iters: Some(3),
+        jobs: 1,
     };
     let fallback_cfg =
         FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };
@@ -1080,4 +1082,94 @@ fn run_worker_loop_uses_worker_worktree_for_git_calls() {
     // The returned outcome mirrors the on-disk run.
     assert_eq!(outcome.iter_logs.len(), 1);
     assert_eq!(outcome.run.iters.len(), 1);
+}
+
+#[test]
+fn jobs_default_is_1() {
+    // Pins the clap default + the test-fixture default the rest of the
+    // loop suite shares. Together with `loop_run_help_documents_jobs_flag`
+    // in tests/cli.rs this is the user-facing contract.
+    let args = args_one_iter();
+    assert_eq!(args.jobs, 1);
+}
+
+#[test]
+fn jobs_1_uses_serial_fast_path() {
+    // jobs=1 must keep the byte-identical N=1 layout: iter logs at the
+    // run-dir root (no worker-N subdir) and a manifest whose `jobs`
+    // field is 1. Indirectly proves run_loop_serial was taken — the
+    // parallel path always writes worker-N/ subdirs + Manifest::jobs
+    // == args.jobs (see `jobs_2_uses_dispatcher_path`).
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd { ready: vec![], remembered: RefCell::new(Vec::new()) };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_one_iter();
+    args.jobs = 1;
+    args.dry_run = true;
+
+    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
+        .expect("serial loop runs");
+
+    let loop_root = repo.join(".hew/loop");
+    let entry = std::fs::read_dir(&loop_root)
+        .expect("read loop root")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("one run dir");
+    let run_dir = entry.path();
+
+    assert!(
+        !run_dir.join("worker-0").exists(),
+        "serial fast path must not create worker-N subdirs"
+    );
+    let manifest_path = run_dir.join("manifest.json");
+    assert!(manifest_path.exists(), "manifest.json should be written");
+    let body = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let m: serde_json::Value = serde_json::from_str(&body).expect("parse manifest");
+    assert_eq!(m["jobs"].as_u64(), Some(1), "serial path Manifest.jobs == 1");
+}
+
+#[test]
+fn jobs_2_uses_dispatcher_path() {
+    // Inverse of `jobs_1_uses_serial_fast_path`: --jobs 2 must invoke
+    // the Dispatcher path, evidenced by Manifest::jobs == 2.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd { ready: vec![], remembered: RefCell::new(Vec::new()) };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_one_iter();
+    args.jobs = 2;
+    args.dry_run = true;
+
+    run_loop_with(&ctx(), args, &bd, None, None, FallbackConfig::default(), &gate, &repo)
+        .expect("parallel loop runs (dry-run)");
+
+    let loop_root = repo.join(".hew/loop");
+    let entry = std::fs::read_dir(&loop_root)
+        .expect("read loop root")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("one run dir");
+    let run_dir = entry.path();
+
+    let manifest_path = run_dir.join("manifest.json");
+    assert!(manifest_path.exists(), "manifest.json should be written");
+    let body = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let m: serde_json::Value = serde_json::from_str(&body).expect("parse manifest");
+    assert_eq!(m["jobs"].as_u64(), Some(2), "parallel path Manifest.jobs == args.jobs");
 }
