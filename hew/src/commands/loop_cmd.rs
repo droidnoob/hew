@@ -414,6 +414,15 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     )
 }
 
+/// Resolve the run's [`Scope`] from CLI args. Single source of truth so
+/// the dispatcher and `RunConfig.scope` stay in sync. The CLI flag
+/// (`--scope` / `--epics`) wiring lands in hew-xhhw; until then the
+/// resolver returns the pre-scope default ([`Scope::Ready`]) so every
+/// bd-ready task counts.
+fn resolve_scope(_args: &Args) -> hew_core::scope::Scope {
+    hew_core::scope::Scope::Ready
+}
+
 /// Construct the production spawner for a given runtime kind. Codex
 /// is wired symmetrically to Claude: same `Default`/`from_env()` path
 /// (HEW_LOOP_*_BIN override → PATH fallback). The fallback path uses
@@ -667,15 +676,13 @@ fn run_loop_parallel(
     let base_sha = if args.dry_run { String::new() } else { git_head_sha(project_root)? };
 
     // Construct the Dispatcher even under --dry-run so the "invokes
-    // Dispatcher" acceptance holds across both paths.
-    // Scope wiring lands in hew-ry5r (RunConfig.scope → Dispatcher); for now
-    // the loop runs against every bd-ready task, matching pre-scope behavior.
-    let mut dispatcher = hew_core::dispatcher::Dispatcher::new(
-        args.jobs,
-        &run_id,
-        &base_sha,
-        hew_core::scope::Scope::Ready,
-    );
+    // Dispatcher" acceptance holds across both paths. The scope resolves
+    // through `resolve_scope`; hew-xhhw wires the CLI flag, today it
+    // defaults to `Scope::Ready` so the loop runs against every bd-ready
+    // task.
+    let scope = resolve_scope(&args);
+    let mut dispatcher =
+        hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone());
 
     // v1 wiring: one tick to fill all slots, then drive each worker's
     // loop in a scoped thread. The dispatcher's slot-fill state machine
@@ -894,6 +901,7 @@ pub fn run_worker_loop(
         interactive: args.interactive,
         unattended: args.unattended,
         loop_model,
+        scope: resolve_scope(args),
     };
 
     let collector = Collector::new(stop_path.to_path_buf());
@@ -1670,5 +1678,33 @@ mod tests {
         assert!(parse_duration("5d").is_err());
         assert!(parse_duration("").is_err());
         assert!(parse_duration("xs").is_err());
+    }
+
+    fn default_args() -> Args {
+        Args {
+            max_iter: None,
+            until_empty: true,
+            budget_tokens: None,
+            budget_wall: None,
+            strict: true,
+            interactive: false,
+            unattended: false,
+            runtime: "claude".into(),
+            stop_file: None,
+            dry_run: true,
+            skill: "hew-execute".into(),
+            fallback_runtime: None,
+            fallback_cooldown_iters: None,
+            jobs: 1,
+        }
+    }
+
+    #[test]
+    fn resolve_scope_defaults_to_ready_until_cli_flag_lands() {
+        // Pre-hew-xhhw: no `--scope` argv yet; the resolver returns the
+        // pre-scope default so today's behavior is byte-identical to the
+        // pre-scope `hew loop run`.
+        let args = default_args();
+        assert_eq!(resolve_scope(&args), hew_core::scope::Scope::Ready);
     }
 }

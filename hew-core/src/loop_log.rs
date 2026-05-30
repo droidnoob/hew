@@ -181,7 +181,7 @@ impl RunLog {
             max_iter: run.config.max_iter,
             strict: run.config.strict,
             interactive: run.config.interactive,
-            scope: None,
+            scope: Some(run.config.scope.clone()),
         }
     }
 }
@@ -655,6 +655,17 @@ mod tests {
     }
 
     #[test]
+    fn run_log_from_run_propagates_cfg_scope() {
+        let cfg = RunConfig {
+            scope: Scope::Epics { epic_ids: vec!["hew-6az".into()] },
+            ..RunConfig::default()
+        };
+        let run = Run::new("loop-fr", "2026-05-30T00:00:00Z", cfg);
+        let log = RunLog::from_run(&run);
+        assert_eq!(log.scope, Some(Scope::Epics { epic_ids: vec!["hew-6az".into()] }));
+    }
+
+    #[test]
     fn run_log_persists_scope_ready() {
         let run = Run::new("loop-r", "2026-05-30T00:00:00Z", RunConfig::default());
         let mut log = RunLog::from_run(&run);
@@ -706,13 +717,16 @@ mod tests {
     }
 
     #[test]
-    fn run_log_from_run_defaults_scope_to_none() {
+    fn run_log_from_run_defaults_scope_to_explicit_ready() {
+        // Once `RunConfig.scope` exists (hew-ry5r), `from_run` propagates
+        // it verbatim — the default config gives an explicit
+        // `Some(Scope::Ready)`. Backward-compat for missing-field on disk
+        // is covered separately by the pre-scope fixture test.
         let run = Run::new("loop-d", "2026-05-30T00:00:00Z", RunConfig::default());
         let log = RunLog::from_run(&run);
-        assert!(log.scope.is_none());
-        // None must round-trip as a missing field (skip_serializing_if).
+        assert_eq!(log.scope, Some(Scope::Ready));
         let json = serde_json::to_string(&log).unwrap();
-        assert!(!json.contains("\"scope\""), "None scope must be omitted: {json}");
+        assert!(json.contains("\"scope\""));
     }
 
     #[test]
