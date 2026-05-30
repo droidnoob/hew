@@ -70,6 +70,37 @@ pub struct LoopConfig {
     /// `hew-7k1m`). Disabled / `0` for jobs == 1 — the entire layer
     /// is bypassed so the fast path stays free of planner overhead.
     pub planner: LoopPlannerConfig,
+    /// End-of-run verification knobs. Opt-in (`verify_tests = false`
+    /// by default) so existing runs stay byte-identical to today.
+    /// See `hew-bon7`.
+    pub end_of_run: LoopEndOfRunConfig,
+}
+
+/// `loop.end_of_run.*` knobs. Mandatory end-of-run test step that
+/// proves the final stacked state is green before the loop reports
+/// success. Off by default; flip via `loop.end_of_run.verify_tests`
+/// in config or `--verify-tests` on `hew loop run`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LoopEndOfRunConfig {
+    /// Run the verify step at all. Default `false`.
+    pub verify_tests: bool,
+    /// User-supplied verify command (e.g. `"cargo nextest run --workspace"`).
+    /// Empty = let [`crate::gate::detect`] resolve from project-authored
+    /// signals (justfile/Makefile/package.json `test`).
+    pub verify_command: String,
+    /// Wall-clock cap on the verify step. `"10m"` default.
+    pub verify_budget_wall: String,
+}
+
+impl Default for LoopEndOfRunConfig {
+    fn default() -> Self {
+        Self {
+            verify_tests: false,
+            verify_command: String::new(),
+            verify_budget_wall: "10m".into(),
+        }
+    }
 }
 
 /// Planner-spawn knobs. The planner is the inter-iter advisor that
@@ -411,6 +442,15 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
             Some(cfg.loop_cfg.planner.budget_tokens.to_string())
         }
         "loop.planner.runtime" => cfg.loop_cfg.planner.runtime.clone(),
+        "loop.end_of_run.verify_tests" | "loop.end_of_run.verify-tests" => {
+            Some(cfg.loop_cfg.end_of_run.verify_tests.to_string())
+        }
+        "loop.end_of_run.verify_command" | "loop.end_of_run.verify-command" => {
+            Some(cfg.loop_cfg.end_of_run.verify_command.clone())
+        }
+        "loop.end_of_run.verify_budget_wall" | "loop.end_of_run.verify-budget-wall" => {
+            Some(cfg.loop_cfg.end_of_run.verify_budget_wall.clone())
+        }
         k if k.starts_with("loop.model.by_priority.")
             || k.starts_with("loop.model.by-priority.") =>
         {
@@ -654,6 +694,25 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 cfg.loop_cfg.planner.runtime = Some(value.to_string());
             }
         }
+        "loop.end_of_run.verify_tests" | "loop.end_of_run.verify-tests" => {
+            cfg.loop_cfg.end_of_run.verify_tests = bool_val(value)?;
+        }
+        "loop.end_of_run.verify_command" | "loop.end_of_run.verify-command" => {
+            cfg.loop_cfg.end_of_run.verify_command = value.to_string();
+        }
+        "loop.end_of_run.verify_budget_wall" | "loop.end_of_run.verify-budget-wall" => {
+            if value.is_empty() {
+                cfg.loop_cfg.end_of_run.verify_budget_wall = "10m".into();
+            } else {
+                // Validate parseability — same s/m/h grammar as
+                // `--budget-wall`. Reject bad values at set-time so
+                // `hew loop run` doesn't trip on a stale config.
+                parse_budget_wall(value).map_err(|e| HewError::MissingFlag {
+                    flag: format!("value (expected s/m/h duration, got `{value}`: {e})"),
+                })?;
+                cfg.loop_cfg.end_of_run.verify_budget_wall = value.to_string();
+            }
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -693,7 +752,36 @@ pub fn keys() -> &'static [&'static str] {
         "loop.planner.enabled",
         "loop.planner.budget_tokens",
         "loop.planner.runtime",
+        "loop.end_of_run.verify_tests",
+        "loop.end_of_run.verify_command",
+        "loop.end_of_run.verify_budget_wall",
     ]
+}
+
+/// Parse a `loop.end_of_run.verify_budget_wall` string into a
+/// [`std::time::Duration`]. Accepts `<N>s` / `<N>m` / `<N>h`. Bare
+/// helper here (not the CLI's `parse_duration`) so config-side
+/// validation doesn't require pulling in the binary crate.
+pub fn parse_budget_wall(raw: &str) -> Result<std::time::Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(HewError::MissingFlag { flag: "empty duration".into() });
+    }
+    let (num, unit) = raw.split_at(raw.len() - 1);
+    let n: u64 = num
+        .parse()
+        .map_err(|e| HewError::MissingFlag { flag: format!("invalid number `{num}`: {e}") })?;
+    let dur = match unit {
+        "s" => std::time::Duration::from_secs(n),
+        "m" => std::time::Duration::from_secs(n * 60),
+        "h" => std::time::Duration::from_secs(n * 3600),
+        other => {
+            return Err(HewError::MissingFlag {
+                flag: format!("unknown duration unit `{other}` (expected s/m/h)"),
+            });
+        }
+    };
+    Ok(dur)
 }
 
 #[cfg(test)]
@@ -791,6 +879,9 @@ mod tests {
                 "loop.planner.enabled" => "true",
                 "loop.planner.budget_tokens" => "20000",
                 "loop.planner.runtime" => "codex",
+                "loop.end_of_run.verify_tests" => "true",
+                "loop.end_of_run.verify_command" => "cargo nextest run",
+                "loop.end_of_run.verify_budget_wall" => "10m",
                 k if k.starts_with("optional-skills.") => "yes",
                 _ => "true",
             };

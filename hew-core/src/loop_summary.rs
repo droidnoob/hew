@@ -55,6 +55,12 @@ pub struct Summary {
     /// callers via [`scan_planner_counts`]; [`summarize`] leaves it at
     /// default so it can stay a pure function.
     pub planner_counts: PlannerCounts,
+    /// End-of-run verify-tests outcome. `None` when verify never ran
+    /// (opt-in off, no command resolved, or pre-`hew-bon7` run). When
+    /// set, the renderer adds a `verify:` line below `planner:`.
+    /// Populated by `print_summary` from `Run.verify_outcome` (live)
+    /// or `RunLog.verify_outcome` (re-render from disk).
+    pub verify_outcome: Option<crate::verify::VerifyOutcome>,
 }
 
 /// Per-source tally of `batch-NNN.json` artifacts a run produced. Zero
@@ -180,6 +186,7 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         per_model,
         scope: None,
         planner_counts: PlannerCounts::default(),
+        verify_outcome: run.verify_outcome.clone(),
     }
 }
 
@@ -286,6 +293,19 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
             "  {bold}planner{reset}:   agent={}, runtime={}, fallback={}",
             pc.agent, pc.planner, pc.skipped,
         );
+    }
+
+    // Verify line — only present when the run ran (or recorded a
+    // deliberate skip of) the end-of-run verify-tests step.
+    if let Some(v) = &summary.verify_outcome {
+        let painted = if v.is_failure() {
+            format!("{red}{}{reset}", v.summary_line())
+        } else if matches!(v, crate::verify::VerifyOutcome::Passed { .. }) {
+            format!("{green}{}{reset}", v.summary_line())
+        } else {
+            v.summary_line()
+        };
+        let _ = writeln!(s, "  {bold}verify{reset}:    {}", painted);
     }
 
     // Token breakdown.
@@ -1064,6 +1084,52 @@ mod tests {
         assert_eq!(counts.agent, 1);
         assert_eq!(counts.planner, 0);
         assert_eq!(counts.skipped, 0);
+    }
+
+    #[test]
+    fn render_hides_verify_line_when_outcome_is_none() {
+        let sum = one_iter_summary();
+        let txt = render(&sum, "/x", false);
+        assert!(!txt.contains("verify:"), "verify line should be absent:\n{txt}");
+    }
+
+    #[test]
+    fn render_shows_verify_passed_line() {
+        let mut sum = one_iter_summary();
+        sum.verify_outcome = Some(crate::verify::VerifyOutcome::Passed {
+            command: "cargo test --workspace".into(),
+            duration_secs: 22,
+        });
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("verify:"));
+        assert!(txt.contains("passed"));
+        assert!(txt.contains("cargo test --workspace"));
+    }
+
+    #[test]
+    fn render_shows_verify_failed_line() {
+        let mut sum = one_iter_summary();
+        sum.verify_outcome = Some(crate::verify::VerifyOutcome::Failed {
+            command: "pytest -q".into(),
+            exit_code: 1,
+            duration_secs: 5,
+            stderr_tail: String::new(),
+        });
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("verify:"));
+        assert!(txt.contains("failed"));
+        assert!(txt.contains("exit 1"));
+    }
+
+    #[test]
+    fn render_shows_verify_skipped_line_when_command_unresolved() {
+        let mut sum = one_iter_summary();
+        sum.verify_outcome =
+            Some(crate::verify::VerifyOutcome::Skipped { reason: "no command resolved".into() });
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("verify:"));
+        assert!(txt.contains("skipped"));
+        assert!(txt.contains("no command resolved"));
     }
 
     #[test]

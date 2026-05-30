@@ -8,6 +8,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **End-of-run verify step for `hew loop` (`hew-bon7`).** Opt-in
+  mandatory test step that runs after the last iter (and after
+  merge-back on `--jobs N >= 2`) to prove the final stacked state is
+  green. Conditional on both a resolvable test command (CLI
+  `--verify-command` > `loop.end_of_run.verify_command` > project-
+  authored signals via `hew_core::gate::detect`) and an explicit
+  opt-in (`--verify-tests` or `loop.end_of_run.verify_tests = true`).
+  Outcome (`Passed` / `Failed` / `Skipped` / `TimedOut`) persists as
+  `Run.verify_outcome` in `run.json`, shows up as a `verify:` line in
+  `hew loop summary`, and on failure files a
+  `STATUS:loop-verify-failed:<run-id>` memory + exits non-zero so CI
+  branches on it. Closed tasks are **not** rolled back on failure —
+  the memory + summary line + exit code are the durable signals.
+  Defaults are byte-identical to today (`verify_tests = false`). CLI:
+  `--verify-tests`, `--no-verify-tests`, `--verify-command=...`.
+  Config: `[loop.end_of_run] verify_tests`, `verify_command`,
+  `verify_budget_wall` (default `"10m"`). See `docs/LOOP.md` §
+  End-of-run verification.
 - **Batch planner for `hew loop run --jobs N` (epic `hew-lf40`).**
   Parallel runs now layer two informed signals on top of `bd ready` to
   choose each iter's dispatch batch: (1) a `next_iteration:` block in

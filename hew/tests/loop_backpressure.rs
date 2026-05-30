@@ -136,6 +136,9 @@ fn args_one_iter() -> Args {
         no_planner: false,
         planner_budget: None,
         planner_runtime: None,
+        verify_tests: false,
+        no_verify_tests: false,
+        verify_command: None,
     }
 }
 
@@ -828,6 +831,9 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         no_planner: false,
         planner_budget: None,
         planner_runtime: None,
+        verify_tests: false,
+        no_verify_tests: false,
+        verify_command: None,
     };
     let fallback_cfg =
         FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };

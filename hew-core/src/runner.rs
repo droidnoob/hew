@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::config::LoopModelConfig;
 use crate::runtime::{RuntimeSpawner, SpawnFailureClass};
 use crate::scope::Scope;
+use crate::verify::VerifyOutcome;
 
 /// Per-run configuration. Set once at `hew loop` invocation, immutable
 /// for the duration of the run.
@@ -225,6 +226,11 @@ pub struct Run {
     pub config: RunConfig,
     pub iters: Vec<Iter>,
     pub stop_reason: Option<StopReason>,
+    /// Outcome of the end-of-run verify step (`loop.end_of_run.verify_tests`).
+    /// `None` when verify never ran — either opt-in off or no command
+    /// resolved AND the loop didn't bother recording a `Skipped`. Set
+    /// by `hew loop run` after merge-back, before final `run.json`.
+    pub verify_outcome: Option<VerifyOutcome>,
 }
 
 impl Run {
@@ -235,6 +241,7 @@ impl Run {
             config,
             iters: Vec::new(),
             stop_reason: None,
+            verify_outcome: None,
         }
     }
 

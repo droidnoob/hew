@@ -152,6 +152,9 @@ fn args_parallel(jobs: u32) -> Args {
         no_planner: false,
         planner_budget: None,
         planner_runtime: None,
+        verify_tests: false,
+        no_verify_tests: false,
+        verify_command: None,
     }
 }
 

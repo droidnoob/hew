@@ -203,6 +203,7 @@ pub struct LoopCmd {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum LoopSub {
     /// Drive the autonomous outer loop until a stop signal fires.
     Run(Args),
@@ -406,6 +407,27 @@ pub struct Args {
         value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
     )]
     pub planner_runtime: Option<String>,
+
+    /// Run a mandatory end-of-run test command after the last iter
+    /// (and after merge-back on `--jobs >= 2`) to prove the final
+    /// stacked state is green. Overrides
+    /// `loop.end_of_run.verify_tests` config. Default `false`.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub verify_tests: bool,
+
+    /// Explicit-off for the end-of-run verify step, takes precedence
+    /// over `--verify-tests` and `loop.end_of_run.verify_tests`
+    /// config. Useful when a config opts in globally but a particular
+    /// run shouldn't pay the verify cost (e.g. dry-run experiments).
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub no_verify_tests: bool,
+
+    /// Override the resolved verify command for this run. Empty =
+    /// fall back to `loop.end_of_run.verify_command` config, then to
+    /// project-authored signals (justfile/Makefile/package.json
+    /// `test`) via `hew_core::gate::detect`.
+    #[arg(long)]
+    pub verify_command: Option<String>,
 }
 
 /// Resolve the effective [`LoopPlannerConfig`] for this run. Precedence:
@@ -834,6 +856,79 @@ pub fn run_loop_with_scope(
     )
 }
 
+/// End-of-run verify step (`hew-bon7`). Opt-in via `--verify-tests`
+/// or `loop.end_of_run.verify_tests = true`. Resolves the command
+/// from CLI > config > [`hew_core::gate::detect`], spawns it under
+/// the configured wall budget, records the outcome onto `run.verify_outcome`,
+/// re-writes `run.json` so the persisted summary matches, and writes
+/// a `STATUS:loop-verify-failed:<run-id>` memory on failure so the
+/// next session sees the regression. No-op when verify is disabled
+/// (no record written, summary line absent).
+fn maybe_run_verify_step(
+    ctx: &Ctx,
+    args: &Args,
+    bd: &dyn BdClient,
+    run: &mut Run,
+    working_dir: &Path,
+    run_dir: &Path,
+    worker_n: Option<u32>,
+) {
+    // CLI > config > defaults. `--no-verify-tests` always wins so a
+    // global config opt-in can be vetoed per-run.
+    let cfg = match hew_core::config::load() {
+        Ok(c) => c.loop_cfg.end_of_run,
+        Err(_) => hew_core::config::LoopEndOfRunConfig::default(),
+    };
+    if args.no_verify_tests {
+        return;
+    }
+    let enabled = args.verify_tests || cfg.verify_tests;
+    if !enabled {
+        return;
+    }
+
+    let gate = hew_core::gate::detect(working_dir);
+    let command = hew_core::verify::resolve_command(
+        args.verify_command.as_deref(),
+        Some(&cfg.verify_command),
+        &gate,
+    );
+    let outcome = match command {
+        None => hew_core::verify::VerifyOutcome::Skipped { reason: "no command resolved".into() },
+        Some(cmd) => {
+            let budget = hew_core::config::parse_budget_wall(&cfg.verify_budget_wall)
+                .unwrap_or_else(|_| Duration::from_secs(600));
+            let log_path = run_dir.join("verify.log");
+            if !ctx.quiet {
+                eprintln!("hew loop verify: {} (budget {}s)", cmd.join(" "), budget.as_secs());
+            }
+            hew_core::verify::run_verify(&cmd, working_dir, &log_path, budget)
+        }
+    };
+
+    // Persist on the in-memory Run before re-writing run.json so the
+    // summary line + manifest see a consistent state.
+    run.verify_outcome = Some(outcome.clone());
+    let _ = write_json_atomic(&run_log_path(run_dir, worker_n), &RunLog::from_run(run));
+
+    // STATUS memory on failure — survives across sessions so the next
+    // resume sees the regression. We deliberately do NOT file a bd
+    // task because closed work is not rolled back; the memory is the
+    // breadcrumb, the user decides on follow-up.
+    if outcome.is_failure() {
+        let summary = outcome.summary_line();
+        let body = format!(
+            "STATUS:loop-verify-failed:{} — {} (run-dir={})",
+            run.id,
+            summary,
+            run_dir.display(),
+        );
+        if let Err(e) = bd.remember(&body) {
+            tracing::warn!("failed to file STATUS:loop-verify-failed memory: {e}");
+        }
+    }
+}
+
 /// Today's single-worker loop, factored out so [`run_loop_with`] can
 /// branch on `--jobs N` without touching the existing code path. The
 /// body below is the original `run_loop_with` verbatim — the rename is
@@ -892,7 +987,7 @@ fn run_loop_serial(
     };
 
     let started_at = iso_now_utc();
-    let outcome = run_worker_loop_with_scope(
+    let mut outcome = run_worker_loop_with_scope(
         ctx,
         &args,
         bd,
@@ -911,6 +1006,13 @@ fn run_loop_serial(
         scope.clone(),
     )?;
 
+    // End-of-run verify (hew-bon7): opt-in. Runs in the project root
+    // for the serial path; on `--jobs N>=2` the parallel path runs it
+    // after merge-back below. Records the outcome onto `Run.verify_outcome`
+    // so the summary line + STATUS memory + exit code branch on a
+    // single value.
+    maybe_run_verify_step(ctx, &args, bd, &mut outcome.run, project_root, &dir, worker.worker_n);
+
     // Dispatcher-shutdown manifest: lists every worker that
     // participated in the run + their final outcome. v1 has a single
     // worker; the future parallel dispatcher folds N outcomes into the
@@ -928,6 +1030,14 @@ fn run_loop_serial(
 
     let scope = Some(outcome.run.config.scope.clone());
     print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir, scope);
+
+    // Verify failure ⇒ non-zero exit (acceptance: "CI / wrapper scripts
+    // can branch on this"). Closed tasks are NOT rolled back; the
+    // STATUS:loop-verify-failed memory + summary line + non-zero exit
+    // are the durable signals.
+    if outcome.run.verify_outcome.as_ref().is_some_and(|v| v.is_failure()) {
+        return Err(miette::miette!("verify-tests failed"));
+    }
     Ok(())
 }
 
@@ -1147,6 +1257,17 @@ fn run_loop_parallel(
         }
     }
 
+    // End-of-run verify (hew-bon7). On the parallel path the verify
+    // command runs in `project_root` (post-merge-back HEAD) and the
+    // outcome is recorded on the first worker's Run so the existing
+    // `print_summary(first, ...)` contract picks it up. Per-worker
+    // outcomes are not duplicated — the verify proves the stacked
+    // post-merge state, not any one worker's branch.
+    if let Some(first) = worker_outcomes.first_mut() {
+        let worker_n = workers.first().and_then(|w| w.worker_n);
+        maybe_run_verify_step(ctx, &args, bd, &mut first.run, project_root, &dir, worker_n);
+    }
+
     // Per-worker manifest rows; jobs reflects the dispatcher's slot
     // count (matches the user's --jobs N, post-clamp).
     let manifest_rows: Vec<ManifestWorker> = workers
@@ -1166,9 +1287,16 @@ fn run_loop_parallel(
     // v1: print the first worker's summary as a stand-in for the full
     // per-worker breakdown (that's hew-h0tu). Honors the existing
     // "print summary at end" contract so nothing downstream regresses.
+    let verify_failed = worker_outcomes
+        .first()
+        .and_then(|f| f.run.verify_outcome.as_ref())
+        .is_some_and(|v| v.is_failure());
     if let Some(first) = worker_outcomes.first() {
         let scope = Some(first.run.config.scope.clone());
         print_summary(ctx, &first.run, &first.iter_logs, &dir, scope);
+    }
+    if verify_failed {
+        return Err(miette::miette!("verify-tests failed"));
     }
     Ok(())
 }
@@ -1844,6 +1972,7 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
             })
             .collect(),
         stop_reason: rl.stop_reason.as_deref().and_then(hew_core::runner::StopReason::from_label),
+        verify_outcome: rl.verify_outcome.clone(),
     };
 
     print_summary(ctx, &run, &iter_logs, &dir, rl.scope.clone());
@@ -1915,6 +2044,7 @@ fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::
         config: RunConfig::default(),
         iters,
         stop_reason,
+        verify_outcome: None,
     };
 
     // Scope is dispatcher-level and identical across workers; read it
@@ -2305,6 +2435,9 @@ mod tests {
             no_planner: false,
             planner_budget: None,
             planner_runtime: None,
+            verify_tests: false,
+            no_verify_tests: false,
+            verify_command: None,
         }
     }
 

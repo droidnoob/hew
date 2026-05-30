@@ -167,6 +167,11 @@ pub struct RunLog {
     /// after `from_run` once `RunConfig.scope` lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Scope>,
+    /// End-of-run verify-tests outcome. `None` on legacy `run.json`
+    /// files predating the field; preserved verbatim on re-parse for
+    /// `hew loop summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_outcome: Option<crate::verify::VerifyOutcome>,
 }
 
 impl RunLog {
@@ -182,6 +187,7 @@ impl RunLog {
             strict: run.config.strict,
             interactive: run.config.interactive,
             scope: Some(run.config.scope.clone()),
+            verify_outcome: run.verify_outcome.clone(),
         }
     }
 }
@@ -686,6 +692,32 @@ mod tests {
         let json = serde_json::to_string(&log).unwrap();
         let parsed: RunLog = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.scope, Some(Scope::Epics { epic_ids: vec!["hew-6az".into()] }));
+    }
+
+    #[test]
+    fn run_log_backward_compat_missing_verify_outcome_deserializes_as_none() {
+        // Legacy run.json files predate `verify_outcome`. The
+        // pre-scope fixture is also pre-verify, so re-use it.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("run-log-pre-scope.json");
+        let body = std::fs::read_to_string(&path).expect("read pre-scope fixture");
+        let parsed: RunLog = serde_json::from_str(&body).expect("parse pre-scope fixture");
+        assert!(parsed.verify_outcome.is_none());
+    }
+
+    #[test]
+    fn run_log_round_trips_verify_outcome() {
+        let mut run = Run::new("loop-v1", "2026-05-30T00:00:00Z", RunConfig::default());
+        run.verify_outcome = Some(crate::verify::VerifyOutcome::Passed {
+            command: "cargo test".into(),
+            duration_secs: 22,
+        });
+        let log = RunLog::from_run(&run);
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: RunLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.verify_outcome, run.verify_outcome);
     }
 
     #[test]

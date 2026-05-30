@@ -541,6 +541,83 @@ analysis; cross-run batch memory; retroactive recovery of hung iters.
 
 ---
 
+## End-of-run verification
+
+Once every iter has closed (and, under `--jobs N >= 2`, every worker
+branch has merged back onto HEAD), hew can run a single test command
+to prove the *final stacked state* is green. The verify step is
+**opt-in**; default runs are byte-identical to today.
+
+Why a final-state check on top of per-iter `hew-guard` runs: the
+gate inside the loop catches regressions an iter introduced, but the
+sum of N green iters is not a green tree if two parallel workers
+touched the same module and the merge resolved one half (see
+`DECISION:loop-parallel-overlap-policy` — conflicts file
+`[merge-conflict]` bug tasks but the working tree itself may still
+need a final compile + test pass).
+
+### Wiring
+
+Both must hold for the step to run:
+
+1. A test command resolves — explicit `--verify-command`, then
+   `loop.end_of_run.verify_command` config, then project-authored
+   signals via `hew_core::gate::detect` (`justfile`, `Makefile`,
+   `package.json` `test`). No language-sniffing fallback — mirrors
+   the per-iter gate's existing philosophy.
+2. The user opted in — `--verify-tests` or
+   `loop.end_of_run.verify_tests = true`.
+
+### CLI
+
+```sh
+hew loop run --verify-tests                              # opt in for this run
+hew loop run --verify-tests --verify-command="cargo nextest run --workspace"
+hew loop run --no-verify-tests                           # explicit off
+```
+
+### TOML
+
+```toml
+[loop.end_of_run]
+verify_tests = false               # default false
+verify_command = ""                # empty = auto-detect from gate
+verify_budget_wall = "10m"         # hard cap on the verify step
+```
+
+### Outcome
+
+The full stdout+stderr of the verify command is written to
+`.hew/loop/<run-id>/verify.log`. The outcome (`Passed` / `Failed` /
+`Skipped` / `TimedOut`) is persisted as `Run.verify_outcome` on the
+run's `run.json` and shows up in the summary:
+
+```
+  verify:    passed (22s, cargo nextest run --workspace)
+  verify:    failed (exit 3, 5s, pytest -q)
+  verify:    skipped (no command resolved)
+  verify:    timed out (> 600s, ...)
+```
+
+A failed or timed-out verify **does not unwind any closed task**. The
+durable signals are:
+
+- The `verify:` line in `hew loop summary`.
+- A `STATUS:loop-verify-failed:<run-id>` memory so the next session
+  sees the regression on `hew prime resume`.
+- Non-zero exit code from `hew loop run` so CI / wrapper scripts can
+  branch on it.
+
+### Out of scope (v1)
+
+- Auto-fix on failure (could later re-queue failing tests as bd
+  tasks).
+- Per-iter verification (the per-iter gate already covers that path;
+  full-suite-per-iter would triple wall-clock cost).
+- Sandbox enforcement separate from the runtime's own.
+
+---
+
 ## Stop signals
 
 - `hew loop cancel` — touches `.hew/loop/<run-id>/.stop`.
