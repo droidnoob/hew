@@ -8,6 +8,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Batch planner for `hew loop run --jobs N` (epic `hew-lf40`).**
+  Parallel runs now layer two informed signals on top of `bd ready` to
+  choose each iter's dispatch batch: (1) a `next_iteration:` block in
+  the iter agent's close output (cheapest, in-band), and (2) a
+  dedicated planner subprocess spawned between iters when (1) is
+  absent — capped by `loop.planner.budget_tokens` (default `10_000`)
+  and skipped rather than truncated when over budget. `bd ready`
+  remains the safety floor: agent / planner suggestions can only
+  narrow the candidate set, never expand it
+  (`DECISION:loop-batch-planner-floor`). Each iter persists a
+  `batch-NNN.json` artifact (`schema_version: 1`) under the run dir; a
+  future `hew loop graph` (`hew-m7lq`) replays them. The end-of-run
+  summary gains a single-line `planner: agent=N, runtime=M,
+  fallback=K` row right after `scope:` (omitted entirely for legacy /
+  serial runs). CLI: `--no-planner`, `--planner-budget`. Config:
+  `[loop.planner] enabled = true`, `budget_tokens = 10_000`. v1 only
+  triggers under `--jobs >= 2`; `--jobs=1` skips the layer. See
+  `docs/LOOP.md` § Batch planner.
 - **`hew loop run --scope={ready|epics}` — scoped run queue
   (`hew-b3yl`).** Operators (and calling agents) now declare which
   slice of `bd ready` counts as the queue for a run: `--scope=ready`

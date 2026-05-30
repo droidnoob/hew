@@ -5,7 +5,9 @@
 //! CLI layer prints whatever [`render`] returns.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
+use crate::batch_plan::{self, BatchSource};
 use crate::loop_log::{IterLog, ManifestWorker};
 use crate::runner::{Run, StopReason, TokenSpend};
 use crate::scope::{self, Scope};
@@ -46,6 +48,55 @@ pub struct Summary {
     /// to `None` from [`summarize`]; live callers populate from
     /// `run.config.scope`, re-render callers from `RunLog.scope`.
     pub scope: Option<Scope>,
+    /// Tally of `batch-NNN.json` artifacts produced by the run, grouped
+    /// by [`BatchSource`]. All zeros (the default) means the run never
+    /// wrote a batch plan — legacy serial run, or `--jobs=1` — and the
+    /// renderer hides the `planner:` line entirely. Populated by
+    /// callers via [`scan_planner_counts`]; [`summarize`] leaves it at
+    /// default so it can stay a pure function.
+    pub planner_counts: PlannerCounts,
+}
+
+/// Per-source tally of `batch-NNN.json` artifacts a run produced. Zero
+/// in every field == no batch files on disk; the renderer treats that
+/// case as "legacy / serial run" and skips the planner line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlannerCounts {
+    pub agent: u32,
+    pub planner: u32,
+    pub skipped: u32,
+}
+
+impl PlannerCounts {
+    pub fn total(&self) -> u32 {
+        self.agent + self.planner + self.skipped
+    }
+}
+
+/// Walk `run_dir` for `batch-NNN.json` files and tally them by source.
+/// Missing/unreadable files are skipped silently — a partial run that
+/// crashed mid-write shouldn't break the summary. Returns the
+/// default-zero counts when the directory has no batch artifacts.
+pub fn scan_planner_counts(run_dir: &Path) -> PlannerCounts {
+    let mut counts = PlannerCounts::default();
+    let Ok(entries) = std::fs::read_dir(run_dir) else { return counts };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else { continue };
+        if !name.starts_with("batch-") || !name.ends_with(".json") {
+            continue;
+        }
+        let Some(stem) = name.strip_prefix("batch-").and_then(|s| s.strip_suffix(".json")) else {
+            continue;
+        };
+        let Ok(iter) = stem.parse::<u32>() else { continue };
+        let Ok(Some(plan)) = batch_plan::read(run_dir, iter) else { continue };
+        match plan.source {
+            BatchSource::Agent => counts.agent += 1,
+            BatchSource::Planner => counts.planner += 1,
+            BatchSource::Skipped => counts.skipped += 1,
+        }
+    }
+    counts
 }
 
 /// One row of the per-model breakdown table. `model` is the resolved
@@ -128,6 +179,7 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         symbols_touched,
         per_model,
         scope: None,
+        planner_counts: PlannerCounts::default(),
     }
 }
 
@@ -223,6 +275,18 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
     // a glance which queue the run consumed.
     let scope_label = scope::label_optional(summary.scope.as_ref());
     let _ = writeln!(s, "  {bold}scope{reset}:     {scope_label}");
+
+    // Planner line — only present when the run produced batch artifacts.
+    // Naming on the wire: `agent` (next_iteration: from the iter agent),
+    // `runtime` (planner subprocess), `fallback` (skipped → trust-the-graph).
+    let pc = &summary.planner_counts;
+    if pc.total() > 0 {
+        let _ = writeln!(
+            s,
+            "  {bold}planner{reset}:   agent={}, runtime={}, fallback={}",
+            pc.agent, pc.planner, pc.skipped,
+        );
+    }
 
     // Token breakdown.
     let total = summary.cost.total();
@@ -904,6 +968,102 @@ mod tests {
             outcomes_pos < scope_pos && scope_pos < tokens_pos,
             "scope must sit between outcomes and tokens:\n{txt}"
         );
+    }
+
+    fn batch_tmpdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!(
+            "hew-summary-planner-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+            n,
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn write_batch(dir: &std::path::Path, iter: u32, source: BatchSource) {
+        let plan = crate::batch_plan::BatchPlan {
+            schema_version: crate::batch_plan::SCHEMA_VERSION,
+            iter_number: iter,
+            task_ids: Vec::new(),
+            source,
+            reason: None,
+            created_at: "2026-05-30T00:00:00Z".into(),
+            planner_tokens: None,
+        };
+        crate::batch_plan::write(dir, &plan).unwrap();
+    }
+
+    #[test]
+    fn summary_planner_counts_aggregates_agent_planner_skipped() {
+        let dir = batch_tmpdir();
+        write_batch(&dir, 1, BatchSource::Agent);
+        write_batch(&dir, 2, BatchSource::Agent);
+        write_batch(&dir, 3, BatchSource::Planner);
+        write_batch(&dir, 4, BatchSource::Skipped);
+        let counts = scan_planner_counts(&dir);
+        assert_eq!(counts.agent, 2);
+        assert_eq!(counts.planner, 1);
+        assert_eq!(counts.skipped, 1);
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn summary_omits_planner_line_when_no_batch_files() {
+        let mut sum = one_iter_summary();
+        sum.planner_counts = PlannerCounts::default();
+        let txt = render(&sum, "/x", false);
+        assert!(!txt.contains("planner:"), "legacy run must omit planner row:\n{txt}");
+    }
+
+    #[test]
+    fn summary_planner_line_appears_after_scope_line() {
+        let mut sum = one_iter_summary();
+        sum.scope = Some(Scope::Ready);
+        sum.planner_counts = PlannerCounts { agent: 4, planner: 2, skipped: 1 };
+        let txt = render(&sum, "/x", false);
+        let scope_pos = txt.find("scope:").expect("scope row present");
+        let planner_pos = txt.find("planner:").expect("planner row present");
+        let tokens_pos = txt.find("tokens:").expect("tokens row present");
+        assert!(
+            scope_pos < planner_pos && planner_pos < tokens_pos,
+            "planner must sit between scope and tokens:\n{txt}"
+        );
+        assert!(
+            txt.contains("agent=4, runtime=2, fallback=1"),
+            "planner row format mismatch:\n{txt}"
+        );
+    }
+
+    #[test]
+    fn summary_legacy_run_without_batch_files_renders_clean() {
+        let dir = batch_tmpdir();
+        // No batch files written.
+        let counts = scan_planner_counts(&dir);
+        assert_eq!(counts, PlannerCounts::default());
+        let mut sum = one_iter_summary();
+        sum.planner_counts = counts;
+        let txt = render(&sum, "/x", false);
+        assert!(!txt.contains("planner:"), "no batch files → no planner row:\n{txt}");
+    }
+
+    #[test]
+    fn scan_planner_counts_ignores_non_batch_files() {
+        let dir = batch_tmpdir();
+        std::fs::write(dir.join("run.json"), "{}").unwrap();
+        std::fs::write(dir.join("iter-001.json"), "{}").unwrap();
+        std::fs::write(dir.join("batch-notanumber.json"), "{}").unwrap();
+        write_batch(&dir, 7, BatchSource::Agent);
+        let counts = scan_planner_counts(&dir);
+        assert_eq!(counts.agent, 1);
+        assert_eq!(counts.planner, 0);
+        assert_eq!(counts.skipped, 0);
     }
 
     #[test]

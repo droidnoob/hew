@@ -456,6 +456,91 @@ epic-scoped (per `hew-6n0v`) and stays out of this surface.
 
 ---
 
+## Batch planner
+
+Parallel runs (`--jobs N >= 2`) need to choose *which* of the bd-ready
+tasks dispatch this iter. The dispatcher layers two informed signals on
+top of `bd ready`, with `bd ready` itself as the safety floor:
+
+1. **Iter agent's `next_iteration:` block.** The previous iter's close
+   output can name task ids the dispatcher should consider next. Cheapest
+   signal — already part of the iter's token budget; no extra subprocess.
+2. **Planner subprocess.** Spawned between iters *only* when (1) is
+   absent. Bounded by `loop.planner.budget_tokens` (default `10_000`).
+   When the budget would be exceeded the planner skips entirely rather
+   than truncating its context to fit.
+3. **Floor: `bd ready`.** The dispatcher always intersects the chosen
+   batch with the live `bd ready` set. Suggestions can only *narrow* the
+   candidate set, never expand it — see
+   `DECISION:loop-batch-planner-floor` and
+   `DECISION:loop-parallel-overlap-policy`.
+
+The cascade is **agent → planner → trust-the-graph**. If the agent
+emits `next_iteration:`, that wins. Otherwise the planner runs (if
+budgeted). If neither produces a usable batch (no agent block, planner
+skipped or declined), the dispatcher falls through to `bd ready` order
+exactly as a serial run would.
+
+**Each iter persists a `batch-NNN.json` artifact** to the run dir:
+
+```
+.hew/loop/<run-id>/batch-001.json
+.hew/loop/<run-id>/batch-002.json
+...
+```
+
+Schema (`schema_version: 1`):
+
+```json
+{
+  "schema_version": 1,
+  "iter_number": 3,
+  "task_ids": ["hew-aaa", "hew-bbb"],
+  "source": "agent",          // "agent" | "planner" | "skipped"
+  "reason": null,             // populated on "skipped" (e.g. "planner budget exhausted")
+  "created_at": "2026-05-30T00:00:00Z",
+  "planner_tokens": null      // {input,output,cache_read,cache_create} when source="planner"
+}
+```
+
+A future `hew loop graph` (`hew-m7lq`) consumes these artifacts to
+render the dispatch history.
+
+**End-of-run summary** rolls the counts up into one line, right after
+`scope:`:
+
+```
+planner:   agent=4, runtime=2, fallback=1
+```
+
+`agent` = iter-suggested batches, `runtime` = planner-subprocess
+batches, `fallback` = skipped batches that fell through to bd-ready
+order. The line is omitted entirely when no `batch-*.json` files exist
+(serial run, or a parallel run that crashed before the first iter).
+
+### Configuration
+
+```toml
+[loop.planner]
+enabled = true              # master switch; false disables the planner subprocess layer
+budget_tokens = 10_000      # hard cap; planner skips rather than truncates
+```
+
+CLI overrides on `hew loop run`:
+
+| Flag                     | Effect                                              |
+|--------------------------|-----------------------------------------------------|
+| `--no-planner`           | Disable the planner-subprocess layer for this run. The iter agent's `next_iteration:` block still drives the batch when present; otherwise the dispatcher falls through to `bd ready`. |
+| `--planner-budget N`     | Override `loop.planner.budget_tokens` for this run. |
+
+**v1 wire-up:** Only triggers when `--jobs >= 2`. `--jobs=1` skips the
+planner layer entirely — there's nothing for it to narrow.
+
+**Non-goals (v1):** replacing trust-the-graph; static touches-overlap
+analysis; cross-run batch memory; retroactive recovery of hung iters.
+
+---
+
 ## Stop signals
 
 - `hew loop cancel` — touches `.hew/loop/<run-id>/.stop`.

@@ -1678,6 +1678,7 @@ fn print_summary(
     }
     let mut summary = hew_core::loop_summary::summarize(run, iter_logs);
     summary.scope = scope;
+    summary.planner_counts = hew_core::loop_summary::scan_planner_counts(dir);
     let colorize = std::env::var_os("NO_COLOR").is_none();
     print!("{}", hew_core::loop_summary::render(&summary, &dir.display().to_string(), colorize),);
 }
