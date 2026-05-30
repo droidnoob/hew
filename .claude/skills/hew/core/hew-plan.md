@@ -1,4 +1,4 @@
-<!-- hew:version=0.10.0 -->
+<!-- hew:version=0.11.0 -->
 ---
 name: hew-plan
 category: core
@@ -258,6 +258,16 @@ read these per-plan deviations *in addition to* the project's
 `CONVENTION:craft.*` memories. Deviations are scoped to the plan id;
 they do not bleed across features.
 
+### Note for `hew loop` runs
+
+If you expect this plan to drive an autonomous `hew loop` and one or
+two tasks are clearly heavier than the rest, mention it now — the
+decomposer will mark those tasks with `<!-- hew:model=<name> -->`
+or a `model:<name>` label so the loop routes them to a stronger
+model. Project-wide policy (e.g. "all P0s on opus-4-7") lives in
+`loop.model.by_priority` / `loop.model.by_type` and is set once at
+the config layer; see `docs/LOOP.md` "Per-task model selection."
+
 ## What you don't do
 
 - **No tasks.** That is `hew-decompose`. Do not run `hew task new` here.
@@ -286,8 +296,10 @@ On "Skip" or after `/hew:research` completes:
 "Plan is approved. Calling `hew-decompose` to build the Beads graph."
 Then invoke `hew-decompose` with the plan in context.
 `hew-decompose` will read the same memories, plus the conversation it inherits
-from you, and produce `hew task new` / `hew dep add` calls (and `bd
-create --type=gate` for external blockers; gates aren't wrapped).
+from you, and produce `bd create --graph` for the task batch (or `hew task
+new` for one-offs), `hew dep add` for cross-task ordering, and
+`hew gate new --gh-pr=N` for external blockers (e.g. a downstream epic
+that waits on a PR merge).
 
 After `hew-decompose` finishes, write the phase marker:
 

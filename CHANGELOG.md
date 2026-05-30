@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-05-30
+
 ### Added
 
 - **`hew loop graph` DAG renderer (`hew-m7lq`).** Renders the loop's

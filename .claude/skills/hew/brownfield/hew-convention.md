@@ -1,4 +1,4 @@
-<!-- hew:version=0.10.0 -->
+<!-- hew:version=0.11.0 -->
 ---
 name: hew-convention
 category: brownfield
