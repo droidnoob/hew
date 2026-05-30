@@ -347,9 +347,24 @@ pub struct OptionalSkills {
     pub security: SkillMode,
 }
 
-/// Resolve the user-config path. Honors `HEW_CONFIG` for tests.
+/// Resolve the user-config path. Honors `HEW_CONFIG` for tests (highest
+/// precedence — single-file bypass). Also honors `HEW_USER_CONFIG` which
+/// overrides only the XDG-resolved user-global path, leaving layered
+/// project discovery intact.
 pub fn config_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("HEW_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
+    if let Ok(p) = std::env::var("HEW_USER_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
+    use etcetera::BaseStrategy;
+    let strategy = etcetera::choose_base_strategy().map_err(|e| HewError::Io(io_other(e)))?;
+    Ok(strategy.config_dir().join("hew").join("config.toml"))
+}
+
+fn user_config_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("HEW_USER_CONFIG") {
         return Ok(PathBuf::from(p));
     }
     use etcetera::BaseStrategy;
@@ -364,13 +379,12 @@ fn io_other(e: impl std::fmt::Display) -> std::io::Error {
 pub fn load() -> Result<Config> {
     // `HEW_CONFIG` is the documented escape hatch for tests / scripts:
     // it bypasses layering entirely and treats the named file as the
-    // sole config source.
+    // sole config source. `HEW_USER_CONFIG` only overrides the
+    // XDG-resolved user-global path; layered project discovery still runs.
     if let Ok(p) = std::env::var("HEW_CONFIG") {
         return load_from(&PathBuf::from(p));
     }
-    use etcetera::BaseStrategy;
-    let strategy = etcetera::choose_base_strategy().map_err(|e| HewError::Io(io_other(e)))?;
-    let user_path = strategy.config_dir().join("hew").join("config.toml");
+    let user_path = user_config_path()?;
     let cwd = std::env::current_dir().map_err(HewError::Io)?;
     let project_path = discover_project_root(&cwd).and_then(|root| discover_project_config(&root));
     load_layered(Some(&user_path), project_path.as_deref())
@@ -543,6 +557,172 @@ pub fn save_to(path: &Path, cfg: &Config) -> Result<()> {
     let serialized = toml::to_string_pretty(cfg).map_err(|e| HewError::Io(io_other(e)))?;
     std::fs::write(path, serialized)?;
     Ok(())
+}
+
+/// Where a given setting came from after layering. `Merged` is reserved
+/// for the small set of keys whose values are concatenated/extended
+/// (arrays, maps) — see [`is_merged_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigSource {
+    /// Set explicitly in `~/.config/hew/config.toml`.
+    UserGlobal,
+    /// Set explicitly in `<root>/.hew.toml` (or `hew.toml`).
+    Project,
+    /// Set via the `HEW_CONFIG` environment-variable bypass file. This
+    /// source is single-file and short-circuits both user-global and
+    /// project layering.
+    Env,
+    /// Neither file set the key — value comes from the Rust default.
+    Default,
+    /// Both user-global and project files contributed (arrays
+    /// concatenated, maps unioned).
+    Merged,
+}
+
+impl std::fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::UserGlobal => "user-global",
+            Self::Project => "project",
+            Self::Env => "env",
+            Self::Default => "default",
+            Self::Merged => "merged",
+        };
+        f.write_str(s)
+    }
+}
+
+/// A list of canonical keys whose merge semantics produce a union of
+/// both sides (arrays append+dedupe, maps extend). Used by
+/// [`load_with_provenance`] to label these as [`ConfigSource::Merged`]
+/// when both files contribute, instead of crediting only the winning
+/// side.
+fn is_merged_key(key: &str) -> bool {
+    matches!(key, "compact.exempt" | "loop.model.by_priority" | "loop.model.by_type")
+}
+
+/// Translate a public dotted key (as used by [`get`] / [`set`] / [`keys`])
+/// into the TOML path used in on-disk files. Top-level hyphens become
+/// underscores; dotted segments are walked verbatim.
+fn key_to_toml_path(key: &str) -> Vec<String> {
+    key.split('.').map(|seg| seg.replace('-', "_")).collect()
+}
+
+fn has_dotted_key(table: &toml::Table, path: &[String]) -> bool {
+    match path {
+        [] => false,
+        [last] => table.contains_key(last),
+        [head, rest @ ..] => match table.get(head) {
+            Some(toml::Value::Table(sub)) => has_dotted_key(sub, rest),
+            _ => false,
+        },
+    }
+}
+
+fn read_toml_table(path: &Path) -> toml::Table {
+    std::fs::read_to_string(path).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Result of [`load_with_provenance`]: the merged config plus per-key
+/// source attribution and the on-disk file paths that contributed.
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub sources: BTreeMap<String, ConfigSource>,
+    /// File paths in precedence order (later overrides earlier). `None`
+    /// means the slot did not contribute (no file at that path).
+    pub user_path: Option<PathBuf>,
+    pub project_path: Option<PathBuf>,
+    pub env_path: Option<PathBuf>,
+}
+
+impl LoadedConfig {
+    /// File paths that actually contributed, in precedence order
+    /// (user-global, then project, then env). Used by `hew config show`
+    /// to render the "sources" header.
+    pub fn source_paths(&self) -> Vec<(&'static str, &Path)> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.env_path {
+            out.push(("env (HEW_CONFIG)", p.as_path()));
+            return out;
+        }
+        if let Some(p) = &self.user_path
+            && p.is_file()
+        {
+            out.push(("user-global", p.as_path()));
+        }
+        if let Some(p) = &self.project_path {
+            out.push(("project", p.as_path()));
+        }
+        out
+    }
+}
+
+/// Same as [`load`], but tracks per-key provenance so `hew config show`
+/// can attribute each setting to its source file.
+///
+/// Source-attribution rules:
+/// - When [`HEW_CONFIG`] is set, every key is labeled [`ConfigSource::Env`]
+///   iff the file contains the key, else [`ConfigSource::Default`].
+/// - Otherwise: if both user and project files explicitly set a
+///   [`is_merged_key`] key → [`ConfigSource::Merged`]. Else attribute to
+///   whichever file set the key, with project winning ties (matching
+///   the load-time merge rule). If neither file set it →
+///   [`ConfigSource::Default`].
+pub fn load_with_provenance() -> Result<LoadedConfig> {
+    if let Ok(p) = std::env::var("HEW_CONFIG") {
+        let path = PathBuf::from(&p);
+        let cfg = load_from(&path)?;
+        let raw = read_toml_table(&path);
+        let mut sources = BTreeMap::new();
+        for k in keys() {
+            let path = key_to_toml_path(k);
+            let src =
+                if has_dotted_key(&raw, &path) { ConfigSource::Env } else { ConfigSource::Default };
+            sources.insert((*k).to_string(), src);
+        }
+        return Ok(LoadedConfig {
+            config: cfg,
+            sources,
+            user_path: None,
+            project_path: None,
+            env_path: Some(path),
+        });
+    }
+
+    let user_path = user_config_path()?;
+    let cwd = std::env::current_dir().map_err(HewError::Io)?;
+    let project_path = discover_project_root(&cwd).and_then(|root| discover_project_config(&root));
+
+    let user_raw =
+        if user_path.is_file() { read_toml_table(&user_path) } else { toml::Table::new() };
+    let project_raw = project_path.as_ref().map(|p| read_toml_table(p)).unwrap_or_default();
+
+    let cfg = load_layered(Some(&user_path), project_path.as_deref())?;
+
+    let mut sources = BTreeMap::new();
+    for k in keys() {
+        let toml_path = key_to_toml_path(k);
+        let user_has = has_dotted_key(&user_raw, &toml_path);
+        let project_has = has_dotted_key(&project_raw, &toml_path);
+        let src = match (user_has, project_has) {
+            (false, false) => ConfigSource::Default,
+            (true, false) => ConfigSource::UserGlobal,
+            (false, true) => ConfigSource::Project,
+            (true, true) if is_merged_key(k) => ConfigSource::Merged,
+            (true, true) => ConfigSource::Project,
+        };
+        sources.insert((*k).to_string(), src);
+    }
+
+    Ok(LoadedConfig {
+        config: cfg,
+        sources,
+        user_path: Some(user_path),
+        project_path,
+        env_path: None,
+    })
 }
 
 /// Header prepended to a freshly-created project config file so the
@@ -1667,6 +1847,61 @@ fallback_runtime = "codex"
         assert_eq!(loaded.compact.target_clusters_cap, 4);
         assert!(loaded.compact.allow_recompact_default);
         assert_eq!(loaded.compact.exempt, vec!["STATUS:custom", "STATUS:other"]);
+    }
+
+    // ──────── load_with_provenance (hew-leh9) ────────
+
+    #[test]
+    fn provenance_default_when_no_keys_set() {
+        // Pure-fn slice: the source-attribution rule itself. Avoids
+        // touching process-global env by running through the underlying
+        // primitives directly.
+        let empty = toml::Table::new();
+        let path = key_to_toml_path("update-check");
+        assert!(!has_dotted_key(&empty, &path));
+    }
+
+    #[test]
+    fn provenance_user_only_when_only_user_has_key() {
+        let mut user_raw = toml::Table::new();
+        user_raw.insert("default_runtime".to_string(), toml::Value::String("claude".into()));
+        let project_raw = toml::Table::new();
+        let path = key_to_toml_path("default-runtime");
+        assert!(has_dotted_key(&user_raw, &path));
+        assert!(!has_dotted_key(&project_raw, &path));
+    }
+
+    #[test]
+    fn provenance_merged_label_only_for_array_and_map_keys() {
+        assert!(is_merged_key("compact.exempt"));
+        assert!(is_merged_key("loop.model.by_priority"));
+        assert!(is_merged_key("loop.model.by_type"));
+        assert!(!is_merged_key("default-runtime"));
+        assert!(!is_merged_key("loop.fallback_runtime"));
+    }
+
+    #[test]
+    fn key_to_toml_path_translates_dashes_at_each_segment() {
+        assert_eq!(key_to_toml_path("update-check"), vec!["update_check"]);
+        assert_eq!(key_to_toml_path("branching.strategy"), vec!["branching", "strategy"]);
+        assert_eq!(key_to_toml_path("review.after-n-tasks"), vec!["review", "after_n_tasks"]);
+    }
+
+    #[test]
+    fn has_dotted_key_walks_nested_tables() {
+        let raw: toml::Table = toml::from_str(
+            r#"
+[loop]
+fallback_runtime = "codex"
+
+[loop.model]
+default = "claude-opus-4-7"
+"#,
+        )
+        .unwrap();
+        assert!(has_dotted_key(&raw, &key_to_toml_path("loop.fallback_runtime")));
+        assert!(has_dotted_key(&raw, &key_to_toml_path("loop.model.default")));
+        assert!(!has_dotted_key(&raw, &key_to_toml_path("loop.model.default-runtime")));
     }
 
     // ──────── save_project_to (hew-k2gm) ────────

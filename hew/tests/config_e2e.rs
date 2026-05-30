@@ -248,3 +248,123 @@ fn set_help_shows_global_and_project_flags() {
         .stdout(contains("--global"))
         .stdout(contains("--project"));
 }
+
+// ──────── hew-leh9: `hew config show` provenance ────────
+
+/// Build a hew Command rooted in a project dir whose user-global config
+/// path is overridden via `HEW_USER_CONFIG` (NOT `HEW_CONFIG`, which is
+/// a single-file bypass). Use this for tests that need real layering
+/// between user and project files.
+fn hew_layered(user_cfg: &std::path::Path, project_root: &std::path::Path) -> Command {
+    let mut c = Command::cargo_bin("hew").unwrap();
+    c.env_remove("HEW_CONFIG");
+    c.env("HEW_USER_CONFIG", user_cfg);
+    c.env("NO_COLOR", "1");
+    c.env("TERM", "dumb");
+    c.current_dir(project_root);
+    c
+}
+
+#[test]
+fn show_lists_sources_in_precedence_order() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    fs::write(&user_cfg, "default_runtime = \"claude\"\n").unwrap();
+    fs::write(proj.path().join(".hew.toml"), "[loop]\nfallback_runtime = \"codex\"\n").unwrap();
+
+    let assert = hew_layered(&user_cfg, proj.path()).args(["config", "show"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // sources header in order: user-global before project.
+    let user_pos = stdout.find("[user-global]").expect("user-global in output");
+    let proj_pos = stdout.find("[project]").expect("project in output");
+    assert!(user_pos < proj_pos, "user-global must precede project in:\n{stdout}");
+}
+
+#[test]
+fn show_attributes_scalar_to_its_source_file() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    fs::write(&user_cfg, "default_runtime = \"claude\"\n").unwrap();
+    fs::write(proj.path().join(".hew.toml"), "[loop]\nfallback_runtime = \"codex\"\n").unwrap();
+
+    let assert = hew_layered(&user_cfg, proj.path()).args(["config", "show"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // default-runtime: user-global. loop.fallback_runtime: project.
+    let line_runtime =
+        stdout.lines().find(|l| l.contains("default-runtime")).expect("default-runtime line");
+    assert!(line_runtime.contains("(user-global)"), "line was: {line_runtime}");
+    let line_fb = stdout
+        .lines()
+        .find(|l| l.contains("loop.fallback_runtime"))
+        .expect("loop.fallback_runtime line");
+    assert!(line_fb.contains("(project)"), "line was: {line_fb}");
+}
+
+#[test]
+fn show_attributes_array_to_merged_when_both_contributed() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    fs::write(&user_cfg, "[compact]\nexempt = [\"STATUS:user-a\"]\n").unwrap();
+    fs::write(proj.path().join(".hew.toml"), "[compact]\nexempt = [\"STATUS:project-b\"]\n")
+        .unwrap();
+
+    let assert = hew_layered(&user_cfg, proj.path()).args(["config", "show"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let line = stdout.lines().find(|l| l.contains("compact.exempt")).expect("compact.exempt line");
+    assert!(line.contains("(merged)"), "line was: {line}");
+}
+
+#[test]
+fn show_attributes_default_when_neither_file_set_it() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    // No project file. user is also empty.
+
+    let assert = hew_layered(&user_cfg, proj.path()).args(["config", "show"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let line = stdout.lines().find(|l| l.contains("update-check")).expect("update-check line");
+    assert!(line.contains("(default)"), "line was: {line}");
+}
+
+#[test]
+fn show_env_hew_config_renders_single_source() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    fs::write(&user_cfg, "default_runtime = \"claude\"\n").unwrap();
+    // Project file also exists; HEW_CONFIG should bypass both.
+    fs::write(proj.path().join(".hew.toml"), "version = 1\n").unwrap();
+
+    let assert = hew_in_project(&user_cfg, proj.path()).args(["config", "show"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // Only the env source appears in the sources header.
+    assert!(stdout.contains("[env (HEW_CONFIG)]"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("[user-global]"), "stdout must not list user-global:\n{stdout}");
+    assert!(!stdout.contains("[project]"), "stdout must not list project:\n{stdout}");
+    // Keys set in the HEW_CONFIG file attribute to env.
+    let line =
+        stdout.lines().find(|l| l.contains("default-runtime")).expect("default-runtime line");
+    assert!(line.contains("(env)"), "line was: {line}");
+}
+
+#[test]
+fn show_json_output_shape_stable() {
+    let proj = make_project_root();
+    let user_cfg = proj.path().join("user.toml");
+    fs::write(&user_cfg, "default_runtime = \"claude\"\n").unwrap();
+
+    let out = hew_layered(&user_cfg, proj.path())
+        .args(["--json", "config", "show"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(parsed["sources"].is_array(), "json: {parsed}");
+    assert!(parsed["keys"].is_object(), "json: {parsed}");
+    let runtime = &parsed["keys"]["default-runtime"];
+    assert_eq!(runtime["value"], "claude");
+    assert_eq!(runtime["source"], "user-global");
+    let update_check = &parsed["keys"]["update-check"];
+    assert_eq!(update_check["source"], "default");
+}

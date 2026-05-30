@@ -28,6 +28,8 @@ pub enum Op {
     },
     /// Show all config keys with their current values.
     List,
+    /// Show effective config with per-key source attribution.
+    Show,
     /// Reset config to defaults.
     Reset,
     /// Print the resolved config file path.
@@ -153,6 +155,57 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
                 for k in config::keys() {
                     let v = config::get(&cfg, k).unwrap_or_else(|| "(unset)".to_string());
                     println!("  {k:<28} {v}");
+                }
+            }
+            Ok(())
+        }
+        Op::Show => {
+            let loaded = config::load_with_provenance()?;
+            if matches!(ctx.output, OutputMode::Json) {
+                let sources: Vec<serde_json::Value> = loaded
+                    .source_paths()
+                    .into_iter()
+                    .map(|(label, path)| {
+                        serde_json::json!({ "label": label, "path": path.display().to_string() })
+                    })
+                    .collect();
+                let mut keys_obj = serde_json::Map::new();
+                for k in config::keys() {
+                    let value = config::get(&loaded.config, k).unwrap_or_default();
+                    let source =
+                        loaded.sources.get(*k).copied().unwrap_or(config::ConfigSource::Default);
+                    keys_obj.insert(
+                        (*k).to_string(),
+                        serde_json::json!({
+                            "value": value,
+                            "source": source.to_string(),
+                        }),
+                    );
+                }
+                let out = serde_json::json!({
+                    "sources": sources,
+                    "keys": serde_json::Value::Object(keys_obj),
+                });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+            } else {
+                let sps = loaded.source_paths();
+                if sps.is_empty() {
+                    println!("sources: (none — all defaults)");
+                } else {
+                    println!("sources (in precedence order):");
+                    for (label, path) in &sps {
+                        println!("  [{label}] {}", path.display());
+                    }
+                }
+                println!();
+                println!("effective config:");
+                let width = config::keys().iter().map(|k| k.len()).max().unwrap_or(0);
+                for k in config::keys() {
+                    let v = config::get(&loaded.config, k).unwrap_or_default();
+                    let src =
+                        loaded.sources.get(*k).copied().unwrap_or(config::ConfigSource::Default);
+                    let display_value = if v.is_empty() { "(unset)".to_string() } else { v };
+                    println!("  {k:width$} = {display_value:<28} ({src})");
                 }
             }
             Ok(())
