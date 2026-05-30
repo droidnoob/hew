@@ -39,6 +39,17 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// Human-readable label for renderers: `"ready"` or
+    /// `"epics [hew-6az, hew-1tq]"`. Pair with
+    /// [`label_optional`] when the source is an `Option<Scope>`
+    /// (legacy `run.json` files predate the field).
+    pub fn label(&self) -> String {
+        match self {
+            Self::Ready => "ready".into(),
+            Self::Epics { epic_ids } => format!("epics [{}]", epic_ids.join(", ")),
+        }
+    }
+
     /// True when `task_id` belongs to this scope.
     ///
     /// `epic_descendant_set` is the pre-resolved set of every task id
@@ -50,6 +61,18 @@ impl Scope {
             Self::Ready => true,
             Self::Epics { .. } => epic_descendant_set.contains(task_id),
         }
+    }
+}
+
+/// Label an `Option<Scope>` for end-of-run summaries.
+///
+/// `None` (a legacy `run.json` predating the field) renders as
+/// `"ready (legacy)"` so post-mortems can tell "scope was defaulted"
+/// apart from `Some(Scope::Ready)` ("scope was explicitly Ready").
+pub fn label_optional(scope: Option<&Scope>) -> String {
+    match scope {
+        None => "ready (legacy)".into(),
+        Some(s) => s.label(),
     }
 }
 
@@ -89,6 +112,26 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
+
+    #[test]
+    fn scope_label_ready_and_epics() {
+        assert_eq!(Scope::Ready.label(), "ready");
+        assert_eq!(Scope::Epics { epic_ids: vec!["hew-6az".into()] }.label(), "epics [hew-6az]",);
+        assert_eq!(
+            Scope::Epics { epic_ids: vec!["hew-6az".into(), "hew-1tq".into()] }.label(),
+            "epics [hew-6az, hew-1tq]",
+        );
+    }
+
+    #[test]
+    fn label_optional_distinguishes_none_from_explicit_ready() {
+        assert_eq!(label_optional(None), "ready (legacy)");
+        assert_eq!(label_optional(Some(&Scope::Ready)), "ready");
+        assert_eq!(
+            label_optional(Some(&Scope::Epics { epic_ids: vec!["hew-6az".into()] })),
+            "epics [hew-6az]",
+        );
+    }
 
     #[test]
     fn scope_default_is_ready() {

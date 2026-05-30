@@ -817,7 +817,8 @@ fn run_loop_serial(
     };
     write_manifest(&dir, &manifest).map_err(|e| miette::miette!("write manifest: {e}"))?;
 
-    print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir);
+    let scope = Some(outcome.run.config.scope.clone());
+    print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir, scope);
     Ok(())
 }
 
@@ -1055,7 +1056,8 @@ fn run_loop_parallel(
     // per-worker breakdown (that's hew-h0tu). Honors the existing
     // "print summary at end" contract so nothing downstream regresses.
     if let Some(first) = worker_outcomes.first() {
-        print_summary(ctx, &first.run, &first.iter_logs, &dir);
+        let scope = Some(first.run.config.scope.clone());
+        print_summary(ctx, &first.run, &first.iter_logs, &dir, scope);
     }
     Ok(())
 }
@@ -1495,11 +1497,18 @@ pub fn run_worker_loop_with_scope(
     Ok(WorkerOutcome { run: run_state, iter_logs })
 }
 
-fn print_summary(ctx: &Ctx, run: &Run, iter_logs: &[IterLog], dir: &std::path::Path) {
+fn print_summary(
+    ctx: &Ctx,
+    run: &Run,
+    iter_logs: &[IterLog],
+    dir: &std::path::Path,
+    scope: Option<hew_core::scope::Scope>,
+) {
     if ctx.quiet {
         return;
     }
-    let summary = hew_core::loop_summary::summarize(run, iter_logs);
+    let mut summary = hew_core::loop_summary::summarize(run, iter_logs);
+    summary.scope = scope;
     let colorize = std::env::var_os("NO_COLOR").is_none();
     print!("{}", hew_core::loop_summary::render(&summary, &dir.display().to_string(), colorize),);
 }
@@ -1667,7 +1676,7 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
         stop_reason: rl.stop_reason.as_deref().and_then(hew_core::runner::StopReason::from_label),
     };
 
-    print_summary(ctx, &run, &iter_logs, &dir);
+    print_summary(ctx, &run, &iter_logs, &dir, rl.scope.clone());
     Ok(())
 }
 
@@ -1738,7 +1747,17 @@ fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::
         stop_reason,
     };
 
-    print_summary(ctx, &run, &aggregated_iters, dir);
+    // Scope is dispatcher-level and identical across workers; read it
+    // from the first worker's run.json so legacy parallel runs (no
+    // scope field) still render as "ready (legacy)".
+    let scope = manifest
+        .workers
+        .first()
+        .map(|w| run_log_path(dir, Some(w.id)))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|b| serde_json::from_str::<RunLog>(&b).ok())
+        .and_then(|rl| rl.scope);
+    print_summary(ctx, &run, &aggregated_iters, dir, scope);
     Ok(())
 }
 

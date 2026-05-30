@@ -412,6 +412,50 @@ hash in each iter log makes this easy to spot.
 
 ---
 
+## Scope
+
+A run is *scoped* — `hew loop run` needs to know which set of bd tasks
+counts as the queue. Two shapes ship today:
+
+- **`--scope=ready`** — every `bd ready` task. Current behavior; the
+  agent picks the top of the ready list every iter.
+- **`--scope=epics --epics=<csv>`** — restricted to tasks transitively
+  under the listed epics. The dispatcher walks `bd children` for each
+  epic id at startup and filters every `dispatch_tick` against that
+  set, so workers never see siblings of unrelated epics. Epic ids
+  themselves are included so an "epic only ever closes when its
+  children are done" graph still resolves.
+
+**Resolution order:**
+
+1. CLI args (`--scope=...`, `--epics=...`) win.
+2. Interactive picker fires when stderr is a TTY and `--scope` was
+   omitted. Operators get a list-of-checkboxes prompt for epic ids
+   when they pick `epics`.
+3. Non-interactive without `--scope` returns
+   `HewError::MissingFlag { flag: "scope" }` (exit 2). Agents calling
+   agents *must* pass `--scope` explicitly — there is no fallback to
+   "everything is ready," because that's how a parallel `--jobs N`
+   run accidentally consumes the rest of the graph.
+
+Scope is persisted on the run's `run.json` as the `scope` field:
+
+```json
+{ "scope": { "kind": "ready" } }
+{ "scope": { "kind": "epics", "epic_ids": ["hew-6az"] } }
+```
+
+Pre-scope `run.json` files (no field) load as `None` and `hew loop
+summary` renders them as `scope: ready (legacy)` so post-mortems can
+tell "scope defaulted before the field existed" apart from
+`Some(Ready)` ("operator explicitly chose ready").
+
+**v1 non-goals:** priority / label / branch filters, a persistent
+config default knob, mid-run scope changes. `/hew:auto` is already
+epic-scoped (per `hew-6n0v`) and stays out of this surface.
+
+---
+
 ## Stop signals
 
 - `hew loop cancel` — touches `.hew/loop/<run-id>/.stop`.

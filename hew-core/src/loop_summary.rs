@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::loop_log::{IterLog, ManifestWorker};
 use crate::runner::{Run, StopReason, TokenSpend};
+use crate::scope::{self, Scope};
 use crate::time::parse_iso_utc;
 
 /// Aggregate view of a finished (or in-flight) loop run. All fields
@@ -39,6 +40,12 @@ pub struct Summary {
     /// Per-model token breakdown, in first-seen order. Empty when no
     /// iter populated the `model` field (legacy / pre-Epic-D runs).
     pub per_model: Vec<ModelBreakdown>,
+    /// Which slice of bd-ready tasks the run was scoped to. `None`
+    /// renders as `"ready (legacy)"` for `run.json` files that predate
+    /// the field; `Some(Scope::Ready)` renders as `"ready"`. Defaults
+    /// to `None` from [`summarize`]; live callers populate from
+    /// `run.config.scope`, re-render callers from `RunLog.scope`.
+    pub scope: Option<Scope>,
 }
 
 /// One row of the per-model breakdown table. `model` is the resolved
@@ -120,6 +127,7 @@ pub fn summarize(run: &Run, iter_logs: &[IterLog]) -> Summary {
         stop_reason: run.stop_reason,
         symbols_touched,
         per_model,
+        scope: None,
     }
 }
 
@@ -210,6 +218,11 @@ pub fn render(summary: &Summary, logs_path: &str, colorize: bool) -> String {
         }
         let _ = writeln!(s, "  {bold}outcomes{reset}:  {}", parts.join("  "));
     }
+
+    // Scope line — between outcomes and tokens so operators can see at
+    // a glance which queue the run consumed.
+    let scope_label = scope::label_optional(summary.scope.as_ref());
+    let _ = writeln!(s, "  {bold}scope{reset}:     {scope_label}");
 
     // Token breakdown.
     let total = summary.cost.total();
@@ -836,6 +849,61 @@ mod tests {
         assert!(txt.contains("total"));
         // Cached column for sonnet row = 1000 (cache_read+cache_create).
         assert!(txt.contains("1,000"), "expected cached sum to render with separator:\n{txt}");
+    }
+
+    fn one_iter_summary() -> Summary {
+        let logs = vec![iter_log(1, "closed", Some("h1"), TokenSpend::default())];
+        let run = run_with(vec![iter(
+            1,
+            "2026-05-26T00:00:00Z",
+            "2026-05-26T00:00:05Z",
+            IterOutcome::Closed,
+            TokenSpend::default(),
+        )]);
+        summarize(&run, &logs)
+    }
+
+    #[test]
+    fn summary_renders_scope_ready() {
+        let mut sum = one_iter_summary();
+        sum.scope = Some(Scope::Ready);
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("scope:     ready"), "missing ready scope line:\n{txt}");
+        assert!(!txt.contains("ready (legacy)"));
+        assert!(!txt.contains("epics ["));
+    }
+
+    #[test]
+    fn summary_renders_scope_epics_with_ids() {
+        let mut sum = one_iter_summary();
+        sum.scope = Some(Scope::Epics { epic_ids: vec!["hew-6az".into(), "hew-1tq".into()] });
+        let txt = render(&sum, "/x", false);
+        assert!(
+            txt.contains("scope:     epics [hew-6az, hew-1tq]"),
+            "missing epics scope line:\n{txt}"
+        );
+    }
+
+    #[test]
+    fn summary_renders_legacy_no_scope_field_as_ready_legacy() {
+        let mut sum = one_iter_summary();
+        sum.scope = None;
+        let txt = render(&sum, "/x", false);
+        assert!(txt.contains("scope:     ready (legacy)"), "missing legacy scope line:\n{txt}");
+    }
+
+    #[test]
+    fn summary_scope_line_appears_between_outcomes_and_tokens() {
+        let mut sum = one_iter_summary();
+        sum.scope = Some(Scope::Ready);
+        let txt = render(&sum, "/x", false);
+        let outcomes_pos = txt.find("outcomes:").expect("outcomes row present");
+        let scope_pos = txt.find("scope:").expect("scope row present");
+        let tokens_pos = txt.find("tokens:").expect("tokens row present");
+        assert!(
+            outcomes_pos < scope_pos && scope_pos < tokens_pos,
+            "scope must sit between outcomes and tokens:\n{txt}"
+        );
     }
 
     #[test]
