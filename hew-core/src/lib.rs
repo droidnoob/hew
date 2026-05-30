@@ -6,6 +6,7 @@
 pub mod allowed_tools;
 pub mod backpressure;
 pub mod batch_plan;
+pub mod batch_plan_parse;
 pub mod bd;
 #[cfg(feature = "treesitter")]
 pub mod blast;
