@@ -1,4 +1,4 @@
-<!-- hew:version=0.10.0 -->
+<!-- hew:version=0.11.0 -->
 ---
 name: hew-execute
 category: core
@@ -457,9 +457,14 @@ it out. Future-you saves the lookup time.
 
 Run `hew prime execute` again. Pick the next ready task. Continue.
 
-If the user said "do this one task," stop after closing it. If "keep going"
-or `/hew:auto`, loop until `hew prime execute` shows no ready tasks (then call `hew-verify`) or
-a Rule-4 architectural decision blocks you (then surface and stop).
+If the user said "do this one task," stop after closing it. If "keep going,"
+loop until `hew prime execute` shows no ready tasks (then call `hew-verify`)
+or a Rule-4 architectural decision blocks you (then surface and stop).
+
+If invoked via `/hew:auto`, the walk is scoped to the children of one
+active epic (`hew epic tree <id>`), not the global `bd ready` set —
+finish the epic, run `/hew:verify`, then stop. For the subprocess loop
+that drains the global queue with cache-warm prefixes, see `/hew:loop`.
 
 ### Step 10a — review picker (optional, config-gated)
 
