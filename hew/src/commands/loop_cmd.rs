@@ -427,6 +427,14 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
     }
 
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
+
+    // Pre-flight: argv-level scope errors (MissingFlag in non-interactive
+    // mode, --scope=ready + --epics contradiction) must fire BEFORE
+    // `bd discover`. Otherwise a CI that lacks `bd` on PATH masks every
+    // MissingFlag assertion with a generic `bd binary not found` error
+    // and contract tests can't tell the two failure paths apart.
+    precheck_scope_argv(&args, ctx)?;
+
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
 
     // Resolve --scope/--epics once, before any spawner is built. argv
@@ -485,6 +493,35 @@ pub enum ResolvedScope {
 ///
 /// Picker UX is implemented inline against `inquire` to match the
 /// existing patterns in `commands/init.rs` and `commands/remember.rs`.
+/// Pre-flight argv validation for `--scope` / `--epics`. Fires the
+/// errors that don't need `bd` to be on PATH:
+///
+/// 1. `--scope=ready` combined with `--epics` / `--epic` — contradiction.
+/// 2. `--scope=epics` with no epics list in non-interactive mode —
+///    `MissingFlag("epics")`.
+/// 3. No `--scope` argv in non-interactive mode — `MissingFlag("scope")`.
+///
+/// Called before `RealBd::discover()` so CI that lacks `bd` still
+/// surfaces these as the correct error class (the contract tests in
+/// `tests/loop_scope_e2e.rs` assert on the exact MissingFlag string).
+/// The remaining branches (id validation, interactive pickers) live
+/// in [`resolve_scope`] and run after `bd` is on hand.
+pub fn precheck_scope_argv(args: &Args, ctx: &Ctx) -> miette::Result<()> {
+    let mut epics: Vec<String> = args.epics.clone();
+    epics.extend(args.epic.iter().cloned());
+
+    match args.scope {
+        Some(ScopeArg::Ready) if !epics.is_empty() => {
+            Err(miette::miette!("--scope=ready does not accept --epics/--epic (got {:?})", epics,))
+        }
+        Some(ScopeArg::Epics) if epics.is_empty() && !ctx.interactive => {
+            Err(HewError::MissingFlag { flag: "epics".into() }.into())
+        }
+        None if !ctx.interactive => Err(HewError::MissingFlag { flag: "scope".into() }.into()),
+        _ => Ok(()),
+    }
+}
+
 pub fn resolve_scope(args: &Args, ctx: &Ctx, bd: &dyn BdClient) -> miette::Result<ResolvedScope> {
     // Merge --epic (singular) into --epics (plural): both feed the
     // same list. Argv order is preserved so the picker echoes the
