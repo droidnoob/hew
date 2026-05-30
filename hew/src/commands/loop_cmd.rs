@@ -224,6 +224,38 @@ pub enum LoopSub {
     /// records a `stop_reason`). Defaults to listing what would be
     /// removed; pass `--apply` to actually delete.
     PruneWorktrees(PruneWorktreesArgs),
+    /// Render the loop's iter+batch+run history as a DAG diagram
+    /// (mermaid by default; dot or ascii on opt-in). Defaults to the
+    /// most recent run; `--all` aggregates every run under
+    /// `.hew/loop/` into a single document.
+    Graph(GraphArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum GraphFormatArg {
+    Mermaid,
+    Dot,
+    Ascii,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct GraphArgs {
+    /// Run-id to render. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Output format. Defaults to `mermaid` for markdown embedding.
+    #[arg(long, value_enum, default_value_t = GraphFormatArg::Mermaid)]
+    pub format: GraphFormatArg,
+    /// Write to a file instead of stdout. When the path ends in `.md`
+    /// and format is mermaid, the output is wrapped in a fenced
+    /// ```mermaid block.
+    #[arg(long = "out")]
+    pub output_file: Option<PathBuf>,
+    /// Aggregate every run under `.hew/loop/` into one document. Each
+    /// run renders as its own subgraph.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub all: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -278,7 +310,60 @@ pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
         LoopSub::List(a) => run_list(ctx, a),
         LoopSub::Summary(a) => run_summary(ctx, a),
         LoopSub::PruneWorktrees(a) => run_prune_worktrees(ctx, a),
+        LoopSub::Graph(a) => run_graph(ctx, a),
     }
+}
+
+pub fn run_graph(ctx: &Ctx, args: GraphArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let format = match args.format {
+        GraphFormatArg::Mermaid => hew_core::loop_graph::Format::Mermaid,
+        GraphFormatArg::Dot => hew_core::loop_graph::Format::Dot,
+        GraphFormatArg::Ascii => hew_core::loop_graph::Format::Ascii,
+    };
+
+    let body = if args.all {
+        let root = loop_root(&project_root);
+        let graphs = hew_core::loop_graph::build_from_loop_root(&root)
+            .map_err(|e| miette::miette!("build graphs: {e}"))?;
+        if graphs.is_empty() {
+            return Err(miette::miette!("no loop runs found in {}", root.display()));
+        }
+        hew_core::loop_graph::render_all(&graphs, format)
+    } else {
+        let run_id = match args.run_id {
+            Some(id) => id,
+            None => latest_run_id(&project_root)?,
+        };
+        let dir = loop_root(&project_root).join(&run_id);
+        if !dir.exists() {
+            return Err(miette::miette!("run-dir not found: {}", dir.display()));
+        }
+        let g = hew_core::loop_graph::build_from_run_dir(&dir)
+            .map_err(|e| miette::miette!("build graph: {e}"))?;
+        hew_core::loop_graph::render(&g, format)
+    };
+
+    let wrapped = if matches!(args.format, GraphFormatArg::Mermaid)
+        && args.output_file.as_ref().is_some_and(|p| {
+            p.extension().and_then(|s| s.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        }) {
+        format!("```mermaid\n{}```\n", body)
+    } else {
+        body
+    };
+
+    match args.output_file {
+        Some(path) => {
+            std::fs::write(&path, &wrapped)
+                .map_err(|e| miette::miette!("write {}: {e}", path.display()))?;
+            if !ctx.quiet {
+                println!("wrote {}", path.display());
+            }
+        }
+        None => print!("{}", wrapped),
+    }
+    Ok(())
 }
 
 #[derive(Debug, ClapArgs)]

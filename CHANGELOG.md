@@ -8,6 +8,25 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hew loop graph` DAG renderer (`hew-m7lq`).** Renders the loop's
+  iter + batch + run + manifest history as a directed graph in
+  mermaid (default), GraphViz `dot`, or terminal ASCII. Each iter is
+  a node labelled with task id, outcome glyph, duration, and tokens;
+  edges distinguish sequential next-iter, agent-suggested,
+  planner-suggested, fallback (`bd ready`), and backpressure
+  rollbacks. Unhappy paths render distinctly: incomplete iters get a
+  dashed border (`⋯`), cancelled-mid-run iters get `⊘` with the stop
+  timestamp, runtime errors with empty stderr annotate as `possibly
+  hung`, backpressure failures draw a `↺ rolled back` self-edge, and
+  verify outcomes get a coloured tail node (`Verify ✓` / `Verify ✗` /
+  `Verify (skipped)`). Parallel runs (`--jobs >= 2`) render
+  per-worker swimlanes from `manifest.json`. CLI:
+  `hew loop graph [--run-id ID] [--format mermaid|dot|ascii]
+  [--out PATH] [--all]`; `--out` ending in `.md` wraps the mermaid
+  body in a fenced \`\`\`mermaid block. `--all` aggregates every run
+  under `.hew/loop/` into one document with each as its own subgraph.
+  Pre-batch-plan legacy runs render with sequential edges only. See
+  `docs/LOOP.md` § Loop graph. Closes epic `hew-lf40`.
 - **End-of-run verify step for `hew loop` (`hew-bon7`).** Opt-in
   mandatory test step that runs after the last iter (and after
   merge-back on `--jobs N >= 2`) to prove the final stacked state is

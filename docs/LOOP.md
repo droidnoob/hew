@@ -618,6 +618,101 @@ durable signals are:
 
 ---
 
+## Loop graph
+
+After a run finishes (or even while it's still in flight), the
+collection of iter/batch/run/manifest JSON under `.hew/loop/<run-id>/`
+*is* a directed acyclic graph: iters connected by sequential
+succession, batch suggestions, and parallel-worker swimlanes.
+`hew loop graph` renders that DAG so the run's behavior — including
+the unhappy paths the planner doesn't fix — is auditable at a glance.
+
+```sh
+hew loop graph                             # latest run, mermaid to stdout
+hew loop graph --run-id loop-2026...       # specific run
+hew loop graph --format=dot --out=run.dot  # GraphViz
+hew loop graph --out=run.md                # mermaid wrapped in ```mermaid fence
+hew loop graph --format=ascii              # terminal-only, no unicode glyphs
+hew loop graph --all                       # timeline across every run in .hew/loop/
+```
+
+### Outcome glyphs
+
+| Outcome             | Glyph | Mermaid class      | dot color | meaning                                |
+|---------------------|-------|--------------------|-----------|----------------------------------------|
+| `closed`            | ✓     | `iter-closed`      | green     | task closed cleanly                    |
+| `no_close`          | ◐     | `iter-no-close`    | orange    | spawner exited; no task closed         |
+| `runtime_error`     | ✗     | `iter-runtime-err` | red       | spawner returned a hard error          |
+| `backpressure_fail` | ↺     | `iter-backpressure`| red       | tests/lint failed; commits reverted    |
+| **cancelled**       | ⊘     | `iter-cancelled`   | gray      | `.stop` fired while this iter was live |
+| **incomplete**      | ⋯     | `iter-incomplete`  | gray/dashed | started, never ended (crash mid-iter)|
+
+### Edge kinds
+
+| Edge                       | Mermaid syntax              | Source                                                       |
+|----------------------------|-----------------------------|--------------------------------------------------------------|
+| Sequential next-iter       | `iter1 --> iter2`           | default dispatcher order                                     |
+| Agent-suggested            | `iter1 -. agent .-> iter2`  | previous iter's `next_iteration:` emit                       |
+| Planner-suggested          | `iter1 -. planner .-> iter2`| inter-iter planner subprocess                                 |
+| Fallback (trust-the-graph) | `iter1 == fallback ==> iter2` | no batch — dispatcher used `bd ready`                      |
+| Rollback (backpressure)    | `iter2 -.rolled back.-> iter1`| `↺` self-edge back to the iter before the failure          |
+| Verify                     | `iter_last --> verify`      | end-of-run verify-tests node                                 |
+
+### Unhappy paths
+
+The renderer makes the cases the planner can't fix legible:
+
+1. **Incomplete iter** (started, no `ended_at`) — `⋯` node with a
+   dashed border. The dispatcher crashed or was killed mid-iter.
+2. **Cancelled mid-run** — when `run.stop_reason = cancelled` the
+   in-flight iter gets `⊘` instead of `⋯` and an annotation
+   `cancelled @ <ts>`.
+3. **Runtime error with empty stderr** — annotated
+   `(no stderr — possibly hung)` so the operator can spot the
+   pattern of a runaway runtime.
+4. **Backpressure with rollback** — `↺` self-edge from the failing
+   iter back to its predecessor with `rolled back` annotation.
+5. **Verify failed** — the verify node renders red; the first three
+   matching lines from `verify.log` annotate it as failed-test
+   breadcrumbs.
+
+### Pre-batch-plan runs
+
+Runs from before the planner epic shipped have no `batch-*.json`
+files. The renderer falls back to plain Sequential edges in that
+case — no agent/planner/fallback styling shown.
+
+### Worked example
+
+A parallel `--jobs=2` run with one agent suggestion, one planner
+pick, and a verify pass renders to:
+
+```mermaid
+flowchart TD
+  subgraph worker-0
+    w0_iter1["iter-1<br/>hew-a<br/>✓ 12s 1200t"]
+    w0_iter2["iter-2<br/>hew-b<br/>✓ 9s 980t"]
+  end
+  subgraph worker-1
+    w1_iter1["iter-1<br/>hew-c<br/>✓ 14s 1100t"]
+  end
+  verify["Verify ✓"]
+  w0_iter1 -. agent .-> w0_iter2
+  w0_iter2 --> verify
+  class w0_iter1 iter-closed;
+  class w0_iter2 iter-closed;
+  class w1_iter1 iter-closed;
+  class verify verify-passed;
+```
+
+### Out of scope (v1)
+
+- Live-updating diagrams (websocket / fswatch). Static snapshot only.
+- Click-through navigation from a node to its iter log.
+- Auto-export to GitHub Action artifacts.
+- Task descriptions in node labels — only `task_id + iter_number`
+  ship today to avoid leaking private text into shareable diagrams.
+
 ## Stop signals
 
 - `hew loop cancel` — touches `.hew/loop/<run-id>/.stop`.
