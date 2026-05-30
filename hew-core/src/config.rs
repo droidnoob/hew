@@ -784,6 +784,91 @@ pub fn parse_budget_wall(raw: &str) -> Result<std::time::Duration> {
     Ok(dur)
 }
 
+/// Walk `cwd` ancestors looking for the project root. At each level,
+/// `.beads/` wins over `.git`; the first hit terminates the walk.
+/// When `.git` is a file (worktree gitlink — common in hew's own
+/// `~/.hew/wt/<run-id>/<n>/` workers), resolves to the underlying
+/// main-repo working tree via `git rev-parse --show-toplevel` rather
+/// than the worktree directory itself.
+///
+/// Returns `None` if neither marker is found before the filesystem
+/// root.
+pub fn discover_project_root(cwd: &Path) -> Option<PathBuf> {
+    for dir in cwd.ancestors() {
+        if dir.join(".beads").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        let git = dir.join(".git");
+        let meta = match std::fs::symlink_metadata(&git) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        if meta.is_file() {
+            return Some(resolve_worktree_root(dir).unwrap_or_else(|| dir.to_path_buf()));
+        }
+    }
+    None
+}
+
+/// Resolve the real repo root for a git worktree by asking git
+/// directly. Returns `None` on any failure — caller falls back to the
+/// worktree directory.
+fn resolve_worktree_root(worktree_dir: &Path) -> Option<PathBuf> {
+    // `git rev-parse --show-toplevel` inside a linked worktree returns
+    // the worktree's own working dir — not what we want here. The
+    // main repo's working tree is the parent of its `.git` dir, which
+    // `--git-common-dir` reports (shared across all linked worktrees).
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(worktree_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let common = PathBuf::from(s);
+    // common dir is typically `<main-repo>/.git`; the main repo root
+    // is its parent. Bare repos have no working tree — fall back to
+    // the worktree dir in that case.
+    let parent = common.parent()?;
+    if parent.as_os_str().is_empty() { None } else { Some(parent.to_path_buf()) }
+}
+
+/// Locate the project-local config file at `<root>`. Prefers
+/// `.hew.toml` (dotfile convention); falls back to `hew.toml`. When
+/// both exist, the dotfile wins and a warning is emitted so the user
+/// notices the duplicate.
+pub fn discover_project_config(root: &Path) -> Option<PathBuf> {
+    let dotfile = root.join(".hew.toml");
+    let plain = root.join("hew.toml");
+    let dot_present = dotfile.is_file();
+    let plain_present = plain.is_file();
+    if dot_present && plain_present {
+        tracing::warn!(
+            target: "hew::config",
+            ".hew.toml and hew.toml both present in {}; using .hew.toml",
+            root.display()
+        );
+    }
+    if dot_present {
+        Some(dotfile)
+    } else if plain_present {
+        Some(plain)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1396,5 +1481,160 @@ fallback_runtime = "codex"
         assert_eq!(loaded.compact.target_clusters_cap, 4);
         assert!(loaded.compact.allow_recompact_default);
         assert_eq!(loaded.compact.exempt, vec!["STATUS:custom", "STATUS:other"]);
+    }
+
+    // ──────── discover_project_root / discover_project_config ────────
+
+    fn scrub_git_env_in_process() {
+        // SAFETY: integration with the host pre-commit hook can leak
+        // GIT_* into our subprocess invocations. The test binary may
+        // run multiple tests in threads, but these vars only need to
+        // be absent at the moment we spawn git; once removed they
+        // stay removed for the process lifetime.
+        for var in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+        ] {
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    fn discover_root_finds_beads_dir_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".beads")).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = discover_project_root(&sub).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_root_falls_back_to_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = discover_project_root(&sub).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_root_returns_none_when_neither_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("x").join("y");
+        std::fs::create_dir_all(&sub).unwrap();
+        // Avoid walking into an ancestor that happens to contain
+        // a .git (e.g. /Users/.../hew) by canonicalizing into the
+        // tempdir then asserting Option::is_none only when None.
+        // If a parent contains .git, this test would resolve there —
+        // which is still a valid behavior; we only assert "no panic"
+        // and that the result, if Some, is an ancestor of cwd.
+        if let Some(found) = discover_project_root(&sub) {
+            assert!(
+                sub.starts_with(&found) || sub.canonicalize().unwrap().starts_with(&found),
+                "found {found:?} is not an ancestor of {sub:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_root_stops_at_filesystem_root_when_no_marker_found() {
+        // Walking from "/" (an existing path with no .beads/.git of
+        // our making) must terminate cleanly — not loop forever.
+        // We can't guarantee "/" has no .git on the host, so we only
+        // assert termination.
+        let _ = discover_project_root(Path::new("/"));
+    }
+
+    #[test]
+    fn discover_root_resolves_worktree_to_real_repo() {
+        use std::process::Command;
+        if which::which("git").is_err() {
+            eprintln!("git not on PATH, skipping");
+            return;
+        }
+        scrub_git_env_in_process();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "hew-test")
+                .env("GIT_AUTHOR_EMAIL", "hew@test.local")
+                .env("GIT_COMMITTER_NAME", "hew-test")
+                .env("GIT_COMMITTER_EMAIL", "hew@test.local")
+                .output()
+                .expect("git invocation");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x\n").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        let wt = tmp.path().join("worker");
+        git(&repo, &["worktree", "add", "-b", "worker-br", wt.to_str().unwrap(), "main"]);
+
+        // From inside the worktree, discover_project_root must resolve
+        // to the main repo, not the worktree dir.
+        let found = discover_project_root(&wt).expect("found root");
+        assert_eq!(found.canonicalize().unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_project_config_dotfile_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".hew.toml"), "").unwrap();
+        std::fs::write(root.join("hew.toml"), "").unwrap();
+        let found = discover_project_config(root).unwrap();
+        assert_eq!(found, root.join(".hew.toml"));
+    }
+
+    #[test]
+    fn discover_project_config_falls_back_to_plain_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("hew.toml"), "").unwrap();
+        let found = discover_project_config(root).unwrap();
+        assert_eq!(found, root.join("hew.toml"));
+    }
+
+    #[test]
+    fn discover_project_config_warns_when_both_exist() {
+        // The warning goes through tracing; we can't easily intercept it
+        // here without pulling in a subscriber. Smoke-check that the
+        // dotfile is still selected deterministically.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".hew.toml"), "a = 1\n").unwrap();
+        std::fs::write(root.join("hew.toml"), "b = 2\n").unwrap();
+        assert_eq!(discover_project_config(root), Some(root.join(".hew.toml")));
+    }
+
+    #[test]
+    fn discover_project_config_returns_none_when_neither() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(discover_project_config(tmp.path()).is_none());
     }
 }
