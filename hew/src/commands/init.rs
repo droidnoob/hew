@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args as ClapArgs;
 use hew_core::Ctx;
@@ -297,6 +297,8 @@ pub fn run(ctx: &Ctx, args: Args) -> miette::Result<()> {
         }
         plans.push(plan);
     }
+
+    emit_starter_dot_hew_toml(&project_root, mode, ctx, interactive_starter_regen_pick);
 
     if !ctx.quiet {
         print_summary_panel(
@@ -943,6 +945,58 @@ where
     }
 }
 
+/// Starter `.hew.toml` body. Tracked as a real TOML file under
+/// `hew/templates/` so contributors can edit it directly.
+const STARTER_HEW_TOML: &str = include_str!("../../templates/hew.toml.starter");
+
+/// Write `.hew.toml` with the starter content. Skips silently when a
+/// project config already exists (`.hew.toml` or `hew.toml`), except in
+/// interactive Reconfigure mode where the user is asked whether to
+/// regenerate (default: no). Best-effort: failures are logged to stderr
+/// but never abort init.
+fn emit_starter_dot_hew_toml<F>(project_root: &Path, mode: InitMode, ctx: &Ctx, regen_pick: F)
+where
+    F: FnOnce() -> bool,
+{
+    let dot = project_root.join(".hew.toml");
+    let plain = project_root.join("hew.toml");
+    let exists = dot.exists() || plain.exists();
+
+    let should_write = match (mode, exists) {
+        (InitMode::Cancel, _) => false, // run() returns before this; keep for safety.
+        (_, false) => true,
+        (InitMode::Reconfigure, true) if ctx.interactive => regen_pick(),
+        // Fresh / Refresh / non-interactive Reconfigure with existing file: skip.
+        (_, true) => false,
+    };
+
+    if !should_write {
+        return;
+    }
+
+    match std::fs::write(&dot, STARTER_HEW_TOML) {
+        Ok(_) => {
+            if !ctx.quiet {
+                println!("project config: ✓ wrote starter .hew.toml");
+            }
+        }
+        Err(e) => {
+            if !ctx.quiet {
+                eprintln!("hew init: warning — could not write .hew.toml: {e}");
+            }
+        }
+    }
+}
+
+fn interactive_starter_regen_pick() -> bool {
+    use inquire::Confirm;
+    Confirm::new("Regenerate .hew.toml?")
+        .with_default(false)
+        .with_help_message("overwrites the existing project config with the starter template")
+        .prompt()
+        .unwrap_or(false)
+}
+
 fn init_git_repo(ctx: &Ctx, project_root: &std::path::Path) -> miette::Result<()> {
     if !RealGit::is_available() {
         return Ok(());
@@ -1155,6 +1209,124 @@ mod tests {
         assert_eq!(runtime_artifact_label(Runtime::Codex), ".codex/ + AGENTS.md");
         assert_eq!(runtime_artifact_label(Runtime::Windsurf), ".windsurfrules");
         assert_eq!(runtime_artifact_label(Runtime::Generic), "");
+    }
+
+    // --- hew-3r8v: starter .hew.toml emission ---
+
+    fn non_interactive_ctx() -> Ctx {
+        use hew_core::ctx::OutputMode;
+        Ctx::new(true, OutputMode::Auto, false, 0)
+    }
+
+    fn interactive_quiet_ctx() -> Ctx {
+        use hew_core::ctx::OutputMode;
+        let mut c = Ctx::new(false, OutputMode::Auto, true, 0);
+        c.interactive = true;
+        c
+    }
+
+    fn never_regen() -> bool {
+        panic!("regen picker must not be called in this case")
+    }
+
+    #[test]
+    fn starter_contains_version_field() {
+        assert!(STARTER_HEW_TOML.contains("version = 1"));
+    }
+
+    #[test]
+    fn starter_contains_commented_loop_planner_section() {
+        assert!(STARTER_HEW_TOML.contains("# [loop.planner]"));
+        assert!(STARTER_HEW_TOML.contains("# budget_tokens"));
+    }
+
+    #[test]
+    fn starter_contains_docs_link_in_header() {
+        assert!(STARTER_HEW_TOML.contains("https://hew.sh/docs/config"));
+    }
+
+    #[test]
+    fn emit_writes_when_absent() {
+        let project = tempfile::tempdir().unwrap();
+        let ctx = non_interactive_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Fresh, &ctx, never_regen);
+        let body = std::fs::read_to_string(project.path().join(".hew.toml")).unwrap();
+        assert!(body.contains("version = 1"));
+    }
+
+    #[test]
+    fn emit_skips_when_dot_hew_toml_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let existing = project.path().join(".hew.toml");
+        std::fs::write(&existing, "version = 99\n# user content\n").unwrap();
+        let ctx = non_interactive_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Fresh, &ctx, never_regen);
+        let body = std::fs::read_to_string(&existing).unwrap();
+        assert!(body.contains("version = 99"), "user content must survive: {body}");
+    }
+
+    #[test]
+    fn emit_skips_when_plain_hew_toml_exists() {
+        let project = tempfile::tempdir().unwrap();
+        let plain = project.path().join("hew.toml");
+        std::fs::write(&plain, "version = 1\n").unwrap();
+        let ctx = non_interactive_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Fresh, &ctx, never_regen);
+        // No .hew.toml should be created when plain hew.toml already exists.
+        assert!(!project.path().join(".hew.toml").exists());
+    }
+
+    #[test]
+    fn emit_refresh_mode_preserves_existing_starter() {
+        let project = tempfile::tempdir().unwrap();
+        let existing = project.path().join(".hew.toml");
+        std::fs::write(&existing, "version = 42\n").unwrap();
+        let ctx = non_interactive_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Refresh, &ctx, never_regen);
+        let body = std::fs::read_to_string(&existing).unwrap();
+        assert!(body.contains("version = 42"), "refresh must not overwrite");
+    }
+
+    #[test]
+    fn emit_reconfigure_mode_regenerates_when_user_confirms() {
+        let project = tempfile::tempdir().unwrap();
+        let existing = project.path().join(".hew.toml");
+        std::fs::write(&existing, "version = 7\n").unwrap();
+        let ctx = interactive_quiet_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Reconfigure, &ctx, || true);
+        let body = std::fs::read_to_string(&existing).unwrap();
+        assert!(body.contains("version = 1"), "reconfigure+yes must rewrite to starter: {body}");
+    }
+
+    #[test]
+    fn emit_reconfigure_mode_keeps_existing_when_user_declines() {
+        let project = tempfile::tempdir().unwrap();
+        let existing = project.path().join(".hew.toml");
+        std::fs::write(&existing, "version = 7\n").unwrap();
+        let ctx = interactive_quiet_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Reconfigure, &ctx, || false);
+        let body = std::fs::read_to_string(&existing).unwrap();
+        assert!(body.contains("version = 7"), "reconfigure+no must preserve: {body}");
+    }
+
+    #[test]
+    fn emit_reconfigure_mode_writes_when_absent_without_prompt() {
+        let project = tempfile::tempdir().unwrap();
+        let ctx = interactive_quiet_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Reconfigure, &ctx, never_regen);
+        let body = std::fs::read_to_string(project.path().join(".hew.toml")).unwrap();
+        assert!(body.contains("version = 1"));
+    }
+
+    #[test]
+    fn emit_non_interactive_reconfigure_keeps_existing_silently() {
+        let project = tempfile::tempdir().unwrap();
+        let existing = project.path().join(".hew.toml");
+        std::fs::write(&existing, "version = 9\n").unwrap();
+        let ctx = non_interactive_ctx();
+        emit_starter_dot_hew_toml(project.path(), InitMode::Reconfigure, &ctx, never_regen);
+        let body = std::fs::read_to_string(&existing).unwrap();
+        assert!(body.contains("version = 9"), "non-interactive reconfigure must not prompt");
     }
 
     #[test]

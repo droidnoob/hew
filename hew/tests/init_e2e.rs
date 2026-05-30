@@ -843,3 +843,61 @@ fn init_no_flag_with_multiple_detected_refreshes_all() {
         .stdout(contains("Claude: ✓"))
         .stdout(contains("Codex: ✓"));
 }
+
+#[test]
+fn init_emits_starter_dot_hew_toml_on_fresh_project() {
+    // hew-3r8v: fresh init writes a starter .hew.toml alongside skill files.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success()
+        .stdout(contains("project config: ✓ wrote starter .hew.toml"));
+
+    let body = fs::read_to_string(project.path().join(".hew.toml")).unwrap();
+    assert!(body.contains("version = 1"), "starter must contain version field:\n{body}");
+    assert!(body.contains("https://hew.sh/docs/config"), "starter must contain docs link:\n{body}");
+}
+
+#[test]
+fn init_preserves_existing_dot_hew_toml() {
+    // hew-3r8v: existing .hew.toml must not be overwritten on a fresh init.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::write(project.path().join(".hew.toml"), "version = 42\n# my project\n").unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(project.path().join(".hew.toml")).unwrap();
+    assert!(body.contains("version = 42"), "user content must survive: {body}");
+    assert!(body.contains("# my project"));
+}
+
+#[test]
+fn init_skips_starter_when_plain_hew_toml_present() {
+    // hew-3r8v: if `hew.toml` (no leading dot) exists, do not create `.hew.toml`.
+    let stub_dir = tempfile::tempdir().unwrap();
+    install_stub(stub_dir.path(), BD_STUB_OK);
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir(project.path().join(".claude")).unwrap();
+    fs::write(project.path().join("hew.toml"), "version = 1\n").unwrap();
+
+    hew_with_stub(project.path(), stub_dir.path())
+        .args(["init", "--non-interactive", "--runtime", "claude"])
+        .assert()
+        .success();
+
+    assert!(
+        !project.path().join(".hew.toml").exists(),
+        ".hew.toml must not be created when plain hew.toml is present"
+    );
+}
