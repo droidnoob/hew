@@ -923,7 +923,7 @@ fn run_loop_parallel(
     // Dispatcher" acceptance holds across both paths. The scope was
     // resolved once at the top of `run_loop` and threaded here.
     let mut dispatcher =
-        hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone());
+        hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone(), None);
 
     // v1 wiring: one tick to fill all slots, then drive each worker's
     // loop in a scoped thread. The dispatcher's slot-fill state machine
