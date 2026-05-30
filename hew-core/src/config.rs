@@ -65,6 +65,72 @@ pub struct LoopConfig {
     /// Per-task model selection knobs consumed by the dynamic-model
     /// resolver (epic `hew-1tq`). All-None / empty by default.
     pub model: LoopModelConfig,
+    /// Planner-spawn knobs consumed by the iter-end batch-plan hook
+    /// when `hew loop run --jobs N >= 2` (epic `hew-lf40` /
+    /// `hew-7k1m`). Disabled / `0` for jobs == 1 — the entire layer
+    /// is bypassed so the fast path stays free of planner overhead.
+    pub planner: LoopPlannerConfig,
+    /// End-of-run verification knobs. Opt-in (`verify_tests = false`
+    /// by default) so existing runs stay byte-identical to today.
+    /// See `hew-bon7`.
+    pub end_of_run: LoopEndOfRunConfig,
+}
+
+/// `loop.end_of_run.*` knobs. Mandatory end-of-run test step that
+/// proves the final stacked state is green before the loop reports
+/// success. Off by default; flip via `loop.end_of_run.verify_tests`
+/// in config or `--verify-tests` on `hew loop run`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LoopEndOfRunConfig {
+    /// Run the verify step at all. Default `false`.
+    pub verify_tests: bool,
+    /// User-supplied verify command (e.g. `"cargo nextest run --workspace"`).
+    /// Empty = let [`crate::gate::detect`] resolve from project-authored
+    /// signals (justfile/Makefile/package.json `test`).
+    pub verify_command: String,
+    /// Wall-clock cap on the verify step. `"10m"` default.
+    pub verify_budget_wall: String,
+}
+
+impl Default for LoopEndOfRunConfig {
+    fn default() -> Self {
+        Self {
+            verify_tests: false,
+            verify_command: String::new(),
+            verify_budget_wall: "10m".into(),
+        }
+    }
+}
+
+/// Planner-spawn knobs. The planner is the inter-iter advisor that
+/// produces a [`crate::batch_plan::BatchPlan`] for the next iter when
+/// the previous iter's agent output did not name one. All fields are
+/// per-run overridable via CLI flags on `hew loop run` (see
+/// `--no-planner` / `--planner-budget` / `--planner-runtime`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LoopPlannerConfig {
+    /// Whether the planner runs at all. `false` ⇒ every iter-end that
+    /// doesn't find an agent-named batch writes a `Skipped` plan with
+    /// `reason = "planner_disabled"` instead of spawning. Default
+    /// `true`.
+    pub enabled: bool,
+    /// Pre-spawn token-estimate budget. The planner refuses to spawn
+    /// when the assembled prompt would exceed this (and emits a
+    /// `Skipped` plan with `reason = "budget_exceeded: ..."`). Default
+    /// `10_000`. `0` is treated as "always exceeded" — useful for
+    /// disabling planner spawns without flipping `enabled`.
+    pub budget_tokens: u32,
+    /// Runtime to drive the planner. `None` ⇒ inherit the loop's
+    /// primary runtime. Accepts `"claude"` / `"codex"`.
+    pub runtime: Option<String>,
+}
+
+impl Default for LoopPlannerConfig {
+    fn default() -> Self {
+        Self { enabled: true, budget_tokens: 10_000, runtime: None }
+    }
 }
 
 /// Persistent inputs for the dynamic per-task model resolver. Model
@@ -371,6 +437,20 @@ pub fn get(cfg: &Config, key: &str) -> Option<String> {
         "loop.model.by_type" | "loop.model.by-type" => {
             Some(format_map(&cfg.loop_cfg.model.by_type))
         }
+        "loop.planner.enabled" => Some(cfg.loop_cfg.planner.enabled.to_string()),
+        "loop.planner.budget_tokens" | "loop.planner.budget-tokens" => {
+            Some(cfg.loop_cfg.planner.budget_tokens.to_string())
+        }
+        "loop.planner.runtime" => cfg.loop_cfg.planner.runtime.clone(),
+        "loop.end_of_run.verify_tests" | "loop.end_of_run.verify-tests" => {
+            Some(cfg.loop_cfg.end_of_run.verify_tests.to_string())
+        }
+        "loop.end_of_run.verify_command" | "loop.end_of_run.verify-command" => {
+            Some(cfg.loop_cfg.end_of_run.verify_command.clone())
+        }
+        "loop.end_of_run.verify_budget_wall" | "loop.end_of_run.verify-budget-wall" => {
+            Some(cfg.loop_cfg.end_of_run.verify_budget_wall.clone())
+        }
         k if k.starts_with("loop.model.by_priority.")
             || k.starts_with("loop.model.by-priority.") =>
         {
@@ -592,6 +672,47 @@ pub fn set(cfg: &mut Config, key: &str, value: &str) -> Result<()> {
                 cfg.loop_cfg.model.by_type.insert(sub.to_string(), value.to_string());
             }
         }
+        "loop.planner.enabled" => cfg.loop_cfg.planner.enabled = bool_val(value)?,
+        "loop.planner.budget_tokens" | "loop.planner.budget-tokens" => {
+            let n: u32 = value.parse().map_err(|_| HewError::MissingFlag {
+                flag: format!("value (expected non-negative integer, got `{value}`)"),
+            })?;
+            cfg.loop_cfg.planner.budget_tokens = n;
+        }
+        "loop.planner.runtime" => {
+            if value.is_empty() {
+                cfg.loop_cfg.planner.runtime = None;
+            } else {
+                if !crate::runtime::RuntimeKind::VARIANTS.contains(&value) {
+                    return Err(HewError::MissingFlag {
+                        flag: format!(
+                            "value (expected one of {}, got `{value}`)",
+                            crate::runtime::RuntimeKind::VARIANTS.join("|")
+                        ),
+                    });
+                }
+                cfg.loop_cfg.planner.runtime = Some(value.to_string());
+            }
+        }
+        "loop.end_of_run.verify_tests" | "loop.end_of_run.verify-tests" => {
+            cfg.loop_cfg.end_of_run.verify_tests = bool_val(value)?;
+        }
+        "loop.end_of_run.verify_command" | "loop.end_of_run.verify-command" => {
+            cfg.loop_cfg.end_of_run.verify_command = value.to_string();
+        }
+        "loop.end_of_run.verify_budget_wall" | "loop.end_of_run.verify-budget-wall" => {
+            if value.is_empty() {
+                cfg.loop_cfg.end_of_run.verify_budget_wall = "10m".into();
+            } else {
+                // Validate parseability — same s/m/h grammar as
+                // `--budget-wall`. Reject bad values at set-time so
+                // `hew loop run` doesn't trip on a stale config.
+                parse_budget_wall(value).map_err(|e| HewError::MissingFlag {
+                    flag: format!("value (expected s/m/h duration, got `{value}`: {e})"),
+                })?;
+                cfg.loop_cfg.end_of_run.verify_budget_wall = value.to_string();
+            }
+        }
         _ => {
             return Err(HewError::MissingFlag { flag: format!("key (unknown: {key})") });
         }
@@ -628,7 +749,39 @@ pub fn keys() -> &'static [&'static str] {
         "loop.model.default",
         "loop.model.by_priority",
         "loop.model.by_type",
+        "loop.planner.enabled",
+        "loop.planner.budget_tokens",
+        "loop.planner.runtime",
+        "loop.end_of_run.verify_tests",
+        "loop.end_of_run.verify_command",
+        "loop.end_of_run.verify_budget_wall",
     ]
+}
+
+/// Parse a `loop.end_of_run.verify_budget_wall` string into a
+/// [`std::time::Duration`]. Accepts `<N>s` / `<N>m` / `<N>h`. Bare
+/// helper here (not the CLI's `parse_duration`) so config-side
+/// validation doesn't require pulling in the binary crate.
+pub fn parse_budget_wall(raw: &str) -> Result<std::time::Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(HewError::MissingFlag { flag: "empty duration".into() });
+    }
+    let (num, unit) = raw.split_at(raw.len() - 1);
+    let n: u64 = num
+        .parse()
+        .map_err(|e| HewError::MissingFlag { flag: format!("invalid number `{num}`: {e}") })?;
+    let dur = match unit {
+        "s" => std::time::Duration::from_secs(n),
+        "m" => std::time::Duration::from_secs(n * 60),
+        "h" => std::time::Duration::from_secs(n * 3600),
+        other => {
+            return Err(HewError::MissingFlag {
+                flag: format!("unknown duration unit `{other}` (expected s/m/h)"),
+            });
+        }
+    };
+    Ok(dur)
 }
 
 #[cfg(test)]
@@ -723,6 +876,12 @@ mod tests {
                 "loop.model.default" => "sonnet-4-6",
                 "loop.model.by_priority" => "P0=opus-4-7,P3=haiku-4-5",
                 "loop.model.by_type" => "bug=sonnet-4-6,chore=haiku-4-5",
+                "loop.planner.enabled" => "true",
+                "loop.planner.budget_tokens" => "20000",
+                "loop.planner.runtime" => "codex",
+                "loop.end_of_run.verify_tests" => "true",
+                "loop.end_of_run.verify_command" => "cargo nextest run",
+                "loop.end_of_run.verify_budget_wall" => "10m",
                 k if k.starts_with("optional-skills.") => "yes",
                 _ => "true",
             };
@@ -1174,6 +1333,49 @@ fallback_runtime = "codex"
         assert_eq!(loaded.loop_cfg.model.by_priority.get("P0").unwrap(), "opus-4-7");
         assert_eq!(loaded.loop_cfg.model.by_priority.get("P3").unwrap(), "haiku-4-5");
         assert_eq!(loaded.loop_cfg.model.by_type.get("bug").unwrap(), "sonnet-4-6");
+    }
+
+    // ──────── loop.planner.* ────────
+
+    #[test]
+    fn loop_planner_config_default_is_enabled_10k_tokens() {
+        let cfg = Config::default();
+        assert!(cfg.loop_cfg.planner.enabled);
+        assert_eq!(cfg.loop_cfg.planner.budget_tokens, 10_000);
+        assert!(cfg.loop_cfg.planner.runtime.is_none());
+        assert_eq!(get(&cfg, "loop.planner.enabled"), Some("true".into()));
+        assert_eq!(get(&cfg, "loop.planner.budget_tokens"), Some("10000".into()));
+        assert_eq!(get(&cfg, "loop.planner.runtime"), None);
+    }
+
+    #[test]
+    fn config_loop_planner_get_set_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.planner.enabled", "false").unwrap();
+        set(&mut cfg, "loop.planner.budget_tokens", "25000").unwrap();
+        set(&mut cfg, "loop.planner.runtime", "codex").unwrap();
+        assert!(!cfg.loop_cfg.planner.enabled);
+        assert_eq!(cfg.loop_cfg.planner.budget_tokens, 25_000);
+        assert_eq!(cfg.loop_cfg.planner.runtime.as_deref(), Some("codex"));
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path).unwrap();
+        assert!(!loaded.loop_cfg.planner.enabled);
+        assert_eq!(loaded.loop_cfg.planner.budget_tokens, 25_000);
+        assert_eq!(loaded.loop_cfg.planner.runtime.as_deref(), Some("codex"));
+
+        // Clear runtime back to None.
+        set(&mut cfg, "loop.planner.runtime", "").unwrap();
+        assert!(cfg.loop_cfg.planner.runtime.is_none());
+        // Invalid runtime rejected.
+        assert!(set(&mut cfg, "loop.planner.runtime", "cursor").is_err());
+        // Non-numeric budget rejected.
+        assert!(set(&mut cfg, "loop.planner.budget_tokens", "lots").is_err());
+        // Bool variants accepted.
+        set(&mut cfg, "loop.planner.enabled", "yes").unwrap();
+        assert!(cfg.loop_cfg.planner.enabled);
     }
 
     #[test]

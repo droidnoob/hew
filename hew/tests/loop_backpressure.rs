@@ -133,6 +133,12 @@ fn args_one_iter() -> Args {
         scope: None,
         epics: Vec::new(),
         epic: Vec::new(),
+        no_planner: false,
+        planner_budget: None,
+        planner_runtime: None,
+        verify_tests: false,
+        no_verify_tests: false,
+        verify_command: None,
     }
 }
 
@@ -822,6 +828,12 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         scope: None,
         epics: Vec::new(),
         epic: Vec::new(),
+        no_planner: false,
+        planner_budget: None,
+        planner_runtime: None,
+        verify_tests: false,
+        no_verify_tests: false,
+        verify_command: None,
     };
     let fallback_cfg =
         FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };
@@ -974,6 +986,73 @@ fn gate_is_called_with_worker_worktree_dir() {
         calls[0], worktree,
         "gate must run against worker.worktree_dir, not the dispatcher's ambient cwd",
     );
+}
+
+/// hew-7k1m: the N=1 fast path bypasses the iter-end batch-plan layer
+/// entirely. Even after a successful iter, no `batch-NNN.json` file is
+/// written under the run dir.
+#[test]
+fn iter_completion_skips_layer_entirely_when_jobs_is_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().to_path_buf();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("README.md"), b"seed\n").unwrap();
+    git(&repo, &["add", "README.md"]);
+    git(&repo, &["commit", "-q", "-m", "seed"]);
+
+    let bd = CapturingBd {
+        ready: vec![ReadyTask {
+            id: "hew-test".into(),
+            title: "synthetic ready task".into(),
+            description: String::new(),
+            priority: 1,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = CommitMakingSpawner { repo_dir: repo.clone() };
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let cwd_guard = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&repo).expect("cd repo");
+    let res = run_loop_with(
+        &ctx(),
+        args_one_iter(),
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &repo,
+    );
+    std::env::set_current_dir(cwd_guard).ok();
+    res.expect("loop runs");
+
+    // Walk `.hew/loop/<run-id>/` and confirm no batch-*.json files.
+    let loop_root = repo.join(".hew").join("loop");
+    let run_dirs: Vec<PathBuf> = std::fs::read_dir(&loop_root)
+        .expect("loop dir present")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(run_dirs.len(), 1, "exactly one run dir");
+    let batch_files: Vec<PathBuf> = std::fs::read_dir(&run_dirs[0])
+        .expect("run dir readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .map(|n| n.starts_with("batch-") && n.ends_with(".json"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(batch_files.is_empty(), "jobs=1 must not write any batch-*.json, got {batch_files:?}",);
 }
 
 /// hew-j4x: the single-worker fast path must keep its prior behavior —

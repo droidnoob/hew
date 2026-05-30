@@ -456,6 +456,263 @@ epic-scoped (per `hew-6n0v`) and stays out of this surface.
 
 ---
 
+## Batch planner
+
+Parallel runs (`--jobs N >= 2`) need to choose *which* of the bd-ready
+tasks dispatch this iter. The dispatcher layers two informed signals on
+top of `bd ready`, with `bd ready` itself as the safety floor:
+
+1. **Iter agent's `next_iteration:` block.** The previous iter's close
+   output can name task ids the dispatcher should consider next. Cheapest
+   signal — already part of the iter's token budget; no extra subprocess.
+2. **Planner subprocess.** Spawned between iters *only* when (1) is
+   absent. Bounded by `loop.planner.budget_tokens` (default `10_000`).
+   When the budget would be exceeded the planner skips entirely rather
+   than truncating its context to fit.
+3. **Floor: `bd ready`.** The dispatcher always intersects the chosen
+   batch with the live `bd ready` set. Suggestions can only *narrow* the
+   candidate set, never expand it — see
+   `DECISION:loop-batch-planner-floor` and
+   `DECISION:loop-parallel-overlap-policy`.
+
+The cascade is **agent → planner → trust-the-graph**. If the agent
+emits `next_iteration:`, that wins. Otherwise the planner runs (if
+budgeted). If neither produces a usable batch (no agent block, planner
+skipped or declined), the dispatcher falls through to `bd ready` order
+exactly as a serial run would.
+
+**Each iter persists a `batch-NNN.json` artifact** to the run dir:
+
+```
+.hew/loop/<run-id>/batch-001.json
+.hew/loop/<run-id>/batch-002.json
+...
+```
+
+Schema (`schema_version: 1`):
+
+```json
+{
+  "schema_version": 1,
+  "iter_number": 3,
+  "task_ids": ["hew-aaa", "hew-bbb"],
+  "source": "agent",          // "agent" | "planner" | "skipped"
+  "reason": null,             // populated on "skipped" (e.g. "planner budget exhausted")
+  "created_at": "2026-05-30T00:00:00Z",
+  "planner_tokens": null      // {input,output,cache_read,cache_create} when source="planner"
+}
+```
+
+A future `hew loop graph` (`hew-m7lq`) consumes these artifacts to
+render the dispatch history.
+
+**End-of-run summary** rolls the counts up into one line, right after
+`scope:`:
+
+```
+planner:   agent=4, runtime=2, fallback=1
+```
+
+`agent` = iter-suggested batches, `runtime` = planner-subprocess
+batches, `fallback` = skipped batches that fell through to bd-ready
+order. The line is omitted entirely when no `batch-*.json` files exist
+(serial run, or a parallel run that crashed before the first iter).
+
+### Configuration
+
+```toml
+[loop.planner]
+enabled = true              # master switch; false disables the planner subprocess layer
+budget_tokens = 10_000      # hard cap; planner skips rather than truncates
+```
+
+CLI overrides on `hew loop run`:
+
+| Flag                     | Effect                                              |
+|--------------------------|-----------------------------------------------------|
+| `--no-planner`           | Disable the planner-subprocess layer for this run. The iter agent's `next_iteration:` block still drives the batch when present; otherwise the dispatcher falls through to `bd ready`. |
+| `--planner-budget N`     | Override `loop.planner.budget_tokens` for this run. |
+
+**v1 wire-up:** Only triggers when `--jobs >= 2`. `--jobs=1` skips the
+planner layer entirely — there's nothing for it to narrow.
+
+**Non-goals (v1):** replacing trust-the-graph; static touches-overlap
+analysis; cross-run batch memory; retroactive recovery of hung iters.
+
+---
+
+## End-of-run verification
+
+Once every iter has closed (and, under `--jobs N >= 2`, every worker
+branch has merged back onto HEAD), hew can run a single test command
+to prove the *final stacked state* is green. The verify step is
+**opt-in**; default runs are byte-identical to today.
+
+Why a final-state check on top of per-iter `hew-guard` runs: the
+gate inside the loop catches regressions an iter introduced, but the
+sum of N green iters is not a green tree if two parallel workers
+touched the same module and the merge resolved one half (see
+`DECISION:loop-parallel-overlap-policy` — conflicts file
+`[merge-conflict]` bug tasks but the working tree itself may still
+need a final compile + test pass).
+
+### Wiring
+
+Both must hold for the step to run:
+
+1. A test command resolves — explicit `--verify-command`, then
+   `loop.end_of_run.verify_command` config, then project-authored
+   signals via `hew_core::gate::detect` (`justfile`, `Makefile`,
+   `package.json` `test`). No language-sniffing fallback — mirrors
+   the per-iter gate's existing philosophy.
+2. The user opted in — `--verify-tests` or
+   `loop.end_of_run.verify_tests = true`.
+
+### CLI
+
+```sh
+hew loop run --verify-tests                              # opt in for this run
+hew loop run --verify-tests --verify-command="cargo nextest run --workspace"
+hew loop run --no-verify-tests                           # explicit off
+```
+
+### TOML
+
+```toml
+[loop.end_of_run]
+verify_tests = false               # default false
+verify_command = ""                # empty = auto-detect from gate
+verify_budget_wall = "10m"         # hard cap on the verify step
+```
+
+### Outcome
+
+The full stdout+stderr of the verify command is written to
+`.hew/loop/<run-id>/verify.log`. The outcome (`Passed` / `Failed` /
+`Skipped` / `TimedOut`) is persisted as `Run.verify_outcome` on the
+run's `run.json` and shows up in the summary:
+
+```
+  verify:    passed (22s, cargo nextest run --workspace)
+  verify:    failed (exit 3, 5s, pytest -q)
+  verify:    skipped (no command resolved)
+  verify:    timed out (> 600s, ...)
+```
+
+A failed or timed-out verify **does not unwind any closed task**. The
+durable signals are:
+
+- The `verify:` line in `hew loop summary`.
+- A `STATUS:loop-verify-failed:<run-id>` memory so the next session
+  sees the regression on `hew prime resume`.
+- Non-zero exit code from `hew loop run` so CI / wrapper scripts can
+  branch on it.
+
+### Out of scope (v1)
+
+- Auto-fix on failure (could later re-queue failing tests as bd
+  tasks).
+- Per-iter verification (the per-iter gate already covers that path;
+  full-suite-per-iter would triple wall-clock cost).
+- Sandbox enforcement separate from the runtime's own.
+
+---
+
+## Loop graph
+
+After a run finishes (or even while it's still in flight), the
+collection of iter/batch/run/manifest JSON under `.hew/loop/<run-id>/`
+*is* a directed acyclic graph: iters connected by sequential
+succession, batch suggestions, and parallel-worker swimlanes.
+`hew loop graph` renders that DAG so the run's behavior — including
+the unhappy paths the planner doesn't fix — is auditable at a glance.
+
+```sh
+hew loop graph                             # latest run, mermaid to stdout
+hew loop graph --run-id loop-2026...       # specific run
+hew loop graph --format=dot --out=run.dot  # GraphViz
+hew loop graph --out=run.md                # mermaid wrapped in ```mermaid fence
+hew loop graph --format=ascii              # terminal-only, no unicode glyphs
+hew loop graph --all                       # timeline across every run in .hew/loop/
+```
+
+### Outcome glyphs
+
+| Outcome             | Glyph | Mermaid class      | dot color | meaning                                |
+|---------------------|-------|--------------------|-----------|----------------------------------------|
+| `closed`            | ✓     | `iter-closed`      | green     | task closed cleanly                    |
+| `no_close`          | ◐     | `iter-no-close`    | orange    | spawner exited; no task closed         |
+| `runtime_error`     | ✗     | `iter-runtime-err` | red       | spawner returned a hard error          |
+| `backpressure_fail` | ↺     | `iter-backpressure`| red       | tests/lint failed; commits reverted    |
+| **cancelled**       | ⊘     | `iter-cancelled`   | gray      | `.stop` fired while this iter was live |
+| **incomplete**      | ⋯     | `iter-incomplete`  | gray/dashed | started, never ended (crash mid-iter)|
+
+### Edge kinds
+
+| Edge                       | Mermaid syntax              | Source                                                       |
+|----------------------------|-----------------------------|--------------------------------------------------------------|
+| Sequential next-iter       | `iter1 --> iter2`           | default dispatcher order                                     |
+| Agent-suggested            | `iter1 -. agent .-> iter2`  | previous iter's `next_iteration:` emit                       |
+| Planner-suggested          | `iter1 -. planner .-> iter2`| inter-iter planner subprocess                                 |
+| Fallback (trust-the-graph) | `iter1 == fallback ==> iter2` | no batch — dispatcher used `bd ready`                      |
+| Rollback (backpressure)    | `iter2 -.rolled back.-> iter1`| `↺` self-edge back to the iter before the failure          |
+| Verify                     | `iter_last --> verify`      | end-of-run verify-tests node                                 |
+
+### Unhappy paths
+
+The renderer makes the cases the planner can't fix legible:
+
+1. **Incomplete iter** (started, no `ended_at`) — `⋯` node with a
+   dashed border. The dispatcher crashed or was killed mid-iter.
+2. **Cancelled mid-run** — when `run.stop_reason = cancelled` the
+   in-flight iter gets `⊘` instead of `⋯` and an annotation
+   `cancelled @ <ts>`.
+3. **Runtime error with empty stderr** — annotated
+   `(no stderr — possibly hung)` so the operator can spot the
+   pattern of a runaway runtime.
+4. **Backpressure with rollback** — `↺` self-edge from the failing
+   iter back to its predecessor with `rolled back` annotation.
+5. **Verify failed** — the verify node renders red; the first three
+   matching lines from `verify.log` annotate it as failed-test
+   breadcrumbs.
+
+### Pre-batch-plan runs
+
+Runs from before the planner epic shipped have no `batch-*.json`
+files. The renderer falls back to plain Sequential edges in that
+case — no agent/planner/fallback styling shown.
+
+### Worked example
+
+A parallel `--jobs=2` run with one agent suggestion, one planner
+pick, and a verify pass renders to:
+
+```mermaid
+flowchart TD
+  subgraph worker-0
+    w0_iter1["iter-1<br/>hew-a<br/>✓ 12s 1200t"]
+    w0_iter2["iter-2<br/>hew-b<br/>✓ 9s 980t"]
+  end
+  subgraph worker-1
+    w1_iter1["iter-1<br/>hew-c<br/>✓ 14s 1100t"]
+  end
+  verify["Verify ✓"]
+  w0_iter1 -. agent .-> w0_iter2
+  w0_iter2 --> verify
+  class w0_iter1 iter-closed;
+  class w0_iter2 iter-closed;
+  class w1_iter1 iter-closed;
+  class verify verify-passed;
+```
+
+### Out of scope (v1)
+
+- Live-updating diagrams (websocket / fswatch). Static snapshot only.
+- Click-through navigation from a node to its iter log.
+- Auto-export to GitHub Action artifacts.
+- Task descriptions in node labels — only `task_id + iter_number`
+  ship today to avoid leaking private text into shareable diagrams.
+
 ## Stop signals
 
 - `hew loop cancel` — touches `.hew/loop/<run-id>/.stop`.

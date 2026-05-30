@@ -8,6 +8,61 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hew loop graph` DAG renderer (`hew-m7lq`).** Renders the loop's
+  iter + batch + run + manifest history as a directed graph in
+  mermaid (default), GraphViz `dot`, or terminal ASCII. Each iter is
+  a node labelled with task id, outcome glyph, duration, and tokens;
+  edges distinguish sequential next-iter, agent-suggested,
+  planner-suggested, fallback (`bd ready`), and backpressure
+  rollbacks. Unhappy paths render distinctly: incomplete iters get a
+  dashed border (`⋯`), cancelled-mid-run iters get `⊘` with the stop
+  timestamp, runtime errors with empty stderr annotate as `possibly
+  hung`, backpressure failures draw a `↺ rolled back` self-edge, and
+  verify outcomes get a coloured tail node (`Verify ✓` / `Verify ✗` /
+  `Verify (skipped)`). Parallel runs (`--jobs >= 2`) render
+  per-worker swimlanes from `manifest.json`. CLI:
+  `hew loop graph [--run-id ID] [--format mermaid|dot|ascii]
+  [--out PATH] [--all]`; `--out` ending in `.md` wraps the mermaid
+  body in a fenced \`\`\`mermaid block. `--all` aggregates every run
+  under `.hew/loop/` into one document with each as its own subgraph.
+  Pre-batch-plan legacy runs render with sequential edges only. See
+  `docs/LOOP.md` § Loop graph. Closes epic `hew-lf40`.
+- **End-of-run verify step for `hew loop` (`hew-bon7`).** Opt-in
+  mandatory test step that runs after the last iter (and after
+  merge-back on `--jobs N >= 2`) to prove the final stacked state is
+  green. Conditional on both a resolvable test command (CLI
+  `--verify-command` > `loop.end_of_run.verify_command` > project-
+  authored signals via `hew_core::gate::detect`) and an explicit
+  opt-in (`--verify-tests` or `loop.end_of_run.verify_tests = true`).
+  Outcome (`Passed` / `Failed` / `Skipped` / `TimedOut`) persists as
+  `Run.verify_outcome` in `run.json`, shows up as a `verify:` line in
+  `hew loop summary`, and on failure files a
+  `STATUS:loop-verify-failed:<run-id>` memory + exits non-zero so CI
+  branches on it. Closed tasks are **not** rolled back on failure —
+  the memory + summary line + exit code are the durable signals.
+  Defaults are byte-identical to today (`verify_tests = false`). CLI:
+  `--verify-tests`, `--no-verify-tests`, `--verify-command=...`.
+  Config: `[loop.end_of_run] verify_tests`, `verify_command`,
+  `verify_budget_wall` (default `"10m"`). See `docs/LOOP.md` §
+  End-of-run verification.
+- **Batch planner for `hew loop run --jobs N` (epic `hew-lf40`).**
+  Parallel runs now layer two informed signals on top of `bd ready` to
+  choose each iter's dispatch batch: (1) a `next_iteration:` block in
+  the iter agent's close output (cheapest, in-band), and (2) a
+  dedicated planner subprocess spawned between iters when (1) is
+  absent — capped by `loop.planner.budget_tokens` (default `10_000`)
+  and skipped rather than truncated when over budget. `bd ready`
+  remains the safety floor: agent / planner suggestions can only
+  narrow the candidate set, never expand it
+  (`DECISION:loop-batch-planner-floor`). Each iter persists a
+  `batch-NNN.json` artifact (`schema_version: 1`) under the run dir; a
+  future `hew loop graph` (`hew-m7lq`) replays them. The end-of-run
+  summary gains a single-line `planner: agent=N, runtime=M,
+  fallback=K` row right after `scope:` (omitted entirely for legacy /
+  serial runs). CLI: `--no-planner`, `--planner-budget`. Config:
+  `[loop.planner] enabled = true`, `budget_tokens = 10_000`. v1 only
+  triggers under `--jobs >= 2`; `--jobs=1` skips the layer. See
+  `docs/LOOP.md` § Batch planner.
 - **`hew loop run --scope={ready|epics}` — scoped run queue
   (`hew-b3yl`).** Operators (and calling agents) now declare which
   slice of `bd ready` counts as the queue for a run: `--scope=ready`

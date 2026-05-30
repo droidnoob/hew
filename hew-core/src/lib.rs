@@ -5,6 +5,8 @@
 
 pub mod allowed_tools;
 pub mod backpressure;
+pub mod batch_plan;
+pub mod batch_plan_parse;
 pub mod bd;
 #[cfg(feature = "treesitter")]
 pub mod blast;
@@ -24,6 +26,7 @@ pub mod gate;
 pub mod git;
 pub mod guard;
 pub mod install;
+pub mod loop_graph;
 pub mod loop_log;
 pub mod loop_model;
 pub mod loop_summary;
@@ -50,6 +53,7 @@ pub mod testing;
 pub mod time;
 pub mod treesitter;
 pub mod tty;
+pub mod verify;
 pub mod worktree;
 
 pub use ctx::{Ctx, OutputMode};

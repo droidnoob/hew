@@ -18,6 +18,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::batch_plan::{BatchPlan, BatchSource};
 use crate::bd::{BdClient, ReadyTask};
 use crate::error::Result;
 use crate::git::GitClient;
@@ -46,11 +47,16 @@ pub struct DispatchTick {
     /// New slot assignments made this tick.
     pub assignments: Vec<Assignment>,
     /// Number of `bd ready` tasks visible (whether or not assigned).
+    /// Counts the **post-filter** set when a [`BatchPlan`] is active.
     pub ready_seen: usize,
     /// Tasks the dispatcher tried to claim but `bd` rejected — typically
     /// a race with another agent claiming the same id. The slot stays
     /// idle and will be retried next tick.
     pub claim_failures: Vec<ClaimFailure>,
+    /// Provenance of the active batch plan, if any narrowed this tick.
+    /// `None` when no plan is set or when the plan's source is
+    /// [`BatchSource::Skipped`] (fall-through to trust-the-graph).
+    pub batch_source: Option<BatchSource>,
 }
 
 /// A task that was claimed and pinned to a specific slot this tick.
@@ -75,6 +81,7 @@ pub struct Dispatcher {
     run_id: String,
     base_sha: String,
     scope: Scope,
+    batch_plan: Option<BatchPlan>,
 }
 
 impl Dispatcher {
@@ -90,6 +97,7 @@ impl Dispatcher {
         run_id: impl Into<String>,
         base_sha: impl Into<String>,
         scope: Scope,
+        batch_plan: Option<BatchPlan>,
     ) -> Self {
         let n = (jobs.max(1)) as usize;
         Self {
@@ -97,6 +105,17 @@ impl Dispatcher {
             run_id: run_id.into(),
             base_sha: base_sha.into(),
             scope,
+            batch_plan,
+        }
+    }
+
+    /// Provenance of the active batch plan, if one narrowed dispatch.
+    /// Returns `None` when no plan is set or the plan's source is
+    /// [`BatchSource::Skipped`] (fall-through to trust-the-graph).
+    pub fn current_batch_source(&self) -> Option<BatchSource> {
+        match &self.batch_plan {
+            Some(p) if p.source != BatchSource::Skipped && !p.task_ids.is_empty() => Some(p.source),
+            _ => None,
         }
     }
 
@@ -169,7 +188,22 @@ impl Dispatcher {
         let ready: Vec<ReadyTask> =
             ready.into_iter().filter(|t| self.scope.includes(&t.id, &descendant_set)).collect();
 
-        let mut tick = DispatchTick { ready_seen: ready.len(), ..Default::default() };
+        // Batch-plan narrowing — non-expansive (batch ∩ bd-ready). The
+        // bd dep graph remains the safety floor per
+        // `DECISION:loop-parallel-overlap-policy`; a batch can only
+        // shrink the candidate set, never reintroduce a blocked task.
+        // Skipped plans and empty task_ids fall through unchanged.
+        let batch_source = self.current_batch_source();
+        let ready: Vec<ReadyTask> = match (&self.batch_plan, batch_source) {
+            (Some(plan), Some(_)) => {
+                // Typical batch is <10 ids — linear contains is fine
+                // and avoids the per-tick HashSet allocation.
+                ready.into_iter().filter(|t| plan.task_ids.iter().any(|id| id == &t.id)).collect()
+            }
+            _ => ready,
+        };
+
+        let mut tick = DispatchTick { ready_seen: ready.len(), batch_source, ..Default::default() };
         if ready.is_empty() {
             return Ok(tick);
         }
@@ -366,7 +400,7 @@ mod tests {
 
     #[test]
     fn new_clamps_jobs_to_at_least_one() {
-        let d = Dispatcher::new(0, "run-x", "deadbeef", Scope::Ready);
+        let d = Dispatcher::new(0, "run-x", "deadbeef", Scope::Ready, None);
         assert_eq!(d.jobs(), 1);
         assert_eq!(d.slots().len(), 1);
         assert!(d.all_idle());
@@ -379,7 +413,7 @@ mod tests {
         // Regression for acceptance: N=1 picks the first ready task and
         // stops — identical to today's serial loop.
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
-        let mut d = Dispatcher::new(1, "run-1", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(1, "run-1", "sha", Scope::Ready, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.assignments.len(), 1, "exactly one slot filled");
         assert_eq!(tick.assignments[0].slot_id, 0);
@@ -393,7 +427,7 @@ mod tests {
     #[test]
     fn dispatcher_fills_all_slots_when_ready_has_enough() {
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c"), ready("hew-d")]);
-        let mut d = Dispatcher::new(3, "run-2", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(3, "run-2", "sha", Scope::Ready, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.assignments.len(), 3, "all 3 slots filled");
         let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
@@ -408,7 +442,7 @@ mod tests {
     #[test]
     fn dispatcher_skips_assignment_when_ready_empty() {
         let bd = MockBd::new(vec![]);
-        let mut d = Dispatcher::new(2, "run-3", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(2, "run-3", "sha", Scope::Ready, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert!(tick.assignments.is_empty());
         assert_eq!(tick.ready_seen, 0);
@@ -420,7 +454,7 @@ mod tests {
     fn dispatcher_does_nothing_when_all_slots_busy() {
         // No `bd ready` should even be called when capacity = 0.
         let bd = MockBd::new(vec![ready("hew-z")]);
-        let mut d = Dispatcher::new(1, "run-4", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(1, "run-4", "sha", Scope::Ready, None);
         d.dispatch_tick(&bd).expect("first tick");
         // Second tick: slot is full.
         let tick = d.dispatch_tick(&bd).expect("second tick");
@@ -436,7 +470,7 @@ mod tests {
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b")]);
         bd.fail_claim("hew-a");
 
-        let mut d = Dispatcher::new(1, "run-5", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(1, "run-5", "sha", Scope::Ready, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
 
         assert_eq!(tick.claim_failures.len(), 1);
@@ -454,7 +488,7 @@ mod tests {
         // returned the task to two `ready` queries before either
         // claim landed. Dispatcher must not double-assign.
         let bd = MockBd::new(vec![ready("hew-a")]);
-        let mut d = Dispatcher::new(2, "run-6", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(2, "run-6", "sha", Scope::Ready, None);
         let tick1 = d.dispatch_tick(&bd).expect("first tick");
         assert_eq!(tick1.assignments.len(), 1);
         assert_eq!(tick1.assignments[0].task.id, "hew-a");
@@ -470,7 +504,7 @@ mod tests {
     #[test]
     fn complete_returns_running_task_id_and_idles_slot() {
         let bd = MockBd::new(vec![ready("hew-a")]);
-        let mut d = Dispatcher::new(1, "run-7", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(1, "run-7", "sha", Scope::Ready, None);
         d.dispatch_tick(&bd).expect("tick");
         assert_eq!(d.complete(0), Some("hew-a".into()));
         assert!(d.all_idle());
@@ -487,7 +521,7 @@ mod tests {
         // calls when its iter body returns. Two workers run, both
         // complete in turn, capacity restores.
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
-        let mut d = Dispatcher::new(2, "run-8", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(2, "run-8", "sha", Scope::Ready, None);
 
         let t1 = d.dispatch_tick(&bd).expect("tick 1");
         assert_eq!(t1.assignments.len(), 2);
@@ -515,7 +549,7 @@ mod tests {
         // Scope::Ready must surface every bd-ready task — no descendant
         // walk, no filtering.
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
-        let mut d = Dispatcher::new(3, "run-scope-ready", "sha", Scope::Ready);
+        let mut d = Dispatcher::new(3, "run-scope-ready", "sha", Scope::Ready, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.ready_seen, 3);
         let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
@@ -535,7 +569,7 @@ mod tests {
                 .with_children("hew-child-2", &[])
                 .with_children("hew-stranger", &[]);
         let scope = Scope::Epics { epic_ids: vec!["hew-epic-a".into()] };
-        let mut d = Dispatcher::new(3, "run-scope-epic", "sha", scope);
+        let mut d = Dispatcher::new(3, "run-scope-epic", "sha", scope, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.ready_seen, 2, "stranger filtered out");
         let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
@@ -551,7 +585,7 @@ mod tests {
         let bd = MockBd::new(vec![ready("hew-stranger"), ready("hew-other")])
             .with_children("hew-epic-empty", &[]);
         let scope = Scope::Epics { epic_ids: vec!["hew-epic-empty".into()] };
-        let mut d = Dispatcher::new(2, "run-scope-empty", "sha", scope);
+        let mut d = Dispatcher::new(2, "run-scope-empty", "sha", scope, None);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.ready_seen, 0);
         assert!(tick.assignments.is_empty());
@@ -569,7 +603,7 @@ mod tests {
             .with_children("hew-epic-live", &["hew-child-1"])
             .with_children("hew-child-1", &[]);
         let scope = Scope::Epics { epic_ids: vec!["hew-epic-live".into()] };
-        let mut d = Dispatcher::new(2, "run-scope-live", "sha", scope);
+        let mut d = Dispatcher::new(2, "run-scope-live", "sha", scope, None);
 
         let t1 = d.dispatch_tick(&bd).expect("first tick");
         assert_eq!(t1.assignments.len(), 1);
@@ -583,5 +617,123 @@ mod tests {
         assert_eq!(t2.ready_seen, 1, "newly-added child seen after recompute");
         assert_eq!(t2.assignments.len(), 1);
         assert_eq!(t2.assignments[0].task.id, "hew-child-2");
+    }
+
+    // ── BatchPlan filter coverage ───────────────────────────────────
+
+    fn plan(iter: u32, source: BatchSource, ids: &[&str]) -> BatchPlan {
+        BatchPlan {
+            schema_version: crate::batch_plan::SCHEMA_VERSION,
+            iter_number: iter,
+            task_ids: ids.iter().map(|s| s.to_string()).collect(),
+            source,
+            reason: None,
+            created_at: "2026-05-30T00:00:00Z".into(),
+            planner_tokens: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_tick_no_plan_behaves_as_today() {
+        // Sanity: a `batch_plan: None` Dispatcher behaves identically
+        // to the pre-batch-plan world. Mirrors `n1_dispatcher_assigns_…`.
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b")]);
+        let mut d = Dispatcher::new(2, "run-bp-none", "sha", Scope::Ready, None);
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2);
+        assert_eq!(tick.assignments.len(), 2);
+        assert!(tick.batch_source.is_none(), "no plan → no batch_source");
+        assert!(d.current_batch_source().is_none());
+    }
+
+    #[test]
+    fn dispatch_tick_agent_plan_filters_candidates() {
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
+        let plan = plan(1, BatchSource::Agent, &["hew-b"]);
+        let mut d = Dispatcher::new(2, "run-bp-agent", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 1, "post-filter count");
+        assert_eq!(tick.assignments.len(), 1);
+        assert_eq!(tick.assignments[0].task.id, "hew-b");
+        assert_eq!(tick.batch_source, Some(BatchSource::Agent));
+        assert_eq!(bd.claimed(), vec!["hew-b"]);
+    }
+
+    #[test]
+    fn dispatch_tick_planner_plan_filters_candidates() {
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
+        let plan = plan(1, BatchSource::Planner, &["hew-a", "hew-c"]);
+        let mut d = Dispatcher::new(3, "run-bp-planner", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2);
+        let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
+        assert_eq!(ids, vec!["hew-a", "hew-c"]);
+        assert_eq!(tick.batch_source, Some(BatchSource::Planner));
+    }
+
+    #[test]
+    fn dispatch_tick_skipped_plan_falls_through_to_full_bd_ready() {
+        // Source::Skipped means trust-the-graph — no filtering, no
+        // batch_source on the tick.
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b")]);
+        let plan = plan(1, BatchSource::Skipped, &[]);
+        let mut d = Dispatcher::new(2, "run-bp-skip", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2);
+        assert_eq!(tick.assignments.len(), 2);
+        assert!(tick.batch_source.is_none());
+        assert!(d.current_batch_source().is_none());
+    }
+
+    #[test]
+    fn dispatch_tick_empty_task_ids_falls_through_to_full_bd_ready() {
+        // Defensive: an Agent/Planner plan with an empty task_ids array
+        // is treated as no-narrowing rather than "block everything".
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b")]);
+        let plan = plan(1, BatchSource::Agent, &[]);
+        let mut d = Dispatcher::new(2, "run-bp-empty", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2);
+        assert_eq!(tick.assignments.len(), 2);
+        assert!(tick.batch_source.is_none(), "empty task_ids → no narrowing signaled");
+    }
+
+    #[test]
+    fn dispatch_tick_batch_task_id_not_in_ready_is_dropped() {
+        // Hard floor: a batch naming a blocked or unknown task does not
+        // resurrect it. batch ∩ bd-ready, never batch ∪ anything.
+        let bd = MockBd::new(vec![ready("hew-a")]);
+        let plan = plan(1, BatchSource::Agent, &["hew-a", "hew-blocked", "hew-ghost"]);
+        let mut d = Dispatcher::new(3, "run-bp-floor", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 1, "blocked/ghost ids dropped by intersect");
+        assert_eq!(tick.assignments.len(), 1);
+        assert_eq!(tick.assignments[0].task.id, "hew-a");
+        assert_eq!(bd.claimed(), vec!["hew-a"]);
+    }
+
+    #[test]
+    fn dispatch_tick_ready_seen_reflects_post_filter_count() {
+        // Explicit pin: ready_seen is the post-filter, post-scope count
+        // — what downstream summary aggregation consumes.
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c"), ready("hew-d")]);
+        let plan = plan(2, BatchSource::Planner, &["hew-b", "hew-c"]);
+        let mut d = Dispatcher::new(4, "run-bp-count", "sha", Scope::Ready, Some(plan));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2, "two of four candidates survived the filter");
+    }
+
+    #[test]
+    fn dispatch_tick_batch_source_captured_for_summary() {
+        // The summary path reads `Dispatcher::current_batch_source()`
+        // out-of-band of any tick; verify the accessor returns the
+        // active provenance and matches the per-tick field.
+        let bd = MockBd::new(vec![ready("hew-a")]);
+        let plan = plan(1, BatchSource::Agent, &["hew-a"]);
+        let mut d = Dispatcher::new(1, "run-bp-summary", "sha", Scope::Ready, Some(plan));
+        assert_eq!(d.current_batch_source(), Some(BatchSource::Agent));
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.batch_source, Some(BatchSource::Agent));
+        assert_eq!(d.current_batch_source(), Some(BatchSource::Agent));
     }
 }

@@ -22,8 +22,11 @@ use std::time::Duration;
 
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use hew_core::backpressure::{self, GateCheck, Verdict};
-use hew_core::bd::{BdClient, RealBd};
-use hew_core::config::LoopModelConfig;
+use hew_core::batch_plan;
+use hew_core::batch_plan::{BatchPlan, BatchSource, SCHEMA_VERSION as BATCH_PLAN_SCHEMA_VERSION};
+use hew_core::batch_plan_parse::extract_next_iteration;
+use hew_core::bd::{BdClient, ReadyTask, RealBd};
+use hew_core::config::{LoopModelConfig, LoopPlannerConfig};
 use hew_core::error::HewError;
 use hew_core::loop_log::{
     IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
@@ -200,6 +203,7 @@ pub struct LoopCmd {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum LoopSub {
     /// Drive the autonomous outer loop until a stop signal fires.
     Run(Args),
@@ -220,6 +224,38 @@ pub enum LoopSub {
     /// records a `stop_reason`). Defaults to listing what would be
     /// removed; pass `--apply` to actually delete.
     PruneWorktrees(PruneWorktreesArgs),
+    /// Render the loop's iter+batch+run history as a DAG diagram
+    /// (mermaid by default; dot or ascii on opt-in). Defaults to the
+    /// most recent run; `--all` aggregates every run under
+    /// `.hew/loop/` into a single document.
+    Graph(GraphArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum GraphFormatArg {
+    Mermaid,
+    Dot,
+    Ascii,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct GraphArgs {
+    /// Run-id to render. Defaults to the most recent run.
+    #[arg(long)]
+    pub run_id: Option<String>,
+    /// Output format. Defaults to `mermaid` for markdown embedding.
+    #[arg(long, value_enum, default_value_t = GraphFormatArg::Mermaid)]
+    pub format: GraphFormatArg,
+    /// Write to a file instead of stdout. When the path ends in `.md`
+    /// and format is mermaid, the output is wrapped in a fenced
+    /// ```mermaid block.
+    #[arg(long = "out")]
+    pub output_file: Option<PathBuf>,
+    /// Aggregate every run under `.hew/loop/` into one document. Each
+    /// run renders as its own subgraph.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub all: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -274,7 +310,60 @@ pub fn run(ctx: &Ctx, cmd: LoopCmd) -> miette::Result<()> {
         LoopSub::List(a) => run_list(ctx, a),
         LoopSub::Summary(a) => run_summary(ctx, a),
         LoopSub::PruneWorktrees(a) => run_prune_worktrees(ctx, a),
+        LoopSub::Graph(a) => run_graph(ctx, a),
     }
+}
+
+pub fn run_graph(ctx: &Ctx, args: GraphArgs) -> miette::Result<()> {
+    let project_root = std::env::current_dir().map_err(|e| miette::miette!("cwd: {e}"))?;
+    let format = match args.format {
+        GraphFormatArg::Mermaid => hew_core::loop_graph::Format::Mermaid,
+        GraphFormatArg::Dot => hew_core::loop_graph::Format::Dot,
+        GraphFormatArg::Ascii => hew_core::loop_graph::Format::Ascii,
+    };
+
+    let body = if args.all {
+        let root = loop_root(&project_root);
+        let graphs = hew_core::loop_graph::build_from_loop_root(&root)
+            .map_err(|e| miette::miette!("build graphs: {e}"))?;
+        if graphs.is_empty() {
+            return Err(miette::miette!("no loop runs found in {}", root.display()));
+        }
+        hew_core::loop_graph::render_all(&graphs, format)
+    } else {
+        let run_id = match args.run_id {
+            Some(id) => id,
+            None => latest_run_id(&project_root)?,
+        };
+        let dir = loop_root(&project_root).join(&run_id);
+        if !dir.exists() {
+            return Err(miette::miette!("run-dir not found: {}", dir.display()));
+        }
+        let g = hew_core::loop_graph::build_from_run_dir(&dir)
+            .map_err(|e| miette::miette!("build graph: {e}"))?;
+        hew_core::loop_graph::render(&g, format)
+    };
+
+    let wrapped = if matches!(args.format, GraphFormatArg::Mermaid)
+        && args.output_file.as_ref().is_some_and(|p| {
+            p.extension().and_then(|s| s.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        }) {
+        format!("```mermaid\n{}```\n", body)
+    } else {
+        body
+    };
+
+    match args.output_file {
+        Some(path) => {
+            std::fs::write(&path, &wrapped)
+                .map_err(|e| miette::miette!("write {}: {e}", path.display()))?;
+            if !ctx.quiet {
+                println!("wrote {}", path.display());
+            }
+        }
+        None => print!("{}", wrapped),
+    }
+    Ok(())
 }
 
 #[derive(Debug, ClapArgs)]
@@ -380,6 +469,88 @@ pub struct Args {
     /// list. Example: `--epic hew-6az --epic hew-1tq`.
     #[arg(long = "epic", value_name = "EPIC_ID")]
     pub epic: Vec<String>,
+
+    /// Disable the inter-iter planner for this run. When set, every
+    /// iter-end that doesn't surface an agent-named `next_iteration:`
+    /// block writes a `Skipped { reason: "planner_disabled" }` batch
+    /// plan instead of spawning a planner subprocess. Overrides
+    /// `loop.planner.enabled` config.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub no_planner: bool,
+
+    /// Per-spawn token-estimate budget for the planner. Overrides
+    /// `loop.planner.budget_tokens` config. `0` disables planner
+    /// spawns without flipping `--no-planner`. Default `10000`.
+    #[arg(long)]
+    pub planner_budget: Option<u32>,
+
+    /// Runtime to drive the planner. Overrides
+    /// `loop.planner.runtime` config; falling back to the loop's
+    /// primary runtime when unset.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
+    )]
+    pub planner_runtime: Option<String>,
+
+    /// Run a mandatory end-of-run test command after the last iter
+    /// (and after merge-back on `--jobs >= 2`) to prove the final
+    /// stacked state is green. Overrides
+    /// `loop.end_of_run.verify_tests` config. Default `false`.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub verify_tests: bool,
+
+    /// Explicit-off for the end-of-run verify step, takes precedence
+    /// over `--verify-tests` and `loop.end_of_run.verify_tests`
+    /// config. Useful when a config opts in globally but a particular
+    /// run shouldn't pay the verify cost (e.g. dry-run experiments).
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub no_verify_tests: bool,
+
+    /// Override the resolved verify command for this run. Empty =
+    /// fall back to `loop.end_of_run.verify_command` config, then to
+    /// project-authored signals (justfile/Makefile/package.json
+    /// `test`) via `hew_core::gate::detect`.
+    #[arg(long)]
+    pub verify_command: Option<String>,
+}
+
+/// Resolve the effective [`LoopPlannerConfig`] for this run. Precedence:
+///
+/// 1. `--no-planner` CLI flag (sticky `enabled = false`)
+/// 2. Per-flag overrides (`--planner-budget`, `--planner-runtime`)
+/// 3. `loop.planner.*` config values
+/// 4. Compiled-in defaults (enabled, 10_000 tokens, runtime = primary)
+///
+/// Validates the planner runtime is a known [`RuntimeKind`] so a bad
+/// CLI/config value fails before the run starts rather than at first
+/// iter-end spawn attempt.
+pub fn resolve_planner_config(
+    args: &Args,
+    base: &LoopPlannerConfig,
+) -> miette::Result<LoopPlannerConfig> {
+    let mut out = base.clone();
+    if args.no_planner {
+        out.enabled = false;
+    }
+    if let Some(b) = args.planner_budget {
+        out.budget_tokens = b;
+    }
+    if let Some(r) = args.planner_runtime.as_deref() {
+        // Validate against the RuntimeKind allowlist. Empty string
+        // clears the override.
+        if r.is_empty() {
+            out.runtime = None;
+        } else {
+            let _: RuntimeKind = r.parse().map_err(|e: String| miette::miette!("{e}"))?;
+            out.runtime = Some(r.to_string());
+        }
+    } else if let Some(r) = out.runtime.as_deref() {
+        // Validate config-sourced runtime too — bad on-disk config
+        // shouldn't silently turn into a missing planner.
+        let _: RuntimeKind = r.parse().map_err(|e: String| miette::miette!("{e}"))?;
+    }
+    Ok(out)
 }
 
 /// CLI surface of [`Scope`]. The runtime type lives in
@@ -455,6 +626,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         if args.dry_run { None } else { fallback.runtime.map(build_spawner_for) };
     let gate = AutoGateRunner;
     let loop_model = cfg.loop_cfg.model.clone();
+    let planner_cfg = resolve_planner_config(&args, &cfg.loop_cfg.planner)?;
     run_loop_with_scope(
         ctx,
         args,
@@ -463,6 +635,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         fallback_spawner.as_deref(),
         fallback,
         loop_model,
+        planner_cfg,
         &gate,
         &project_root,
         scope,
@@ -713,6 +886,7 @@ pub fn run_loop_with(
         fallback_spawner,
         fallback,
         loop_model,
+        LoopPlannerConfig::default(),
         gate,
         project_root,
         Scope::Ready,
@@ -728,6 +902,7 @@ pub fn run_loop_with_scope(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -745,6 +920,7 @@ pub fn run_loop_with_scope(
             fallback_spawner,
             fallback,
             loop_model,
+            planner_cfg,
             gate,
             project_root,
             scope,
@@ -758,10 +934,84 @@ pub fn run_loop_with_scope(
         fallback_spawner,
         fallback,
         loop_model,
+        planner_cfg,
         gate,
         project_root,
         scope,
     )
+}
+
+/// End-of-run verify step (`hew-bon7`). Opt-in via `--verify-tests`
+/// or `loop.end_of_run.verify_tests = true`. Resolves the command
+/// from CLI > config > [`hew_core::gate::detect`], spawns it under
+/// the configured wall budget, records the outcome onto `run.verify_outcome`,
+/// re-writes `run.json` so the persisted summary matches, and writes
+/// a `STATUS:loop-verify-failed:<run-id>` memory on failure so the
+/// next session sees the regression. No-op when verify is disabled
+/// (no record written, summary line absent).
+fn maybe_run_verify_step(
+    ctx: &Ctx,
+    args: &Args,
+    bd: &dyn BdClient,
+    run: &mut Run,
+    working_dir: &Path,
+    run_dir: &Path,
+    worker_n: Option<u32>,
+) {
+    // CLI > config > defaults. `--no-verify-tests` always wins so a
+    // global config opt-in can be vetoed per-run.
+    let cfg = match hew_core::config::load() {
+        Ok(c) => c.loop_cfg.end_of_run,
+        Err(_) => hew_core::config::LoopEndOfRunConfig::default(),
+    };
+    if args.no_verify_tests {
+        return;
+    }
+    let enabled = args.verify_tests || cfg.verify_tests;
+    if !enabled {
+        return;
+    }
+
+    let gate = hew_core::gate::detect(working_dir);
+    let command = hew_core::verify::resolve_command(
+        args.verify_command.as_deref(),
+        Some(&cfg.verify_command),
+        &gate,
+    );
+    let outcome = match command {
+        None => hew_core::verify::VerifyOutcome::Skipped { reason: "no command resolved".into() },
+        Some(cmd) => {
+            let budget = hew_core::config::parse_budget_wall(&cfg.verify_budget_wall)
+                .unwrap_or_else(|_| Duration::from_secs(600));
+            let log_path = run_dir.join("verify.log");
+            if !ctx.quiet {
+                eprintln!("hew loop verify: {} (budget {}s)", cmd.join(" "), budget.as_secs());
+            }
+            hew_core::verify::run_verify(&cmd, working_dir, &log_path, budget)
+        }
+    };
+
+    // Persist on the in-memory Run before re-writing run.json so the
+    // summary line + manifest see a consistent state.
+    run.verify_outcome = Some(outcome.clone());
+    let _ = write_json_atomic(&run_log_path(run_dir, worker_n), &RunLog::from_run(run));
+
+    // STATUS memory on failure — survives across sessions so the next
+    // resume sees the regression. We deliberately do NOT file a bd
+    // task because closed work is not rolled back; the memory is the
+    // breadcrumb, the user decides on follow-up.
+    if outcome.is_failure() {
+        let summary = outcome.summary_line();
+        let body = format!(
+            "STATUS:loop-verify-failed:{} — {} (run-dir={})",
+            run.id,
+            summary,
+            run_dir.display(),
+        );
+        if let Err(e) = bd.remember(&body) {
+            tracing::warn!("failed to file STATUS:loop-verify-failed memory: {e}");
+        }
+    }
 }
 
 /// Today's single-worker loop, factored out so [`run_loop_with`] can
@@ -777,6 +1027,7 @@ fn run_loop_serial(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -821,7 +1072,7 @@ fn run_loop_serial(
     };
 
     let started_at = iso_now_utc();
-    let outcome = run_worker_loop_with_scope(
+    let mut outcome = run_worker_loop_with_scope(
         ctx,
         &args,
         bd,
@@ -829,6 +1080,7 @@ fn run_loop_serial(
         fallback_spawner,
         fallback,
         loop_model.clone(),
+        planner_cfg.clone(),
         gate,
         &worker,
         &skill,
@@ -838,6 +1090,13 @@ fn run_loop_serial(
         &stop_path,
         scope.clone(),
     )?;
+
+    // End-of-run verify (hew-bon7): opt-in. Runs in the project root
+    // for the serial path; on `--jobs N>=2` the parallel path runs it
+    // after merge-back below. Records the outcome onto `Run.verify_outcome`
+    // so the summary line + STATUS memory + exit code branch on a
+    // single value.
+    maybe_run_verify_step(ctx, &args, bd, &mut outcome.run, project_root, &dir, worker.worker_n);
 
     // Dispatcher-shutdown manifest: lists every worker that
     // participated in the run + their final outcome. v1 has a single
@@ -856,6 +1115,14 @@ fn run_loop_serial(
 
     let scope = Some(outcome.run.config.scope.clone());
     print_summary(ctx, &outcome.run, &outcome.iter_logs, &dir, scope);
+
+    // Verify failure ⇒ non-zero exit (acceptance: "CI / wrapper scripts
+    // can branch on this"). Closed tasks are NOT rolled back; the
+    // STATUS:loop-verify-failed memory + summary line + non-zero exit
+    // are the durable signals.
+    if outcome.run.verify_outcome.as_ref().is_some_and(|v| v.is_failure()) {
+        return Err(miette::miette!("verify-tests failed"));
+    }
     Ok(())
 }
 
@@ -892,6 +1159,7 @@ fn run_loop_parallel(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -921,7 +1189,7 @@ fn run_loop_parallel(
     // Dispatcher" acceptance holds across both paths. The scope was
     // resolved once at the top of `run_loop` and threaded here.
     let mut dispatcher =
-        hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone());
+        hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone(), None);
 
     // v1 wiring: one tick to fill all slots, then drive each worker's
     // loop in a scoped thread. The dispatcher's slot-fill state machine
@@ -1004,6 +1272,7 @@ fn run_loop_parallel(
             fallback_spawner,
             fallback,
             loop_model.clone(),
+            planner_cfg.clone(),
             gate,
             worker,
             &skill,
@@ -1073,6 +1342,17 @@ fn run_loop_parallel(
         }
     }
 
+    // End-of-run verify (hew-bon7). On the parallel path the verify
+    // command runs in `project_root` (post-merge-back HEAD) and the
+    // outcome is recorded on the first worker's Run so the existing
+    // `print_summary(first, ...)` contract picks it up. Per-worker
+    // outcomes are not duplicated — the verify proves the stacked
+    // post-merge state, not any one worker's branch.
+    if let Some(first) = worker_outcomes.first_mut() {
+        let worker_n = workers.first().and_then(|w| w.worker_n);
+        maybe_run_verify_step(ctx, &args, bd, &mut first.run, project_root, &dir, worker_n);
+    }
+
     // Per-worker manifest rows; jobs reflects the dispatcher's slot
     // count (matches the user's --jobs N, post-clamp).
     let manifest_rows: Vec<ManifestWorker> = workers
@@ -1092,9 +1372,16 @@ fn run_loop_parallel(
     // v1: print the first worker's summary as a stand-in for the full
     // per-worker breakdown (that's hew-h0tu). Honors the existing
     // "print summary at end" contract so nothing downstream regresses.
+    let verify_failed = worker_outcomes
+        .first()
+        .and_then(|f| f.run.verify_outcome.as_ref())
+        .is_some_and(|v| v.is_failure());
     if let Some(first) = worker_outcomes.first() {
         let scope = Some(first.run.config.scope.clone());
         print_summary(ctx, &first.run, &first.iter_logs, &dir, scope);
+    }
+    if verify_failed {
+        return Err(miette::miette!("verify-tests failed"));
     }
     Ok(())
 }
@@ -1136,6 +1423,7 @@ pub fn run_worker_loop(
         fallback_spawner,
         fallback,
         loop_model,
+        LoopPlannerConfig::default(),
         gate,
         worker,
         skill,
@@ -1156,6 +1444,7 @@ pub fn run_worker_loop_with_scope(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     worker: &Worker,
     skill: &skills::Skill,
@@ -1308,7 +1597,8 @@ pub fn run_worker_loop_with_scope(
         );
         let spawn_opts = SpawnOpts { model_override, working_dir: None };
 
-        let (mut outcome, tokens, mut stderr_tail, failure_class) = if let Some(s) = active_spawner
+        let (mut outcome, tokens, mut stderr_tail, failure_class, raw_text) = if let Some(s) =
+            active_spawner
         {
             match s.spawn(&assembled, allowed, &spawn_opts) {
                 Ok(out) => {
@@ -1319,7 +1609,7 @@ pub fn run_worker_loop_with_scope(
                     } else {
                         IterOutcome::RuntimeError
                     };
-                    (oc, out.tokens, Some(out.stderr_tail), out.failure_class)
+                    (oc, out.tokens, Some(out.stderr_tail), out.failure_class, out.raw_text)
                 }
                 Err(e) => {
                     if !ctx.quiet {
@@ -1330,11 +1620,18 @@ pub fn run_worker_loop_with_scope(
                         Default::default(),
                         Some(format!("{e}")),
                         SpawnFailureClass::RuntimeError(hew_core::runtime::RuntimeErrorKind::Spawn),
+                        String::new(),
                     )
                 }
             }
         } else {
-            (IterOutcome::NoClose, Default::default(), None, SpawnFailureClass::Success)
+            (
+                IterOutcome::NoClose,
+                Default::default(),
+                None,
+                SpawnFailureClass::Success,
+                String::new(),
+            )
         };
 
         // Out-of-band closure detection. detect_closed_task only
@@ -1502,6 +1799,54 @@ pub fn run_worker_loop_with_scope(
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
 
+        // Iter-end batch-plan hook (hew-7k1m). Only fires for the
+        // parallel path (`--jobs >= 2`); the N=1 fast path never writes
+        // a batch file. The plan describes the NEXT iter's batch and
+        // resolves via four branches:
+        //   1. Agent: previous iter's raw_text named a `next_iteration:`
+        //      block.
+        //   2. Planner: planner runtime returns a fresh batch (Planner
+        //      source) or declines (Skipped with parse/runtime/budget
+        //      reason).
+        //   3. Skipped: planner disabled → `reason = "planner_disabled"`.
+        //   4. (jobs == 1): layer bypassed entirely.
+        if args.jobs > 1 {
+            let next_iter = iter_number + 1;
+            let planner_kind = planner_cfg
+                .runtime
+                .as_deref()
+                .map(|r| r.parse::<RuntimeKind>())
+                .transpose()
+                .map_err(|e: String| miette::miette!("{e}"))?
+                .unwrap_or(primary_kind);
+            let plan = resolve_iter_completion_plan(&raw_text, &planner_cfg, next_iter, |ni| {
+                // Reuse the active loop spawner when it matches the
+                // planner's runtime — avoids constructing a second
+                // subprocess channel for the common config-less path.
+                let inherited = if planner_kind == active_kind { active_spawner } else { None };
+                let built;
+                let planner_spawner: &dyn RuntimeSpawner = if let Some(s) = inherited {
+                    s
+                } else {
+                    built = build_spawner_for(planner_kind);
+                    &*built
+                };
+                spawn_planner_with(
+                    planner_spawner,
+                    &[],
+                    &[],
+                    planner_cfg.budget_tokens,
+                    &worker.worktree_dir,
+                    ni,
+                )
+            });
+            if let Err(e) = batch_plan::write(&worker.log_dir, &plan)
+                && !ctx.quiet
+            {
+                eprintln!("iter {iter_number} batch-plan write failed: {e}");
+            }
+        }
+
         // When a fallback is wired and the cooldown machinery is
         // actively routing iters, swallow RuntimeError from the
         // stop-signal point of view — the loop should switch to the
@@ -1546,6 +1891,7 @@ fn print_summary(
     }
     let mut summary = hew_core::loop_summary::summarize(run, iter_logs);
     summary.scope = scope;
+    summary.planner_counts = hew_core::loop_summary::scan_planner_counts(dir);
     let colorize = std::env::var_os("NO_COLOR").is_none();
     print!("{}", hew_core::loop_summary::render(&summary, &dir.display().to_string(), colorize),);
 }
@@ -1711,6 +2057,7 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
             })
             .collect(),
         stop_reason: rl.stop_reason.as_deref().and_then(hew_core::runner::StopReason::from_label),
+        verify_outcome: rl.verify_outcome.clone(),
     };
 
     print_summary(ctx, &run, &iter_logs, &dir, rl.scope.clone());
@@ -1782,6 +2129,7 @@ fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::
         config: RunConfig::default(),
         iters,
         stop_reason,
+        verify_outcome: None,
     };
 
     // Scope is dispatcher-level and identical across workers; read it
@@ -1945,6 +2293,178 @@ fn print_iter(log: &IterLog) {
     );
 }
 
+/// Embedded planner system prompt. Lives at `skills/data/planner-prompt.md`
+/// so it can be tuned without recompile is not the goal — embedding via
+/// `include_str!` keeps the binary self-contained while the file on disk
+/// remains the canonical edit surface for prompt iteration during dev.
+const PLANNER_PROMPT_BODY: &str = include_str!("../../../skills/data/planner-prompt.md");
+
+/// Compact view of a ready task that's safe to serialize into the
+/// planner prompt. We deliberately drop `description` and `parent` so
+/// the prompt stays small — the planner picks parallel-safe ids by
+/// title + priority, not by re-reading the whole task graph.
+#[derive(serde::Serialize)]
+struct PlannerReadyView<'a> {
+    id: &'a str,
+    title: &'a str,
+    priority: u8,
+    #[serde(rename = "type")]
+    issue_type: &'a str,
+}
+
+/// Build the per-iter planner prompt. The system body
+/// (`PLANNER_PROMPT_BODY`) goes in the cache-prefix slot; bd-ready +
+/// recent-touches JSON payloads go in the tail.
+fn assemble_planner_prompt(
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+) -> prompt::AssembledPrompt {
+    let view: Vec<PlannerReadyView<'_>> = bd_ready
+        .iter()
+        .map(|t| PlannerReadyView {
+            id: &t.id,
+            title: &t.title,
+            priority: t.priority,
+            issue_type: &t.issue_type,
+        })
+        .collect();
+    let bd_ready_json = serde_json::to_string(&view).unwrap_or_else(|_| "[]".to_string());
+    let touches_json = serde_json::to_string(recent_touches).unwrap_or_else(|_| "[]".to_string());
+    let tail = format!("## bd_ready\n\n{bd_ready_json}\n\n## recent_touches\n\n{touches_json}\n");
+    prompt::assemble(PLANNER_PROMPT_BODY, "", &tail)
+}
+
+/// Pure resolution of the iter-end batch plan when the parallel
+/// dispatcher (`--jobs >= 2`) needs to seed the next iter. Splits the
+/// four branches per `hew-7k1m`:
+///
+/// - `Some(Ok(ids))` from `extract_next_iteration(raw_text)` → Agent
+/// - planner disabled OR budget = 0 → Skipped { planner_disabled }
+/// - planner enabled → returned by the injected closure (which the
+///   caller wires to [`spawn_planner_with`])
+///
+/// Splitting this away from the worker loop's side-effects keeps the
+/// branch arithmetic test-friendly: no git, no bd, no spawner ctor.
+pub fn resolve_iter_completion_plan<F>(
+    raw_text: &str,
+    planner_cfg: &LoopPlannerConfig,
+    next_iter: u32,
+    planner_fn: F,
+) -> BatchPlan
+where
+    F: FnOnce(u32) -> BatchPlan,
+{
+    if !raw_text.is_empty()
+        && let Some(ids) = hew_core::batch_plan_parse::extract_next_iteration(raw_text)
+    {
+        return BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number: next_iter,
+            task_ids: ids,
+            source: BatchSource::Agent,
+            reason: None,
+            created_at: iso_now_utc(),
+            planner_tokens: None,
+        };
+    }
+    if !planner_cfg.enabled || planner_cfg.budget_tokens == 0 {
+        return skipped_plan(next_iter, "planner_disabled");
+    }
+    planner_fn(next_iter)
+}
+
+/// Build a `Skipped` batch plan with the given reason. Used by every
+/// non-success path in [`spawn_planner`] so the caller sees one
+/// shape regardless of why the planner declined.
+fn skipped_plan(iter_number: u32, reason: impl Into<String>) -> BatchPlan {
+    BatchPlan {
+        schema_version: BATCH_PLAN_SCHEMA_VERSION,
+        iter_number,
+        task_ids: Vec::new(),
+        source: BatchSource::Skipped,
+        reason: Some(reason.into()),
+        created_at: iso_now_utc(),
+        planner_tokens: None,
+    }
+}
+
+/// Spawn the planner runtime to suggest a batch for `iter_number`.
+///
+/// Per `hew-pxw9` acceptance: this function NEVER propagates an error —
+/// every failure path returns `BatchPlan { source: Skipped, ... }`. The
+/// planner is an advisory signal layered on top of trust-the-graph, and
+/// a broken planner must not kill the loop.
+///
+/// Pre-spawn budget check skips the subprocess entirely when the
+/// assembled prompt's `token_estimate` exceeds `budget_tokens` — we
+/// never truncate context to fit a budget per the plan's "refusing to
+/// plan is strictly better than guessing badly" rule.
+pub fn spawn_planner(
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+    budget_tokens: u32,
+    runtime: RuntimeKind,
+    project_root: &Path,
+    iter_number: u32,
+) -> miette::Result<BatchPlan> {
+    let spawner = build_spawner_for(runtime);
+    Ok(spawn_planner_with(
+        spawner.as_ref(),
+        bd_ready,
+        recent_touches,
+        budget_tokens,
+        project_root,
+        iter_number,
+    ))
+}
+
+/// Spawner-injected variant of [`spawn_planner`]. Production wires the
+/// real runtime; unit tests pass a `MockSpawner` (or a custom error-
+/// returning one) so the budget / parse / runtime-error branches are
+/// each exercisable without touching a real subprocess.
+fn spawn_planner_with(
+    spawner: &dyn RuntimeSpawner,
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+    budget_tokens: u32,
+    project_root: &Path,
+    iter_number: u32,
+) -> BatchPlan {
+    let prompt = assemble_planner_prompt(bd_ready, recent_touches);
+    let estimate = prompt.token_estimate;
+    if estimate > budget_tokens as u64 {
+        return skipped_plan(
+            iter_number,
+            format!("budget_exceeded: estimated {estimate} tokens > budget {budget_tokens}"),
+        );
+    }
+    let opts = SpawnOpts { model_override: None, working_dir: Some(project_root.to_path_buf()) };
+    let outcome = match spawner.spawn(&prompt, &[], &opts) {
+        Ok(o) => o,
+        Err(e) => return skipped_plan(iter_number, format!("runtime_error: {e}")),
+    };
+    match extract_next_iteration(&outcome.raw_text) {
+        Some(ids) => BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number,
+            task_ids: ids,
+            source: BatchSource::Planner,
+            reason: None,
+            created_at: iso_now_utc(),
+            planner_tokens: Some(outcome.tokens),
+        },
+        None => BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number,
+            task_ids: Vec::new(),
+            source: BatchSource::Skipped,
+            reason: Some("parse_error: planner response missing next_iteration block".into()),
+            created_at: iso_now_utc(),
+            planner_tokens: Some(outcome.tokens),
+        },
+    }
+}
+
 fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -1997,6 +2517,12 @@ mod tests {
             scope: None,
             epics: Vec::new(),
             epic: Vec::new(),
+            no_planner: false,
+            planner_budget: None,
+            planner_runtime: None,
+            verify_tests: false,
+            no_verify_tests: false,
+            verify_command: None,
         }
     }
 
@@ -2148,5 +2674,253 @@ mod tests {
         let bd = FakeBd::open_epic("hew-6az");
         let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
         assert!(format!("{err:?}").contains("not found"));
+    }
+
+    // ---- spawn_planner (hew-pxw9) -----------------------------------
+
+    use hew_core::runner::TokenSpend;
+    use hew_core::runtime::{MockSpawner, SpawnFailureClass, SpawnOutcome};
+
+    fn ready(id: &str, prio: u8) -> ReadyTask {
+        ReadyTask {
+            id: id.into(),
+            title: format!("title for {id}"),
+            description: String::new(),
+            priority: prio,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }
+    }
+
+    fn planner_outcome_with(raw_text: impl Into<String>) -> SpawnOutcome {
+        SpawnOutcome {
+            success: true,
+            closed_task: None,
+            tokens: TokenSpend { input: 1234, output: 56, cache_read: 0, cache_create: 0 },
+            stderr_tail: String::new(),
+            raw_text: raw_text.into(),
+            failure_class: SpawnFailureClass::Success,
+        }
+    }
+
+    #[test]
+    fn planner_skips_when_estimated_tokens_exceed_budget() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 2)];
+        let touches = vec!["src/foo.rs:bar".to_string()];
+        let mock = MockSpawner::new(planner_outcome_with(""));
+        let plan =
+            spawn_planner_with(&mock, &bd_ready, &touches, /*budget*/ 1, Path::new("/"), 7);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert!(plan.task_ids.is_empty());
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("budget_exceeded:") && reason.contains("budget 1"),
+            "reason should name the cause + budget: {reason}",
+        );
+        // No subprocess spawned.
+        assert!(
+            mock.last_args.borrow().is_none(),
+            "spawner must not be invoked when budget already exceeded",
+        );
+        assert!(plan.planner_tokens.is_none(), "no spawn → no tokens accounted");
+        assert_eq!(plan.iter_number, 7);
+        assert_eq!(plan.schema_version, BATCH_PLAN_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn planner_returns_plan_on_clean_response() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 2)];
+        let mock = MockSpawner::new(planner_outcome_with(
+            "thinking...\n\n```next_iteration\n[\"hew-aaa\", \"hew-bbb\"]\n```\n",
+        ));
+        let plan =
+            spawn_planner_with(&mock, &bd_ready, &[], /*budget*/ 100_000, Path::new("/"), 3);
+        assert_eq!(plan.source, BatchSource::Planner);
+        assert_eq!(plan.task_ids, vec!["hew-aaa".to_string(), "hew-bbb".to_string()]);
+        assert_eq!(plan.iter_number, 3);
+        assert!(plan.reason.is_none());
+    }
+
+    #[test]
+    fn planner_skips_on_parse_error() {
+        let mock = MockSpawner::new(planner_outcome_with("no fenced block here, just prose"));
+        let plan =
+            spawn_planner_with(&mock, &[ready("hew-aaa", 1)], &[], 100_000, Path::new("/"), 1);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert!(plan.task_ids.is_empty());
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(reason.starts_with("parse_error:"), "got {reason:?}");
+    }
+
+    #[test]
+    fn planner_skips_on_runtime_error() {
+        #[derive(Debug)]
+        struct ErrSpawner;
+        impl RuntimeSpawner for ErrSpawner {
+            fn spawn(
+                &self,
+                _: &prompt::AssembledPrompt,
+                _: &[String],
+                _: &SpawnOpts,
+            ) -> hew_core::error::Result<SpawnOutcome> {
+                Err(std::io::Error::other("simulated spawn failure").into())
+            }
+        }
+        let plan = spawn_planner_with(
+            &ErrSpawner,
+            &[ready("hew-aaa", 1)],
+            &[],
+            100_000,
+            Path::new("/"),
+            4,
+        );
+        assert_eq!(plan.source, BatchSource::Skipped);
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(reason.starts_with("runtime_error:"), "got {reason:?}");
+        assert!(reason.contains("simulated spawn failure"), "must surface the cause: {reason}");
+    }
+
+    #[test]
+    fn planner_prompt_includes_bd_ready_and_recent_touches() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 3)];
+        let touches = vec!["src/dispatcher.rs:run".into(), "src/loop_log.rs:write".into()];
+        let prompt = assemble_planner_prompt(&bd_ready, &touches);
+        // System body lands in the cache prefix.
+        assert!(prompt.prefix.contains("Hew loop"), "prefix must carry the system body");
+        // Task tail carries both inputs.
+        assert!(prompt.tail.contains("hew-aaa"), "bd_ready ids missing from tail");
+        assert!(prompt.tail.contains("hew-bbb"));
+        assert!(prompt.tail.contains("\"priority\":1"), "priority emitted");
+        assert!(prompt.tail.contains("src/dispatcher.rs:run"), "touches missing from tail");
+        assert!(prompt.tail.contains("src/loop_log.rs:write"));
+        // The full prompt is what the spawner actually receives — it
+        // must contain both halves.
+        assert!(prompt.full_text.contains("Hew loop"));
+        assert!(prompt.full_text.contains("hew-aaa"));
+    }
+
+    // ---- iter-end batch hook (hew-7k1m) -----------------------------
+
+    fn agent_plan_via_fenced_block() -> &'static str {
+        "thinking...\n\n```next_iteration\n[\"hew-foo\", \"hew-bar\"]\n```\nDone.\n"
+    }
+
+    fn never_planner(_ni: u32) -> BatchPlan {
+        panic!("planner closure must not run for this branch");
+    }
+
+    #[test]
+    fn iter_completion_writes_agent_sourced_batch_when_block_present() {
+        let cfg = LoopPlannerConfig::default();
+        let plan =
+            resolve_iter_completion_plan(agent_plan_via_fenced_block(), &cfg, 7, never_planner);
+        assert_eq!(plan.source, BatchSource::Agent);
+        assert_eq!(plan.iter_number, 7);
+        assert_eq!(plan.task_ids, vec!["hew-foo".to_string(), "hew-bar".to_string()]);
+        assert!(plan.reason.is_none());
+        assert!(plan.planner_tokens.is_none());
+    }
+
+    #[test]
+    fn iter_completion_writes_planner_sourced_batch_when_agent_silent() {
+        let cfg = LoopPlannerConfig::default();
+        let plan = resolve_iter_completion_plan("no fenced block, just prose", &cfg, 4, |ni| {
+            // Stand-in for spawn_planner_with: returns a Planner-sourced plan.
+            BatchPlan {
+                schema_version: BATCH_PLAN_SCHEMA_VERSION,
+                iter_number: ni,
+                task_ids: vec!["hew-planned".into()],
+                source: BatchSource::Planner,
+                reason: None,
+                created_at: iso_now_utc(),
+                planner_tokens: Some(TokenSpend {
+                    input: 1,
+                    output: 1,
+                    cache_read: 0,
+                    cache_create: 0,
+                }),
+            }
+        });
+        assert_eq!(plan.source, BatchSource::Planner);
+        assert_eq!(plan.iter_number, 4);
+        assert_eq!(plan.task_ids, vec!["hew-planned".to_string()]);
+        assert!(plan.planner_tokens.is_some());
+    }
+
+    #[test]
+    fn iter_completion_writes_skipped_batch_when_planner_disabled() {
+        let cfg = LoopPlannerConfig { enabled: false, ..Default::default() };
+        let plan = resolve_iter_completion_plan("", &cfg, 3, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.iter_number, 3);
+        assert!(plan.task_ids.is_empty());
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn iter_completion_skipped_when_budget_zero() {
+        // `--planner-budget 0` is the documented "off without flipping
+        // --no-planner" knob; it must short-circuit before the closure
+        // runs.
+        let cfg = LoopPlannerConfig { budget_tokens: 0, ..Default::default() };
+        let plan = resolve_iter_completion_plan("", &cfg, 2, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn iter_completion_agent_wins_over_planner() {
+        // Agent block in raw_text → planner closure must not fire even
+        // when planner is enabled.
+        let cfg = LoopPlannerConfig::default();
+        let plan =
+            resolve_iter_completion_plan(agent_plan_via_fenced_block(), &cfg, 9, never_planner);
+        assert_eq!(plan.source, BatchSource::Agent);
+    }
+
+    #[test]
+    fn cli_no_planner_skips_planner_call_even_when_agent_silent() {
+        let mut args = default_args();
+        args.no_planner = true;
+        let resolved = resolve_planner_config(&args, &LoopPlannerConfig::default()).unwrap();
+        assert!(!resolved.enabled);
+        let plan = resolve_iter_completion_plan("", &resolved, 1, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn cli_planner_budget_overrides_config() {
+        let mut args = default_args();
+        args.planner_budget = Some(42);
+        let base = LoopPlannerConfig { budget_tokens: 999, ..Default::default() };
+        let resolved = resolve_planner_config(&args, &base).unwrap();
+        assert_eq!(resolved.budget_tokens, 42);
+    }
+
+    #[test]
+    fn cli_planner_runtime_overrides_config() {
+        let mut args = default_args();
+        args.planner_runtime = Some("codex".into());
+        let resolved = resolve_planner_config(&args, &LoopPlannerConfig::default()).unwrap();
+        assert_eq!(resolved.runtime.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn cli_planner_runtime_rejects_unknown_kind() {
+        let mut args = default_args();
+        args.planner_runtime = Some("cursor".into());
+        assert!(resolve_planner_config(&args, &LoopPlannerConfig::default()).is_err());
+    }
+
+    #[test]
+    fn planner_tokens_field_populated_on_success() {
+        let mock = MockSpawner::new(planner_outcome_with("```next_iteration\n[\"hew-aaa\"]\n```"));
+        let plan =
+            spawn_planner_with(&mock, &[ready("hew-aaa", 1)], &[], 100_000, Path::new("/"), 2);
+        let tokens = plan.planner_tokens.expect("planner_tokens populated on success");
+        assert_eq!(tokens.input, 1234);
+        assert_eq!(tokens.output, 56);
     }
 }
