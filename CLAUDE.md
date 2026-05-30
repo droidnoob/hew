@@ -207,6 +207,7 @@ Before a release:
 | Public-facing project overview | [README.md](./README.md) |
 | Workspace + module architecture | [ARCHITECTURE.md](./ARCHITECTURE.md) |
 | Slash command reference (all 39) | [docs/COMMANDS.md](./docs/COMMANDS.md) |
+| Two-file config layering (user-global + project) | [docs/CONFIG.md](./docs/CONFIG.md) |
 | Dev setup, MSRV, hooks, release process | [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | Release notes | [CHANGELOG.md](./CHANGELOG.md) |
 | The methodology bodies the LLM loads | [`skills/`](./skills) |

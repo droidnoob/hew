@@ -346,6 +346,46 @@ fn show_env_hew_config_renders_single_source() {
     assert!(line.contains("(env)"), "line was: {line}");
 }
 
+// ──────── hew-u181: docs/CONFIG.md + CHANGELOG smokes ────────
+
+fn workspace_root() -> std::path::PathBuf {
+    // CARGO_MANIFEST_DIR is `<workspace>/hew`. Pop one segment.
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .to_path_buf()
+}
+
+#[test]
+fn docs_config_md_contains_precedence_table() {
+    let body = fs::read_to_string(workspace_root().join("docs/CONFIG.md")).unwrap();
+    assert!(body.contains("## Discovery order"), "discovery order section");
+    // Precedence table mentions HEW_CONFIG, project, user-global, defaults.
+    assert!(body.contains("HEW_CONFIG"), "env source described");
+    assert!(body.contains(".hew.toml"), "project file mentioned");
+    assert!(body.contains("user-global"), "user-global label present");
+}
+
+#[test]
+fn docs_config_md_contains_merge_semantics_section() {
+    let body = fs::read_to_string(workspace_root().join("docs/CONFIG.md")).unwrap();
+    assert!(body.contains("## Merge semantics"), "merge semantics section");
+    assert!(body.contains("project wins"), "scalar rule mentioned");
+    assert!(body.contains("concat") || body.contains("dedupe"), "array rule mentioned");
+}
+
+#[test]
+fn changelog_unreleased_has_project_local_config_entry() {
+    let body = fs::read_to_string(workspace_root().join("CHANGELOG.md")).unwrap();
+    let unreleased = body
+        .split("## [Unreleased]")
+        .nth(1)
+        .and_then(|s| s.split("## [").next())
+        .expect("[Unreleased] section");
+    assert!(unreleased.contains("hew-c0pa") || unreleased.contains(".hew.toml"));
+    assert!(unreleased.contains("project") || unreleased.contains("Project"));
+}
+
 #[test]
 fn show_json_output_shape_stable() {
     let proj = make_project_root();
