@@ -20,10 +20,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Args as ClapArgs, Subcommand};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use hew_core::backpressure::{self, GateCheck, Verdict};
 use hew_core::bd::{BdClient, RealBd};
 use hew_core::config::LoopModelConfig;
+use hew_core::error::HewError;
 use hew_core::loop_log::{
     IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
     run_log_path, stop_file_path, write_json_atomic, write_manifest,
@@ -35,7 +36,9 @@ use hew_core::runtime::{
     ClaudeSpawner, CodexSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner, SpawnFailureClass,
     SpawnOpts,
 };
+use hew_core::scope::Scope;
 use hew_core::stop_signals::Collector;
+use hew_core::tasks;
 use hew_core::time::iso_now_utc;
 use hew_core::{Ctx, allowed_tools, skills};
 
@@ -359,6 +362,36 @@ pub struct Args {
     /// prevent accidental fork-bombs.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
     pub jobs: u32,
+
+    /// Restrict the run's queue. `ready` = today's behavior (every
+    /// bd-ready task counts); `epics` = only tasks transitively under
+    /// the epics passed via `--epics`. Omitting the flag opens a
+    /// picker on a TTY and errors in non-interactive mode.
+    #[arg(long, value_enum)]
+    pub scope: Option<ScopeArg>,
+
+    /// Comma-separated epic ids to scope this run to. Required (or
+    /// picked interactively) when `--scope=epics`. May be repeated.
+    /// Example: `--epics=hew-6az,hew-1tq`.
+    #[arg(long, value_delimiter = ',')]
+    pub epics: Vec<String>,
+
+    /// Ergonomic singular alias for `--epics`; merges into the same
+    /// list. Example: `--epic hew-6az --epic hew-1tq`.
+    #[arg(long = "epic", value_name = "EPIC_ID")]
+    pub epic: Vec<String>,
+}
+
+/// CLI surface of [`Scope`]. The runtime type lives in
+/// `hew_core::scope` so dispatcher / runner / loop_log share a single
+/// definition; this enum exists only to give clap a ValueEnum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ScopeArg {
+    /// Every bd-ready task counts (pre-scope default).
+    Ready,
+    /// Restrict to children of one or more epics.
+    Epics,
 }
 
 pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
@@ -395,13 +428,26 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
 
     let project_root = std::env::current_dir().map_err(|e| miette::miette!("resolve cwd: {e}"))?;
     let bd = RealBd::discover().map_err(|e| miette::miette!("bd discover: {e}"))?;
+
+    // Resolve --scope/--epics once, before any spawner is built. argv
+    // > picker > non-interactive error. Cancel exits 0 with a note.
+    let scope = match resolve_scope(&args, ctx, &bd)? {
+        ResolvedScope::Scope(s) => s,
+        ResolvedScope::Cancelled => {
+            if !ctx.quiet {
+                eprintln!("hew loop: no epics selected — run cancelled");
+            }
+            return Ok(());
+        }
+    };
+
     let spawner: Option<Box<dyn RuntimeSpawner>> =
         if args.dry_run { None } else { Some(build_spawner_for(kind)) };
     let fallback_spawner: Option<Box<dyn RuntimeSpawner>> =
         if args.dry_run { None } else { fallback.runtime.map(build_spawner_for) };
     let gate = AutoGateRunner;
     let loop_model = cfg.loop_cfg.model.clone();
-    run_loop_with(
+    run_loop_with_scope(
         ctx,
         args,
         &bd,
@@ -411,16 +457,137 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         loop_model,
         &gate,
         &project_root,
+        scope,
     )
 }
 
-/// Resolve the run's [`Scope`] from CLI args. Single source of truth so
-/// the dispatcher and `RunConfig.scope` stay in sync. The CLI flag
-/// (`--scope` / `--epics`) wiring lands in hew-xhhw; until then the
-/// resolver returns the pre-scope default ([`Scope::Ready`]) so every
-/// bd-ready task counts.
-fn resolve_scope(_args: &Args) -> hew_core::scope::Scope {
-    hew_core::scope::Scope::Ready
+/// Resolution outcome of [`resolve_scope`]. `Cancelled` means the user
+/// backed out of the epic picker — the caller should exit 0 with a
+/// note rather than starting a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedScope {
+    Scope(Scope),
+    Cancelled,
+}
+
+/// Resolve the run's [`Scope`] from CLI args, the interactive picker,
+/// or refuse with [`HewError::MissingFlag`] in non-interactive mode.
+///
+/// Precedence (per hew-xhhw acceptance):
+/// 1. `--scope=ready` → [`Scope::Ready`]; reject if `--epics` was set.
+/// 2. `--scope=epics --epics=<csv>` → validate each id (exists, is
+///    epic, open) and return [`Scope::Epics`].
+/// 3. `--scope=epics` with no `--epics`: interactive → multi-select
+///    picker over open epics; non-interactive → MissingFlag("epics").
+/// 4. `--scope` omitted: interactive → single-select (ready/epics),
+///    chained into the epic picker on `epics`; non-interactive →
+///    MissingFlag("scope").
+///
+/// Picker UX is implemented inline against `inquire` to match the
+/// existing patterns in `commands/init.rs` and `commands/remember.rs`.
+pub fn resolve_scope(args: &Args, ctx: &Ctx, bd: &dyn BdClient) -> miette::Result<ResolvedScope> {
+    // Merge --epic (singular) into --epics (plural): both feed the
+    // same list. Argv order is preserved so the picker echoes the
+    // user's intent.
+    let mut epics: Vec<String> = args.epics.clone();
+    epics.extend(args.epic.iter().cloned());
+
+    match args.scope {
+        Some(ScopeArg::Ready) => {
+            if !epics.is_empty() {
+                return Err(miette::miette!(
+                    "--scope=ready does not accept --epics/--epic (got {:?})",
+                    epics,
+                ));
+            }
+            Ok(ResolvedScope::Scope(Scope::Ready))
+        }
+        Some(ScopeArg::Epics) => {
+            if !epics.is_empty() {
+                validate_epic_ids(bd, &epics)?;
+                Ok(ResolvedScope::Scope(Scope::Epics { epic_ids: epics }))
+            } else if ctx.interactive {
+                pick_epics(bd)
+            } else {
+                Err(HewError::MissingFlag { flag: "epics".into() }.into())
+            }
+        }
+        None => {
+            if ctx.interactive {
+                pick_scope_then_epics(bd)
+            } else {
+                Err(HewError::MissingFlag { flag: "scope".into() }.into())
+            }
+        }
+    }
+}
+
+/// Confirm each id resolves to an open epic. Closed / non-epic / unknown
+/// ids fail fast at resolve time so an iter never spawns against a stale
+/// queue.
+fn validate_epic_ids(bd: &dyn BdClient, ids: &[String]) -> miette::Result<()> {
+    for id in ids {
+        let summary = tasks::show(bd, id)
+            .map_err(|e| miette::miette!("--epics: id `{id}` not found in bd ({e})"))?;
+        if summary.issue_type != "epic" {
+            return Err(miette::miette!(
+                "--epics: id `{id}` is type `{}`, not `epic`",
+                summary.issue_type,
+            ));
+        }
+        if summary.status == "closed" {
+            return Err(miette::miette!("--epics: epic `{id}` is closed"));
+        }
+    }
+    Ok(())
+}
+
+/// Interactive single-select for scope kind, chained into the
+/// multi-select epic picker when the user picks "epics".
+fn pick_scope_then_epics(bd: &dyn BdClient) -> miette::Result<ResolvedScope> {
+    use inquire::Select;
+    let labels = vec![
+        "ready  — every bd-ready task (default behavior)",
+        "epics  — restrict to children of selected epics",
+    ];
+    let pick = Select::new("Scope this run to:", labels)
+        .prompt()
+        .map_err(|e| miette::miette!("scope pick: {e}"))?;
+    if pick.starts_with("ready") { Ok(ResolvedScope::Scope(Scope::Ready)) } else { pick_epics(bd) }
+}
+
+/// Multi-select picker over open epics. Empty selection cancels the
+/// run (caller exits 0 with a note).
+fn pick_epics(bd: &dyn BdClient) -> miette::Result<ResolvedScope> {
+    use inquire::MultiSelect;
+    let mut open_epics = tasks::list(
+        bd,
+        &tasks::TaskListFilter {
+            status: vec!["open".into(), "in_progress".into(), "blocked".into()],
+            issue_type: Some("epic".into()),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| miette::miette!("bd list open epics: {e}"))?;
+    open_epics.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.id.cmp(&b.id)));
+
+    if open_epics.is_empty() {
+        return Err(miette::miette!("no open epics to scope this run to"));
+    }
+
+    let labels: Vec<String> = open_epics.iter().map(|e| format!("{}  {}", e.id, e.title)).collect();
+    let picked = MultiSelect::new("Select one or more epics", labels.clone())
+        .with_help_message("space to toggle, enter to confirm — empty cancels the run")
+        .prompt()
+        .map_err(|e| miette::miette!("epic pick: {e}"))?;
+    if picked.is_empty() {
+        return Ok(ResolvedScope::Cancelled);
+    }
+    let epic_ids: Vec<String> = picked
+        .iter()
+        .filter_map(|l| labels.iter().position(|x| x == l).map(|i| open_epics[i].id.clone()))
+        .collect();
+    Ok(ResolvedScope::Scope(Scope::Epics { epic_ids }))
 }
 
 /// Construct the production spawner for a given runtime kind. Codex
@@ -484,6 +651,11 @@ pub struct WorkerOutcome {
 /// [`Worker`] over `project_root`, and delegates the iter loop to
 /// [`run_worker_loop`]. The behavior is byte-identical to the
 /// pre-split single-threaded loop.
+/// Back-compat wrapper for the original `run_loop_with` signature
+/// (pre-hew-xhhw). Callers that don't care about scope get
+/// [`Scope::Ready`], which is byte-identical to the legacy behavior.
+/// Production wiring goes through [`run_loop_with_scope`] via
+/// [`run_loop`]; existing integration tests stay on this signature.
 #[allow(clippy::too_many_arguments)]
 pub fn run_loop_with(
     ctx: &Ctx,
@@ -495,6 +667,33 @@ pub fn run_loop_with(
     loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
+) -> miette::Result<()> {
+    run_loop_with_scope(
+        ctx,
+        args,
+        bd,
+        spawner,
+        fallback_spawner,
+        fallback,
+        loop_model,
+        gate,
+        project_root,
+        Scope::Ready,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_loop_with_scope(
+    ctx: &Ctx,
+    args: Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
+    gate: &dyn GateRunner,
+    project_root: &Path,
+    scope: Scope,
 ) -> miette::Result<()> {
     // jobs == 1: today's behavior, byte-identical. Skip the dispatcher
     // entirely so the N=1 fast path never pays for parallel scaffolding
@@ -511,6 +710,7 @@ pub fn run_loop_with(
             loop_model,
             gate,
             project_root,
+            scope,
         );
     }
     run_loop_parallel(
@@ -523,6 +723,7 @@ pub fn run_loop_with(
         loop_model,
         gate,
         project_root,
+        scope,
     )
 }
 
@@ -541,6 +742,7 @@ fn run_loop_serial(
     loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
+    scope: Scope,
 ) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
@@ -582,7 +784,7 @@ fn run_loop_serial(
     };
 
     let started_at = iso_now_utc();
-    let outcome = run_worker_loop(
+    let outcome = run_worker_loop_with_scope(
         ctx,
         &args,
         bd,
@@ -597,6 +799,7 @@ fn run_loop_serial(
         &run_id,
         &allowed,
         &stop_path,
+        scope.clone(),
     )?;
 
     // Dispatcher-shutdown manifest: lists every worker that
@@ -653,6 +856,7 @@ fn run_loop_parallel(
     loop_model: LoopModelConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
+    scope: Scope,
 ) -> miette::Result<()> {
     let skill = skills::find(&args.skill)
         .ok_or_else(|| miette::miette!("unknown skill `{}`", args.skill))?;
@@ -676,11 +880,8 @@ fn run_loop_parallel(
     let base_sha = if args.dry_run { String::new() } else { git_head_sha(project_root)? };
 
     // Construct the Dispatcher even under --dry-run so the "invokes
-    // Dispatcher" acceptance holds across both paths. The scope resolves
-    // through `resolve_scope`; hew-xhhw wires the CLI flag, today it
-    // defaults to `Scope::Ready` so the loop runs against every bd-ready
-    // task.
-    let scope = resolve_scope(&args);
+    // Dispatcher" acceptance holds across both paths. The scope was
+    // resolved once at the top of `run_loop` and threaded here.
     let mut dispatcher =
         hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha, scope.clone());
 
@@ -757,7 +958,7 @@ fn run_loop_parallel(
     // path is correct (just sequential) for the parallel surface.
     let mut worker_outcomes: Vec<WorkerOutcome> = Vec::with_capacity(workers.len());
     for worker in &workers {
-        let outcome = run_worker_loop(
+        let outcome = run_worker_loop_with_scope(
             ctx,
             &args,
             bd,
@@ -772,6 +973,7 @@ fn run_loop_parallel(
             &run_id,
             &allowed,
             &stop_path,
+            scope.clone(),
         )?;
         worker_outcomes.push(outcome);
     }
@@ -867,6 +1069,9 @@ fn run_loop_parallel(
 /// `--jobs=1` constructs a single worker with `worktree_dir =
 /// project_root` and `log_dir = .hew/loop/<run-id>/`, preserving the
 /// pre-split behavior byte-for-byte.
+///
+/// Back-compat wrapper for tests that pre-date hew-xhhw: defaults
+/// the scope to [`Scope::Ready`] (legacy behavior).
 #[allow(clippy::too_many_arguments)]
 pub fn run_worker_loop(
     ctx: &Ctx,
@@ -883,6 +1088,43 @@ pub fn run_worker_loop(
     run_id: &str,
     allowed: &[String],
     stop_path: &Path,
+) -> miette::Result<WorkerOutcome> {
+    run_worker_loop_with_scope(
+        ctx,
+        args,
+        bd,
+        spawner,
+        fallback_spawner,
+        fallback,
+        loop_model,
+        gate,
+        worker,
+        skill,
+        primer_text,
+        run_id,
+        allowed,
+        stop_path,
+        Scope::Ready,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_worker_loop_with_scope(
+    ctx: &Ctx,
+    args: &Args,
+    bd: &dyn BdClient,
+    spawner: Option<&dyn RuntimeSpawner>,
+    fallback_spawner: Option<&dyn RuntimeSpawner>,
+    fallback: FallbackConfig,
+    loop_model: LoopModelConfig,
+    gate: &dyn GateRunner,
+    worker: &Worker,
+    skill: &skills::Skill,
+    primer_text: &str,
+    run_id: &str,
+    allowed: &[String],
+    stop_path: &Path,
+    scope: Scope,
 ) -> miette::Result<WorkerOutcome> {
     let primary_kind: RuntimeKind =
         args.runtime.parse().map_err(|e: String| miette::miette!("{e}"))?;
@@ -901,7 +1143,7 @@ pub fn run_worker_loop(
         interactive: args.interactive,
         unattended: args.unattended,
         loop_model,
-        scope: resolve_scope(args),
+        scope,
     };
 
     let collector = Collector::new(stop_path.to_path_buf());
@@ -1696,15 +1938,159 @@ mod tests {
             fallback_runtime: None,
             fallback_cooldown_iters: None,
             jobs: 1,
+            scope: None,
+            epics: Vec::new(),
+            epic: Vec::new(),
+        }
+    }
+
+    fn non_interactive_ctx() -> Ctx {
+        Ctx::new(true, hew_core::ctx::OutputMode::Text, true, 0)
+    }
+
+    /// Stub bd that returns a single open epic for any `bd show <id>` /
+    /// `bd list` call, and otherwise errors. Enough to validate
+    /// resolve_scope's argv branches without touching disk.
+    #[derive(Debug, Default)]
+    struct FakeBd {
+        epic_id: String,
+        epic_status: String,
+    }
+
+    impl FakeBd {
+        fn open_epic(id: &str) -> Self {
+            Self { epic_id: id.into(), epic_status: "open".into() }
+        }
+    }
+
+    impl hew_core::bd::BdClient for FakeBd {
+        fn version(&self) -> hew_core::error::Result<hew_core::bd::BdVersion> {
+            Ok(hew_core::bd::BdVersion { raw: "x".into(), semver: "0.0.0".into() })
+        }
+        fn ready(&self) -> hew_core::error::Result<Vec<hew_core::bd::ReadyTask>> {
+            Ok(Vec::new())
+        }
+        fn stats(&self) -> hew_core::error::Result<hew_core::bd::StatsSummary> {
+            Ok(Default::default())
+        }
+        fn prime_raw(&self) -> hew_core::error::Result<String> {
+            Ok(String::new())
+        }
+        fn memories(&self) -> hew_core::error::Result<std::collections::BTreeMap<String, String>> {
+            Ok(std::collections::BTreeMap::new())
+        }
+        fn remember(&self, _: &str) -> hew_core::error::Result<()> {
+            Ok(())
+        }
+        fn run_raw(
+            &self,
+            args: &[&std::ffi::OsStr],
+        ) -> hew_core::error::Result<hew_core::bd::BdOutput> {
+            let argv: Vec<String> = args.iter().map(|a| a.to_string_lossy().to_string()).collect();
+            let first = argv.first().map(String::as_str).unwrap_or("");
+            if first == "show" {
+                let id = argv.get(1).cloned().unwrap_or_default();
+                if id == self.epic_id {
+                    let body = format!(
+                        r#"[{{"id":"{}","title":"t","description":"","status":"{}","priority":2,"issue_type":"epic","closed_at":"","close_reason":null,"parent":null}}]"#,
+                        self.epic_id, self.epic_status,
+                    );
+                    return Ok(hew_core::bd::BdOutput { stdout: body, stderr: String::new() });
+                }
+                return Err(hew_core::error::HewError::BdNonZero {
+                    code: 1,
+                    stderr: format!("not found: {id}"),
+                });
+            }
+            Err(hew_core::error::HewError::BdNonZero {
+                code: 1,
+                stderr: format!("unexpected: {argv:?}"),
+            })
         }
     }
 
     #[test]
-    fn resolve_scope_defaults_to_ready_until_cli_flag_lands() {
-        // Pre-hew-xhhw: no `--scope` argv yet; the resolver returns the
-        // pre-scope default so today's behavior is byte-identical to the
-        // pre-scope `hew loop run`.
+    fn resolve_scope_ready_argv_is_ready() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Ready);
+        let bd = FakeBd::default();
+        assert_eq!(
+            resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap(),
+            ResolvedScope::Scope(Scope::Ready),
+        );
+    }
+
+    #[test]
+    fn resolve_scope_ready_rejects_epics_argv() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Ready);
+        args.epics = vec!["hew-6az".into()];
+        let bd = FakeBd::default();
+        let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
+        assert!(format!("{err:?}").contains("--scope=ready does not accept --epics"));
+    }
+
+    #[test]
+    fn resolve_scope_epics_argv_returns_epic_list() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Epics);
+        args.epics = vec!["hew-6az".into()];
+        let bd = FakeBd::open_epic("hew-6az");
+        assert_eq!(
+            resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap(),
+            ResolvedScope::Scope(Scope::Epics { epic_ids: vec!["hew-6az".into()] }),
+        );
+    }
+
+    #[test]
+    fn resolve_scope_epics_singular_alias_merges_into_list() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Epics);
+        args.epic = vec!["hew-6az".into()];
+        let bd = FakeBd::open_epic("hew-6az");
+        assert_eq!(
+            resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap(),
+            ResolvedScope::Scope(Scope::Epics { epic_ids: vec!["hew-6az".into()] }),
+        );
+    }
+
+    #[test]
+    fn resolve_scope_missing_in_non_interactive_errors() {
         let args = default_args();
-        assert_eq!(resolve_scope(&args), hew_core::scope::Scope::Ready);
+        let bd = FakeBd::default();
+        let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("scope"), "expected MissingFlag scope, got: {msg}");
+    }
+
+    #[test]
+    fn resolve_scope_epics_kind_without_epics_in_non_interactive_errors() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Epics);
+        let bd = FakeBd::default();
+        let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("epics"), "expected MissingFlag epics, got: {msg}");
+    }
+
+    #[test]
+    fn resolve_scope_epics_argv_rejects_closed_epic() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Epics);
+        args.epics = vec!["hew-6az".into()];
+        let mut bd = FakeBd::open_epic("hew-6az");
+        bd.epic_status = "closed".into();
+        let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
+        assert!(format!("{err:?}").contains("closed"));
+    }
+
+    #[test]
+    fn resolve_scope_epics_argv_rejects_unknown_id() {
+        let mut args = default_args();
+        args.scope = Some(ScopeArg::Epics);
+        args.epics = vec!["hew-bogus".into()];
+        let bd = FakeBd::open_epic("hew-6az");
+        let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
+        assert!(format!("{err:?}").contains("not found"));
     }
 }

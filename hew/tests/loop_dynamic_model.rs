@@ -64,6 +64,9 @@ fn args_one_dry_iter() -> Args {
         fallback_runtime: None,
         fallback_cooldown_iters: None,
         jobs: 1,
+        scope: None,
+        epics: Vec::new(),
+        epic: Vec::new(),
     }
 }
 

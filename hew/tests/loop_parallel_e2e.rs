@@ -146,6 +146,9 @@ fn args_parallel(jobs: u32) -> Args {
         fallback_runtime: None,
         fallback_cooldown_iters: None,
         jobs,
+        scope: None,
+        epics: Vec::new(),
+        epic: Vec::new(),
     }
 }
 
