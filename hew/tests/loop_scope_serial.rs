@@ -135,6 +135,7 @@ fn worker(log_dir: &Path) -> Worker {
         branch: String::new(),
         log_dir: log_dir.to_path_buf(),
         worker_n: None,
+        assigned_task: None,
     }
 }
 

@@ -841,6 +841,16 @@ pub struct Worker {
     /// existing `hew loop summary` / `hew loop logs` surfaces continue
     /// to find logs at the run-dir root.
     pub worker_n: Option<u32>,
+    /// Task pre-claimed by the dispatcher for this worker's first iter.
+    /// The parallel dispatcher claims tasks atomically before any worker
+    /// starts, which removes them from `bd ready` — a worker that
+    /// re-polled `bd.ready()` for its initial task would see an empty
+    /// set and exit on iter 0 (`stop_reason: ready_empty`), stranding
+    /// the claim in `in_progress`. Threading the assignment through the
+    /// `Worker` lets iter 1 run against the pre-claimed task; iter 2+
+    /// fall back to `bd.ready()` as before. `None` for the serial path
+    /// (no pre-claim) and for tests that drive the worker loop directly.
+    pub assigned_task: Option<ReadyTask>,
 }
 
 /// Final state returned by [`run_worker_loop`]. The dispatcher reads
@@ -1069,6 +1079,7 @@ fn run_loop_serial(
         branch: String::new(),
         log_dir: dir.clone(),
         worker_n: None,
+        assigned_task: None,
     };
 
     let started_at = iso_now_utc();
@@ -1253,6 +1264,7 @@ fn run_loop_parallel(
             branch: branch_str,
             log_dir: dir.clone(),
             worker_n: Some(n),
+            assigned_task: Some(a.task.clone()),
         });
     }
 
@@ -1489,9 +1501,27 @@ pub fn run_worker_loop_with_scope(
 
     let mut last_outcome: Option<IterOutcome> = None;
     let mut iter_logs: Vec<IterLog> = Vec::new();
+    // Pre-claimed task from the parallel dispatcher. Consumed on the
+    // first iter that needs a task; iter 2+ fall back to `bd.ready()`.
+    // The dispatcher claimed this task atomically before the worker
+    // started, so it is already in `in_progress` and absent from
+    // `bd.ready()` — without this hand-off the worker would exit on
+    // iter 0 with `stop_reason: ready_empty`.
+    let mut pending_assigned: Option<ReadyTask> = worker.assigned_task.clone();
 
     loop {
-        let raw_ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+        let bd_ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+        // Surface the pre-claimed task to the iter as if it were the
+        // head of `bd ready` (hew-zt4z) — the dispatcher claimed it
+        // atomically before the worker started, so it's already in
+        // `in_progress` and absent from the raw `bd.ready()`. Prepending
+        // it makes the rest of the loop body (signal eval, task pick,
+        // out-of-band closure detection) work unchanged.
+        let raw_ready: Vec<ReadyTask> = if let Some(t) = pending_assigned.as_ref() {
+            std::iter::once(t.clone()).chain(bd_ready).collect()
+        } else {
+            bd_ready
+        };
 
         // Apply the run's scope filter at the candidate-set boundary
         // (hew-s9mb). The parallel `Dispatcher` enforces this in
@@ -1500,7 +1530,10 @@ pub fn run_worker_loop_with_scope(
         // outside the agent-explicit `--scope=epics --epics=<id>`
         // contract. Re-resolve descendants every iter so children
         // added to a selected epic mid-run get picked up, mirroring
-        // dispatcher behavior.
+        // dispatcher behavior. The pre-claimed task survives the
+        // filter as long as it's a descendant — the dispatcher
+        // already enforced this at claim time, so this is a no-op
+        // for the normal case but covers a mid-run epic-edit race.
         let ready: Vec<ReadyTask> = match &cfg.scope {
             Scope::Ready => raw_ready,
             Scope::Epics { epic_ids } => {
@@ -1534,6 +1567,9 @@ pub fn run_worker_loop_with_scope(
                 break;
             }
         };
+        // The pre-claim is one-shot: once we've picked a task this iter,
+        // future iters source from `bd.ready()` like the serial path.
+        pending_assigned = None;
 
         let iter_number = run_state.next_iter_number();
         let started_at = iso_now_utc();
