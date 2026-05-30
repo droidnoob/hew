@@ -130,6 +130,9 @@ fn args_one_iter() -> Args {
         fallback_runtime: None,
         fallback_cooldown_iters: None,
         jobs: 1,
+        scope: None,
+        epics: Vec::new(),
+        epic: Vec::new(),
     }
 }
 
@@ -816,6 +819,9 @@ fn cooldown_routes_to_fallback_for_n_iters_then_retries_primary() {
         fallback_runtime: Some("codex".into()),
         fallback_cooldown_iters: Some(3),
         jobs: 1,
+        scope: None,
+        epics: Vec::new(),
+        epic: Vec::new(),
     };
     let fallback_cfg =
         FallbackConfig { runtime: Some(hew_core::runtime::RuntimeKind::Codex), cooldown_iters: 3 };

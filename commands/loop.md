@@ -9,13 +9,14 @@ ready-queue empty, stop-file, max-iter, runtime error).
 Common invocations:
 
 ```sh
-hew loop run --dry-run --max-iter 1   # smoke: prompt-assemble, no spawn
-hew loop run --until-empty            # drain the ready queue (default on)
-hew loop run --max-iter 5 --strict    # bounded run, craft warnings = fail
-hew loop run --budget-tokens 200000   # cap cumulative tokens
-hew loop run --budget-wall 30m        # cap wall clock
-hew loop run --runtime=codex          # drive codex-cli instead of claude
-hew loop run --fallback-runtime=codex # swap to codex on primary RuntimeError
+hew loop run --scope=ready --dry-run --max-iter 1   # smoke: prompt-assemble, no spawn
+hew loop run --scope=ready --until-empty            # drain the ready queue (default on)
+hew loop run --scope=epics --epics=hew-6az          # only tasks under one epic
+hew loop run --scope=ready --max-iter 5 --strict    # bounded run, craft warnings = fail
+hew loop run --scope=ready --budget-tokens 200000   # cap cumulative tokens
+hew loop run --scope=ready --budget-wall 30m        # cap wall clock
+hew loop run --scope=ready --runtime=codex          # drive codex-cli instead of claude
+hew loop run --scope=ready --fallback-runtime=codex # swap to codex on primary RuntimeError
 
 hew loop list                         # recent runs + state
 hew loop logs --tail 5                # last 5 iters of latest run
@@ -38,6 +39,13 @@ cache hits; `prompt_prefix_hash` in the iter log lets you verify that.
 `--fallback-runtime` is primary-sticky with a configurable cooldown
 (`--fallback-cooldown-iters`, default 3); see `docs/LOOP.md` for the
 full state machine.
+
+**Scope is required.** Every `hew loop run` invocation declares which
+slice of `bd ready` it consumes — `--scope=ready` for the whole queue,
+or `--scope=epics --epics=<csv>` for tasks transitively under one or
+more epics. Interactive runs get a picker; agent-driven runs that omit
+the flag exit with `MissingFlag { flag: "scope" }`. See `docs/LOOP.md`
+§ Scope.
 
 For the full design + the 10 locked decisions behind the loop, see
 `docs/LOOP.md` and the `hew-gr1` epic.

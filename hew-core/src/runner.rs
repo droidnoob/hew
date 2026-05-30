@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::config::LoopModelConfig;
 use crate::runtime::{RuntimeSpawner, SpawnFailureClass};
+use crate::scope::Scope;
 
 /// Per-run configuration. Set once at `hew loop` invocation, immutable
 /// for the duration of the run.
@@ -36,6 +37,11 @@ pub struct RunConfig {
     /// `-m` override for each iter. Empty by default (no overrides;
     /// the spawner falls back to its own default).
     pub loop_model: LoopModelConfig,
+    /// Which slice of bd-ready tasks this run is scoped to.
+    /// [`Scope::Ready`] is the pre-scope default — every bd-ready
+    /// task counts. The CLI / picker layer resolves this once at run
+    /// start; the dispatcher reads it through `Dispatcher::new`.
+    pub scope: Scope,
 }
 
 impl Default for RunConfig {
@@ -49,6 +55,7 @@ impl Default for RunConfig {
             interactive: false,
             unattended: false,
             loop_model: LoopModelConfig::default(),
+            scope: Scope::default(),
         }
     }
 }
@@ -331,6 +338,11 @@ mod tests {
         assert!(c.strict);
         assert!(c.stop_on_ready_empty);
         assert!(!c.interactive);
+    }
+
+    #[test]
+    fn run_config_default_scope_is_ready() {
+        assert_eq!(cfg().scope, Scope::Ready);
     }
 
     #[test]

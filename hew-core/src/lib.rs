@@ -37,6 +37,7 @@ pub mod prompt;
 pub mod review;
 pub mod runner;
 pub mod runtime;
+pub mod scope;
 pub mod skills;
 pub mod slash;
 pub mod stacks;

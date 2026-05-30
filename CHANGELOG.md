@@ -8,6 +8,20 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`hew loop run --scope={ready|epics}` — scoped run queue
+  (`hew-b3yl`).** Operators (and calling agents) now declare which
+  slice of `bd ready` counts as the queue for a run: `--scope=ready`
+  (everything ready — current behavior) or
+  `--scope=epics --epics=<csv>` (only tasks transitively under the
+  listed epics). The dispatcher resolves descendants once at startup
+  and filters every tick against that set. Interactive runs get a
+  picker; non-interactive runs without `--scope` fail with
+  `HewError::MissingFlag { flag: "scope" }` so an agent-driven loop
+  never accidentally consumes the rest of the graph. `run.json` gains
+  a `scope` field; legacy runs without it load as `None` and
+  `hew loop summary` renders them as `scope: ready (legacy)`. End-of-
+  run summary now carries a `scope:` line between `outcomes` and
+  `tokens`. See `docs/LOOP.md` § Scope.
 - **`hew loop --jobs N` — parallel worker slots via per-worker git
   worktrees.** Default `1` keeps today's single-threaded loop
   byte-for-byte (no worktree, no merge-back, no manifest). `N >= 2`

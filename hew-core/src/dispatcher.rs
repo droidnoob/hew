@@ -22,6 +22,7 @@ use crate::bd::{BdClient, ReadyTask};
 use crate::error::Result;
 use crate::git::GitClient;
 use crate::merge_back::{self, MergeReport};
+use crate::scope::{self, Scope};
 use crate::tasks;
 
 /// State of a single worker slot.
@@ -73,13 +74,34 @@ pub struct Dispatcher {
     slots: Vec<SlotState>,
     run_id: String,
     base_sha: String,
+    scope: Scope,
 }
 
 impl Dispatcher {
     /// `jobs` is clamped to a minimum of 1 (zero workers is meaningless).
-    pub fn new(jobs: u32, run_id: impl Into<String>, base_sha: impl Into<String>) -> Self {
+    ///
+    /// `scope` decides which bd-ready tasks count as the queue. For the
+    /// pre-scope behavior (every bd-ready task) pass [`Scope::Ready`].
+    /// For epic-scoped runs the descendant set is recomputed inside
+    /// [`Self::dispatch_tick`] on every tick, so children added to a
+    /// selected epic mid-run get picked up automatically.
+    pub fn new(
+        jobs: u32,
+        run_id: impl Into<String>,
+        base_sha: impl Into<String>,
+        scope: Scope,
+    ) -> Self {
         let n = (jobs.max(1)) as usize;
-        Self { slots: vec![SlotState::Idle; n], run_id: run_id.into(), base_sha: base_sha.into() }
+        Self {
+            slots: vec![SlotState::Idle; n],
+            run_id: run_id.into(),
+            base_sha: base_sha.into(),
+            scope,
+        }
+    }
+
+    pub fn scope(&self) -> &Scope {
+        &self.scope
     }
 
     pub fn jobs(&self) -> u32 {
@@ -135,6 +157,18 @@ impl Dispatcher {
             return Ok(DispatchTick::default());
         }
         let ready = bd.ready()?;
+
+        // Apply the run's scope filter to the raw ready list. For
+        // `Scope::Epics` we re-resolve the descendant set each tick so
+        // children added to a selected epic mid-run get picked up; for
+        // `Scope::Ready` the set is irrelevant and we skip the walk.
+        let descendant_set: HashSet<String> = match &self.scope {
+            Scope::Ready => HashSet::new(),
+            Scope::Epics { epic_ids } => scope::resolve_descendants(bd, epic_ids)?,
+        };
+        let ready: Vec<ReadyTask> =
+            ready.into_iter().filter(|t| self.scope.includes(&t.id, &descendant_set)).collect();
+
         let mut tick = DispatchTick { ready_seen: ready.len(), ..Default::default() };
         if ready.is_empty() {
             return Ok(tick);
@@ -226,6 +260,9 @@ mod tests {
         /// against another agent). Failure is one-shot per id —
         /// removed after the first attempt.
         claim_fails: RefCell<StdHashSet<String>>,
+        /// `parent_id → [child_id, …]` for `bd children <id> --json`
+        /// responses. Used by the `Scope::Epics` filter tests.
+        children: RefCell<BTreeMap<String, Vec<String>>>,
     }
 
     impl MockBd {
@@ -239,6 +276,17 @@ mod tests {
 
         fn claimed(&self) -> Vec<String> {
             self.claimed.borrow().clone()
+        }
+
+        fn with_children(self, parent: &str, ids: &[&str]) -> Self {
+            self.children
+                .borrow_mut()
+                .insert(parent.to_string(), ids.iter().map(|s| s.to_string()).collect());
+            self
+        }
+
+        fn add_child(&self, parent: &str, id: &str) {
+            self.children.borrow_mut().entry(parent.to_string()).or_default().push(id.to_string());
         }
     }
 
@@ -282,6 +330,24 @@ mod tests {
                 self.claimed.borrow_mut().push(id);
                 return Ok(BdOutput { stdout: String::new(), stderr: String::new() });
             }
+            // tasks::children → ["children", <id>, "--json"]
+            if args.len() == 3
+                && args[0] == OsStr::new("children")
+                && args[2] == OsStr::new("--json")
+            {
+                let parent = args[1].to_string_lossy().to_string();
+                let kids = self.children.borrow().get(&parent).cloned().unwrap_or_default();
+                let body = kids
+                    .iter()
+                    .map(|id| {
+                        format!(
+                            r#"{{"id":"{id}","title":"t-{id}","description":"","status":"open","priority":2,"issue_type":"task","closed_at":"","close_reason":null,"parent":"{parent}"}}"#
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                return Ok(BdOutput { stdout: format!("[{body}]"), stderr: String::new() });
+            }
             Ok(BdOutput { stdout: String::new(), stderr: String::new() })
         }
     }
@@ -300,7 +366,7 @@ mod tests {
 
     #[test]
     fn new_clamps_jobs_to_at_least_one() {
-        let d = Dispatcher::new(0, "run-x", "deadbeef");
+        let d = Dispatcher::new(0, "run-x", "deadbeef", Scope::Ready);
         assert_eq!(d.jobs(), 1);
         assert_eq!(d.slots().len(), 1);
         assert!(d.all_idle());
@@ -313,7 +379,7 @@ mod tests {
         // Regression for acceptance: N=1 picks the first ready task and
         // stops — identical to today's serial loop.
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
-        let mut d = Dispatcher::new(1, "run-1", "sha");
+        let mut d = Dispatcher::new(1, "run-1", "sha", Scope::Ready);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.assignments.len(), 1, "exactly one slot filled");
         assert_eq!(tick.assignments[0].slot_id, 0);
@@ -327,7 +393,7 @@ mod tests {
     #[test]
     fn dispatcher_fills_all_slots_when_ready_has_enough() {
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c"), ready("hew-d")]);
-        let mut d = Dispatcher::new(3, "run-2", "sha");
+        let mut d = Dispatcher::new(3, "run-2", "sha", Scope::Ready);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert_eq!(tick.assignments.len(), 3, "all 3 slots filled");
         let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
@@ -342,7 +408,7 @@ mod tests {
     #[test]
     fn dispatcher_skips_assignment_when_ready_empty() {
         let bd = MockBd::new(vec![]);
-        let mut d = Dispatcher::new(2, "run-3", "sha");
+        let mut d = Dispatcher::new(2, "run-3", "sha", Scope::Ready);
         let tick = d.dispatch_tick(&bd).expect("tick");
         assert!(tick.assignments.is_empty());
         assert_eq!(tick.ready_seen, 0);
@@ -354,7 +420,7 @@ mod tests {
     fn dispatcher_does_nothing_when_all_slots_busy() {
         // No `bd ready` should even be called when capacity = 0.
         let bd = MockBd::new(vec![ready("hew-z")]);
-        let mut d = Dispatcher::new(1, "run-4", "sha");
+        let mut d = Dispatcher::new(1, "run-4", "sha", Scope::Ready);
         d.dispatch_tick(&bd).expect("first tick");
         // Second tick: slot is full.
         let tick = d.dispatch_tick(&bd).expect("second tick");
@@ -370,7 +436,7 @@ mod tests {
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b")]);
         bd.fail_claim("hew-a");
 
-        let mut d = Dispatcher::new(1, "run-5", "sha");
+        let mut d = Dispatcher::new(1, "run-5", "sha", Scope::Ready);
         let tick = d.dispatch_tick(&bd).expect("tick");
 
         assert_eq!(tick.claim_failures.len(), 1);
@@ -388,7 +454,7 @@ mod tests {
         // returned the task to two `ready` queries before either
         // claim landed. Dispatcher must not double-assign.
         let bd = MockBd::new(vec![ready("hew-a")]);
-        let mut d = Dispatcher::new(2, "run-6", "sha");
+        let mut d = Dispatcher::new(2, "run-6", "sha", Scope::Ready);
         let tick1 = d.dispatch_tick(&bd).expect("first tick");
         assert_eq!(tick1.assignments.len(), 1);
         assert_eq!(tick1.assignments[0].task.id, "hew-a");
@@ -404,7 +470,7 @@ mod tests {
     #[test]
     fn complete_returns_running_task_id_and_idles_slot() {
         let bd = MockBd::new(vec![ready("hew-a")]);
-        let mut d = Dispatcher::new(1, "run-7", "sha");
+        let mut d = Dispatcher::new(1, "run-7", "sha", Scope::Ready);
         d.dispatch_tick(&bd).expect("tick");
         assert_eq!(d.complete(0), Some("hew-a".into()));
         assert!(d.all_idle());
@@ -421,7 +487,7 @@ mod tests {
         // calls when its iter body returns. Two workers run, both
         // complete in turn, capacity restores.
         let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
-        let mut d = Dispatcher::new(2, "run-8", "sha");
+        let mut d = Dispatcher::new(2, "run-8", "sha", Scope::Ready);
 
         let t1 = d.dispatch_tick(&bd).expect("tick 1");
         assert_eq!(t1.assignments.len(), 2);
@@ -440,5 +506,82 @@ mod tests {
         assert_eq!(d.complete(0), Some("hew-a".into()));
         assert_eq!(d.complete(1), Some("hew-c".into()));
         assert!(d.all_idle());
+    }
+
+    // ── Scope filter coverage ───────────────────────────────────────
+
+    #[test]
+    fn dispatch_tick_ready_scope_unfiltered() {
+        // Scope::Ready must surface every bd-ready task — no descendant
+        // walk, no filtering.
+        let bd = MockBd::new(vec![ready("hew-a"), ready("hew-b"), ready("hew-c")]);
+        let mut d = Dispatcher::new(3, "run-scope-ready", "sha", Scope::Ready);
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 3);
+        let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
+        assert_eq!(ids, vec!["hew-a", "hew-b", "hew-c"]);
+    }
+
+    #[test]
+    fn dispatch_tick_epics_scope_filters_to_descendants() {
+        // Two epics in the graph, only one is selected. Unrelated tasks
+        // are filtered out before slot assignment, and ready_seen
+        // counts the filtered set.
+        let bd =
+            MockBd::new(vec![ready("hew-child-1"), ready("hew-stranger"), ready("hew-child-2")])
+                .with_children("hew-epic-a", &["hew-child-1", "hew-child-2"])
+                .with_children("hew-epic-b", &["hew-stranger"])
+                .with_children("hew-child-1", &[])
+                .with_children("hew-child-2", &[])
+                .with_children("hew-stranger", &[]);
+        let scope = Scope::Epics { epic_ids: vec!["hew-epic-a".into()] };
+        let mut d = Dispatcher::new(3, "run-scope-epic", "sha", scope);
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 2, "stranger filtered out");
+        let ids: Vec<&str> = tick.assignments.iter().map(|a| a.task.id.as_str()).collect();
+        assert_eq!(ids, vec!["hew-child-1", "hew-child-2"]);
+        assert_eq!(bd.claimed(), vec!["hew-child-1", "hew-child-2"]);
+    }
+
+    #[test]
+    fn dispatch_tick_epics_scope_empty_when_no_match() {
+        // Selected epic has no descendants in the ready set. Nothing
+        // assigned, no claim attempted, ready_seen reports the filtered
+        // zero so callers see "queue drained" for this scope.
+        let bd = MockBd::new(vec![ready("hew-stranger"), ready("hew-other")])
+            .with_children("hew-epic-empty", &[]);
+        let scope = Scope::Epics { epic_ids: vec!["hew-epic-empty".into()] };
+        let mut d = Dispatcher::new(2, "run-scope-empty", "sha", scope);
+        let tick = d.dispatch_tick(&bd).expect("tick");
+        assert_eq!(tick.ready_seen, 0);
+        assert!(tick.assignments.is_empty());
+        assert!(bd.claimed().is_empty());
+        assert!(d.all_idle());
+    }
+
+    #[test]
+    fn dispatch_tick_epics_recomputes_descendants_each_tick() {
+        // Mid-run a new child is added to the selected epic. The next
+        // dispatch_tick must re-walk descendants and pick it up
+        // without a Dispatcher rebuild — the cache is per-tick by
+        // design.
+        let bd = MockBd::new(vec![ready("hew-child-1")])
+            .with_children("hew-epic-live", &["hew-child-1"])
+            .with_children("hew-child-1", &[]);
+        let scope = Scope::Epics { epic_ids: vec!["hew-epic-live".into()] };
+        let mut d = Dispatcher::new(2, "run-scope-live", "sha", scope);
+
+        let t1 = d.dispatch_tick(&bd).expect("first tick");
+        assert_eq!(t1.assignments.len(), 1);
+        assert_eq!(t1.assignments[0].task.id, "hew-child-1");
+
+        // New child added to the live epic + becomes ready.
+        bd.add_child("hew-epic-live", "hew-child-2");
+        bd.ready.borrow_mut().push(ready("hew-child-2"));
+
+        let t2 = d.dispatch_tick(&bd).expect("second tick");
+        assert_eq!(t2.ready_seen, 1, "newly-added child seen after recompute");
+        assert_eq!(t2.assignments.len(), 1);
+        assert_eq!(t2.assignments[0].task.id, "hew-child-2");
     }
 }
