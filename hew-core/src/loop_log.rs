@@ -305,6 +305,86 @@ pub fn write_manifest(run_dir: &Path, manifest: &Manifest) -> Result<()> {
     write_json_atomic(&manifest_path(run_dir), manifest)
 }
 
+/// Classification of a `<run-dir>` for `hew loop summary`. Lets the
+/// command branch cleanly between the completed-run path (read
+/// `run.json`) and the various in-flight states that all manifest as
+/// "no `run.json` yet" — the case that used to surface the raw
+/// `No such file or directory` error.
+///
+/// Detection rules (in order):
+///
+/// 1. `manifest.json` at root → [`Completed`] (parallel shutdown wrote
+///    it). The top-level `run.json` may or may not exist; the manifest
+///    is the source of truth for the aggregate view.
+/// 2. `run.json` at root → [`Completed`] (serial path; also written
+///    after every iter, so this catches "iter 1 finished, no stop
+///    yet").
+/// 3. One or more `worker-<n>/` subdirs → [`ParallelInFlight`]. The
+///    dispatcher mkdir's these before iter 1 starts, so they signal a
+///    parallel run that hasn't reached shutdown yet (no manifest).
+/// 4. One or more `iter-NNN.json` at root → [`SerialIterLogsOnly`]
+///    (rare race: an iter completed but the follow-up `run.json` write
+///    raced or was killed mid-write).
+/// 5. Otherwise → [`EmptyStart`] (run-dir exists, dispatcher just laid
+///    it down, iter 1 hasn't finished).
+///
+/// [`Completed`]: RunDirState::Completed
+/// [`ParallelInFlight`]: RunDirState::ParallelInFlight
+/// [`SerialIterLogsOnly`]: RunDirState::SerialIterLogsOnly
+/// [`EmptyStart`]: RunDirState::EmptyStart
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunDirState {
+    /// `run.json` or `manifest.json` is on disk — defer to today's
+    /// completed-run summary code path.
+    Completed,
+    /// `worker-<n>/` subdirs exist but no top-level `manifest.json`.
+    /// `worker_count` is the number of slots the dispatcher claimed.
+    ParallelInFlight { worker_count: u32 },
+    /// `iter-NNN.json` present at the run-dir root but no `run.json` —
+    /// either iter 1 just finished and run.json hasn't been written, or
+    /// it was lost. `iter_count` is the number of iter logs found.
+    SerialIterLogsOnly { iter_count: u32 },
+    /// Run-dir is empty of any state — iter 1 hasn't completed yet.
+    EmptyStart,
+}
+
+/// Inspect `run_dir` and classify its state. Caller is expected to have
+/// verified `run_dir.exists()` first; this function does not distinguish
+/// "missing dir" from "empty dir" — both look like [`EmptyStart`].
+pub fn inspect_run_dir(run_dir: &Path) -> RunDirState {
+    if manifest_path(run_dir).exists() || run_log_path(run_dir, None).exists() {
+        return RunDirState::Completed;
+    }
+    let mut worker_count: u32 = 0;
+    let mut iter_count: u32 = 0;
+    if let Ok(it) = fs::read_dir(run_dir) {
+        for entry in it.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            if path.is_dir() && name.starts_with("worker-") {
+                worker_count += 1;
+            } else if path.is_file() && name.starts_with("iter-") && name.ends_with(".json") {
+                iter_count += 1;
+            }
+        }
+    }
+    if worker_count > 0 {
+        return RunDirState::ParallelInFlight { worker_count };
+    }
+    if iter_count > 0 {
+        return RunDirState::SerialIterLogsOnly { iter_count };
+    }
+    RunDirState::EmptyStart
+}
+
+/// Best-effort "when did this run start" timestamp, sourced from the
+/// run-dir's mtime. Returned as a `SystemTime` so callers can format
+/// against `SystemTime::now()` for a relative-age string. Returns
+/// `None` if the dir's metadata isn't readable.
+pub fn run_dir_started_at(run_dir: &Path) -> Option<SystemTime> {
+    fs::metadata(run_dir).and_then(|m| m.modified()).ok()
+}
+
 /// Run-ids under `loop_root` (`<project>/.hew/loop/`) whose `run.json`
 /// reports no `stop_reason` yet — i.e. the run never reached a clean
 /// shutdown.
@@ -759,6 +839,78 @@ mod tests {
         assert_eq!(log.scope, Some(Scope::Ready));
         let json = serde_json::to_string(&log).unwrap();
         assert!(json.contains("\"scope\""));
+    }
+
+    #[test]
+    fn inspect_run_dir_returns_empty_start_when_dir_is_bare() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-bare").unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::EmptyStart);
+    }
+
+    #[test]
+    fn inspect_run_dir_returns_completed_when_run_json_present() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-done").unwrap();
+        let run = Run::new("loop-done", "2026-05-30T00:00:00Z", RunConfig::default());
+        write_json_atomic(&run_log_path(&dir, None), &RunLog::from_run(&run)).unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::Completed);
+    }
+
+    #[test]
+    fn inspect_run_dir_returns_completed_when_manifest_present() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-mf").unwrap();
+        let manifest = Manifest {
+            run_id: "loop-mf".into(),
+            jobs: 1,
+            started_at: "t0".into(),
+            completed_at: "t1".into(),
+            workers: vec![],
+        };
+        write_manifest(&dir, &manifest).unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::Completed);
+    }
+
+    #[test]
+    fn inspect_run_dir_returns_parallel_in_flight_for_worker_subdirs() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-par").unwrap();
+        ensure_worker_dir(&dir, 0).unwrap();
+        ensure_worker_dir(&dir, 1).unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::ParallelInFlight { worker_count: 2 });
+    }
+
+    #[test]
+    fn inspect_run_dir_returns_iter_logs_only_when_iters_present_without_run_json() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-iters").unwrap();
+        let it = Iter::new(1, "2026-05-30T00:00:00Z");
+        let log = IterLog::from_iter(&it, None, Vec::new(), Vec::new());
+        write_json_atomic(&iter_log_path(&dir, None, 1), &log).unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::SerialIterLogsOnly { iter_count: 1 });
+    }
+
+    #[test]
+    fn inspect_run_dir_prefers_completed_over_iter_logs() {
+        // Real serial run: run.json + iter-NNN.json coexist. Completed wins.
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-mix").unwrap();
+        let run = Run::new("loop-mix", "t0", RunConfig::default());
+        write_json_atomic(&run_log_path(&dir, None), &RunLog::from_run(&run)).unwrap();
+        let it = Iter::new(1, "t0");
+        let log = IterLog::from_iter(&it, None, Vec::new(), Vec::new());
+        write_json_atomic(&iter_log_path(&dir, None, 1), &log).unwrap();
+        assert_eq!(inspect_run_dir(&dir), RunDirState::Completed);
+    }
+
+    #[test]
+    fn run_dir_started_at_returns_modified_time() {
+        let root = tmpdir();
+        let dir = run_dir(&root, "loop-mtime").unwrap();
+        let t = run_dir_started_at(&dir).expect("mtime readable");
+        // Sanity check: mtime is no later than now.
+        assert!(t <= SystemTime::now());
     }
 
     #[test]

@@ -2027,6 +2027,14 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
         return run_summary_parallel(ctx, &dir, &manifest_path);
     }
 
+    // No manifest. Branch on what we have on disk: a real run.json
+    // (today's path), or one of the in-flight states (degraded view
+    // instead of a raw ENOENT on `read run.json`).
+    let state = hew_core::loop_log::inspect_run_dir(&dir);
+    if !matches!(state, hew_core::loop_log::RunDirState::Completed) {
+        return render_in_flight_summary(ctx, &dir, &run_id, &state);
+    }
+
     // Load the persisted run header for id + stop reason.
     let rl_body = std::fs::read_to_string(run_log_path(&dir, None))
         .map_err(|e| miette::miette!("read run.json: {e}"))?;
@@ -2070,6 +2078,45 @@ fn collect_worker_iter_logs(run_dir: &Path, worker_n: u32) -> Vec<IterLog> {
         return Vec::new();
     }
     collect_iter_logs(&dir).unwrap_or_default()
+}
+
+/// Render a degraded summary for an in-flight run (no `run.json` yet).
+/// Branches on the run-dir's classification so the operator sees a
+/// useful state report instead of the raw "No such file or directory"
+/// that surfaced before. Always returns `Ok(())` — an in-flight run is
+/// not a failure.
+fn render_in_flight_summary(
+    ctx: &Ctx,
+    dir: &Path,
+    run_id: &str,
+    state: &hew_core::loop_log::RunDirState,
+) -> miette::Result<()> {
+    if ctx.quiet {
+        return Ok(());
+    }
+    let started = hew_core::loop_log::run_dir_started_at(dir);
+    let age_secs = started
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs() as i64);
+    let worker_count = match state {
+        hew_core::loop_log::RunDirState::ParallelInFlight { worker_count } => Some(*worker_count),
+        _ => None,
+    };
+    // Pull whatever iter logs may have landed (the SerialIterLogsOnly
+    // case races run.json — every other state has none). Empty vec on
+    // any read error so the in-flight view still renders.
+    let iter_logs = collect_iter_logs(dir).unwrap_or_default();
+    let logs_path = dir.display().to_string();
+    let in_flight = hew_core::loop_summary::InFlight {
+        run_id,
+        age_secs,
+        worker_count,
+        iter_logs: &iter_logs,
+        logs_path: &logs_path,
+    };
+    let colorize = std::env::var_os("NO_COLOR").is_none();
+    print!("{}", hew_core::loop_summary::render_in_flight(&in_flight, colorize));
+    Ok(())
 }
 
 fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::Result<()> {

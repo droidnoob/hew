@@ -511,6 +511,86 @@ pub fn render_parallel_breakdown(slices: &[WorkerSlice], colorize: bool) -> Stri
     s
 }
 
+/// Inputs the in-flight renderer needs. All fields are best-effort:
+/// the run is by definition mid-flight so most of the post-run state
+/// (stop reason, totals, manifest aggregate) doesn't yet exist on
+/// disk. The renderer prints whatever's available and elides the rest.
+#[derive(Clone, Debug)]
+pub struct InFlight<'a> {
+    pub run_id: &'a str,
+    /// Wall-clock seconds since the run-dir was created (mtime). The
+    /// caller derives this from `loop_log::run_dir_started_at` so the
+    /// renderer stays pure.
+    pub age_secs: Option<i64>,
+    /// `Some(n)` for a parallel run with `n` worker subdirs already on
+    /// disk; `None` for the serial path.
+    pub worker_count: Option<u32>,
+    /// Iter logs already on disk (typically empty in the early-iter-0
+    /// case; non-empty when an iter completed but `run.json` is
+    /// missing). Order is iter-number ascending.
+    pub iter_logs: &'a [IterLog],
+    /// Absolute or relative `<run-dir>` path to surface to the operator.
+    pub logs_path: &'a str,
+}
+
+/// Render a degraded summary for a run that has no `run.json` yet.
+/// Mirrors [`render`]'s banner + bullet style so the operator can read
+/// either output without context-switching.
+pub fn render_in_flight(in_flight: &InFlight<'_>, colorize: bool) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let mag = if colorize { "\x1b[1;35m" } else { "" };
+    let dim = if colorize { "\x1b[2m" } else { "" };
+    let bold = if colorize { "\x1b[1m" } else { "" };
+    let yellow = if colorize { "\x1b[33m" } else { "" };
+    let reset = if colorize { "\x1b[0m" } else { "" };
+
+    let _ = writeln!(s, "{mag} | |_   ___  __ __ __{reset}");
+    let _ = writeln!(s, "{mag} | ' \\ / -_) \\ V  V / {reset}{dim}loop summary (in flight){reset}");
+    let _ = writeln!(s, "{mag} |_||_|\\___|  \\_/\\_/{reset}");
+    let _ = writeln!(s);
+
+    let age = in_flight.age_secs.map(format_duration).unwrap_or_else(|| "?".into());
+    let iter_count = in_flight.iter_logs.len() as u32;
+    let next_iter = iter_count + 1;
+    let header = match in_flight.worker_count {
+        Some(n) if n >= 2 => {
+            format!("iter {next_iter} in flight across {n} workers {dim}(started {age} ago){reset}")
+        }
+        _ => format!(
+            "iter {next_iter} in flight {dim}(started {age} ago, {iter_count} completed iter{}){reset}",
+            if iter_count == 1 { "" } else { "s" },
+        ),
+    };
+    let _ = writeln!(s, "  {bold}run-id{reset}:    {} {yellow}{header}{reset}", in_flight.run_id);
+
+    if let Some(n) = in_flight.worker_count {
+        let workers: Vec<String> = (0..n).map(|i| format!("worker-{i} (running)")).collect();
+        let _ = writeln!(s, "  {bold}workers{reset}:   {}", workers.join(", "));
+        let _ = writeln!(s, "  {bold}jobs{reset}:      {n}");
+    } else {
+        let _ = writeln!(s, "  {bold}jobs{reset}:      1");
+    }
+
+    if !in_flight.iter_logs.is_empty() {
+        let total: u64 = in_flight.iter_logs.iter().map(|l| l.cost.total()).sum();
+        let _ = writeln!(
+            s,
+            "  {bold}partial{reset}:   {} token{} across {iter_count} iter{}",
+            fmt_int(total),
+            if total == 1 { "" } else { "s" },
+            if iter_count == 1 { "" } else { "s" },
+        );
+    }
+
+    let _ = writeln!(s, "  {bold}logs{reset}:      {}", in_flight.logs_path);
+    let _ = writeln!(
+        s,
+        "  {dim}note{reset}:      run.json not yet written — re-run `hew loop summary` after iter 1 completes",
+    );
+    s
+}
+
 /// 8-block Unicode sparkline scaled to the max value in the slice.
 /// Empty slice → empty string. All-zero slice → all-`▁`.
 fn sparkline(values: &[u64]) -> String {
@@ -1130,6 +1210,75 @@ mod tests {
         assert!(txt.contains("verify:"));
         assert!(txt.contains("skipped"));
         assert!(txt.contains("no command resolved"));
+    }
+
+    #[test]
+    fn render_in_flight_serial_empty_start() {
+        let in_flight = InFlight {
+            run_id: "loop-x",
+            age_secs: Some(78),
+            worker_count: None,
+            iter_logs: &[],
+            logs_path: "/p/.hew/loop/loop-x",
+        };
+        let txt = render_in_flight(&in_flight, false);
+        assert!(txt.contains("loop-x"), "must include run-id: {txt}");
+        assert!(txt.contains("in flight"), "must say in flight: {txt}");
+        assert!(txt.contains("1m 18s"), "must format age: {txt}");
+        assert!(txt.contains("0 completed iters"), "must report no iters: {txt}");
+        assert!(txt.contains("jobs:      1"), "must say jobs=1: {txt}");
+        assert!(txt.contains("/p/.hew/loop/loop-x"), "must surface logs path: {txt}");
+        assert!(!txt.contains("No such file"), "must not leak ENOENT: {txt}");
+    }
+
+    #[test]
+    fn render_in_flight_parallel_lists_workers() {
+        let in_flight = InFlight {
+            run_id: "loop-par",
+            age_secs: Some(32),
+            worker_count: Some(2),
+            iter_logs: &[],
+            logs_path: "/p/.hew/loop/loop-par",
+        };
+        let txt = render_in_flight(&in_flight, false);
+        assert!(txt.contains("across 2 workers"), "header mentions worker count: {txt}");
+        assert!(txt.contains("worker-0 (running)"), "lists worker-0: {txt}");
+        assert!(txt.contains("worker-1 (running)"), "lists worker-1: {txt}");
+        assert!(txt.contains("jobs:      2"));
+    }
+
+    #[test]
+    fn render_in_flight_with_partial_iters_shows_tokens() {
+        let logs = vec![iter_log(
+            1,
+            "closed",
+            Some("h1"),
+            TokenSpend { input: 100, output: 50, cache_read: 0, cache_create: 0 },
+        )];
+        let in_flight = InFlight {
+            run_id: "loop-mix",
+            age_secs: Some(10),
+            worker_count: None,
+            iter_logs: &logs,
+            logs_path: "/p",
+        };
+        let txt = render_in_flight(&in_flight, false);
+        assert!(txt.contains("partial:"), "must include partial line: {txt}");
+        assert!(txt.contains("150 token"), "must total per-iter tokens: {txt}");
+        assert!(txt.contains("1 completed iter"), "must report completed count: {txt}");
+    }
+
+    #[test]
+    fn render_in_flight_strips_ansi_when_colorize_false() {
+        let in_flight = InFlight {
+            run_id: "loop-x",
+            age_secs: Some(5),
+            worker_count: None,
+            iter_logs: &[],
+            logs_path: "/p",
+        };
+        let txt = render_in_flight(&in_flight, false);
+        assert!(!txt.contains('\x1b'), "no ANSI escapes when colorize=false: {txt:?}");
     }
 
     #[test]
