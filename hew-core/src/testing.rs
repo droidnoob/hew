@@ -10,6 +10,51 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::time::Duration;
+
+/// Retry `f` on `ETXTBSY` ("Text file busy") — the canonical call-site
+/// wrapper for test code that exec's a freshly-installed stub.
+///
+/// Production code goes through [`crate::process::spawn_with_etxtbsy_retry`]
+/// at the `Command::spawn` boundary. Tests that exec stubs via
+/// `Command::new(...).output()` / `.status()` skip that path, so they
+/// need their own retry wrapper — even after
+/// [`install_executable_stub`]'s atomic-rename + dir fsync, the Linux
+/// kernel can briefly report `ExecutableFileBusy` at the exec syscall
+/// when a sibling test thread's writer fd to a similar inode has just
+/// closed.
+///
+/// Five attempts with exponential backoff (5, 10, 20, 40, 80ms ≈ 155ms
+/// worst-case wall clock). Mirrors the production retry shape in
+/// [`crate::process::spawn_with_etxtbsy_retry`].
+///
+/// Errors other than `ErrorKind::ExecutableFileBusy` propagate
+/// immediately — this helper exists to absorb the kernel race, not to
+/// paper over real failures.
+///
+/// ```ignore
+/// use std::process::Command;
+/// use hew_core::testing::{install_executable_stub, retry_etxtbsy};
+/// install_executable_stub(dir, "bd", "#!/bin/sh\necho hi\n").unwrap();
+/// let out = retry_etxtbsy(|| Command::new(dir.join("bd")).output()).unwrap();
+/// ```
+pub fn retry_etxtbsy<T, F>(mut f: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut delay_ms = 5u64;
+    for _ in 0..5 {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                delay_ms *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    f()
+}
 
 /// Install an executable stub script at `<dir>/<name>` in an
 /// ETXTBSY-safe way.
@@ -32,7 +77,11 @@ use std::path::Path;
 ///    so no one ever observes the file partially written or with the
 ///    wrong mode.
 ///
-/// Callers can immediately spawn `<dir>/<name>` afterward.
+/// Callers can immediately spawn `<dir>/<name>` afterward — but if
+/// they exec via `Command::new(...).output()` (not via
+/// [`crate::process::spawn_with_etxtbsy_retry`]), they should wrap the
+/// call in [`retry_etxtbsy`] so a kernel-side `ExecutableFileBusy`
+/// race doesn't turn into a flaky panic.
 pub fn install_executable_stub(dir: &Path, name: &str, body: &str) -> io::Result<()> {
     // PID + a per-call counter + monotonic nanos buys a unique temp
     // path even when multiple test threads write the same stub in
@@ -85,6 +134,7 @@ pub fn install_executable_stub(dir: &Path, name: &str, body: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::process::Command;
 
     #[test]
@@ -92,7 +142,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         install_executable_stub(tmp.path(), "echo-hi", "#!/bin/sh\necho hi\n").unwrap();
 
-        let out = Command::new(tmp.path().join("echo-hi")).output().unwrap();
+        let stub = tmp.path().join("echo-hi");
+        let out = retry_etxtbsy(|| Command::new(&stub).output()).unwrap();
         assert!(out.status.success());
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
     }
@@ -102,7 +153,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         install_executable_stub(tmp.path(), "v", "#!/bin/sh\necho first\n").unwrap();
         install_executable_stub(tmp.path(), "v", "#!/bin/sh\necho second\n").unwrap();
-        let out = Command::new(tmp.path().join("v")).output().unwrap();
+        let stub = tmp.path().join("v");
+        let out = retry_etxtbsy(|| Command::new(&stub).output()).unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "second");
     }
 
@@ -116,5 +168,59 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["stub".to_string()], "leftover .tmp file in {names:?}");
+    }
+
+    fn etxtbsy_err() -> io::Error {
+        io::Error::from(io::ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn retry_etxtbsy_succeeds_on_first_call_when_no_busy() {
+        let calls = Cell::new(0u32);
+        let got = retry_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Ok::<_, io::Error>(42)
+        })
+        .unwrap();
+        assert_eq!(got, 42);
+        assert_eq!(calls.get(), 1, "happy path must not retry");
+    }
+
+    #[test]
+    fn retry_etxtbsy_eventually_succeeds_when_busy_clears() {
+        let calls = Cell::new(0u32);
+        let got = retry_etxtbsy(|| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n < 2 { Err(etxtbsy_err()) } else { Ok(7) }
+        })
+        .unwrap();
+        assert_eq!(got, 7);
+        assert_eq!(calls.get(), 3, "should retry past two ETXTBSY hits");
+    }
+
+    #[test]
+    fn retry_etxtbsy_propagates_other_io_errors() {
+        let calls = Cell::new(0u32);
+        let err = retry_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 1, "non-ETXTBSY errors must not retry");
+    }
+
+    #[test]
+    fn retry_etxtbsy_gives_up_after_attempts_with_last_etxtbsy() {
+        let calls = Cell::new(0u32);
+        let err = retry_etxtbsy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(etxtbsy_err())
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ExecutableFileBusy);
+        // 5 retries inside the loop + 1 final attempt = 6 total calls.
+        assert_eq!(calls.get(), 6, "must not loop forever");
     }
 }
