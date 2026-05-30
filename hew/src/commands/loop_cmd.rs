@@ -668,7 +668,14 @@ fn run_loop_parallel(
 
     // Construct the Dispatcher even under --dry-run so the "invokes
     // Dispatcher" acceptance holds across both paths.
-    let mut dispatcher = hew_core::dispatcher::Dispatcher::new(args.jobs, &run_id, &base_sha);
+    // Scope wiring lands in hew-ry5r (RunConfig.scope → Dispatcher); for now
+    // the loop runs against every bd-ready task, matching pre-scope behavior.
+    let mut dispatcher = hew_core::dispatcher::Dispatcher::new(
+        args.jobs,
+        &run_id,
+        &base_sha,
+        hew_core::scope::Scope::Ready,
+    );
 
     // v1 wiring: one tick to fill all slots, then drive each worker's
     // loop in a scoped thread. The dispatcher's slot-fill state machine
