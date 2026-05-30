@@ -39,7 +39,7 @@ use hew_core::runtime::{
     ClaudeSpawner, CodexSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner, SpawnFailureClass,
     SpawnOpts,
 };
-use hew_core::scope::Scope;
+use hew_core::scope::{self, Scope};
 use hew_core::stop_signals::Collector;
 use hew_core::tasks;
 use hew_core::time::iso_now_utc;
@@ -1491,7 +1491,25 @@ pub fn run_worker_loop_with_scope(
     let mut iter_logs: Vec<IterLog> = Vec::new();
 
     loop {
-        let ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+        let raw_ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+
+        // Apply the run's scope filter at the candidate-set boundary
+        // (hew-s9mb). The parallel `Dispatcher` enforces this in
+        // `dispatch_tick`; without the same filter here, the serial
+        // (`--jobs=1`) path would claim any bd-ready task — leaking
+        // outside the agent-explicit `--scope=epics --epics=<id>`
+        // contract. Re-resolve descendants every iter so children
+        // added to a selected epic mid-run get picked up, mirroring
+        // dispatcher behavior.
+        let ready: Vec<ReadyTask> = match &cfg.scope {
+            Scope::Ready => raw_ready,
+            Scope::Epics { epic_ids } => {
+                let set = scope::resolve_descendants(bd, epic_ids)
+                    .map_err(|e| miette::miette!("resolve epic descendants: {e}"))?;
+                raw_ready.into_iter().filter(|t| cfg.scope.includes(&t.id, &set)).collect()
+            }
+        };
+
         let signals = collector.snapshot(&run_state, ready.len() as u32, last_outcome);
         if let Some(reason) = signals.evaluate(&cfg) {
             run_state.stop_reason = Some(reason);
