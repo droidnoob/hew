@@ -362,7 +362,18 @@ fn io_other(e: impl std::fmt::Display) -> std::io::Error {
 }
 
 pub fn load() -> Result<Config> {
-    load_from(&config_path()?)
+    // `HEW_CONFIG` is the documented escape hatch for tests / scripts:
+    // it bypasses layering entirely and treats the named file as the
+    // sole config source.
+    if let Ok(p) = std::env::var("HEW_CONFIG") {
+        return load_from(&PathBuf::from(p));
+    }
+    use etcetera::BaseStrategy;
+    let strategy = etcetera::choose_base_strategy().map_err(|e| HewError::Io(io_other(e)))?;
+    let user_path = strategy.config_dir().join("hew").join("config.toml");
+    let cwd = std::env::current_dir().map_err(HewError::Io)?;
+    let project_path = discover_project_root(&cwd).and_then(|root| discover_project_config(&root));
+    load_layered(Some(&user_path), project_path.as_deref())
 }
 
 pub fn load_from(path: &Path) -> Result<Config> {
@@ -370,6 +381,152 @@ pub fn load_from(path: &Path) -> Result<Config> {
         Ok(s) => toml::from_str(&s).map_err(|e| HewError::Io(io_other(e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(HewError::Io(e)),
+    }
+}
+
+/// Read the user and project config files (each missing = empty
+/// [`Config`]) and merge them per the documented rules: project wins
+/// for scalars, `Option::or` for `Option<T>`, concat+dedupe for
+/// `Vec<T>`, recursive per-field merge for nested structs, and
+/// project-wins-on-collision for `BTreeMap`. Project-side absent fields
+/// still deserialize to `serde(default)` values — write project configs
+/// sparsely.
+pub fn load_layered(user: Option<&Path>, project: Option<&Path>) -> Result<Config> {
+    let mut merged = match user {
+        Some(p) if p.is_file() => load_from(p)?,
+        _ => Config::default(),
+    };
+    if let Some(p) = project
+        && p.is_file()
+    {
+        let project_cfg = load_from(p)?;
+        merged.merge(project_cfg);
+    }
+    Ok(merged)
+}
+
+impl Config {
+    /// Layer `other` (the project config) on top of `self` (the user
+    /// config) in place. See [`load_layered`] for the merge contract.
+    pub fn merge(&mut self, other: Config) {
+        // Bare scalars: project wins outright. Because we serde(default)
+        // every field, "absent in the project file" deserializes to the
+        // default value — so projects should be written sparsely or risk
+        // clobbering the user-level setting back to default.
+        self.update_check = other.update_check;
+        self.git_track = other.git_track;
+        // Option<T>: project None falls back to user's Some.
+        self.default_runtime = other.default_runtime.or_else(|| self.default_runtime.take());
+        self.default_scope = other.default_scope.or_else(|| self.default_scope.take());
+        // Nested structs: recurse per-field.
+        self.optional_skills.merge(other.optional_skills);
+        self.branching.merge(other.branching);
+        self.research.merge(other.research);
+        self.review.merge(other.review);
+        self.testing.merge(other.testing);
+        self.craft.merge(other.craft);
+        self.compact.merge(other.compact);
+        self.loop_cfg.merge(other.loop_cfg);
+    }
+}
+
+impl OptionalSkills {
+    pub fn merge(&mut self, other: OptionalSkills) {
+        self.deps = other.deps;
+        self.research = other.research;
+        self.security = other.security;
+    }
+}
+
+impl BranchingConfig {
+    pub fn merge(&mut self, other: BranchingConfig) {
+        self.strategy = other.strategy;
+    }
+}
+
+impl ResearchConfig {
+    pub fn merge(&mut self, other: ResearchConfig) {
+        self.default = other.default;
+    }
+}
+
+impl ReviewConfig {
+    pub fn merge(&mut self, other: ReviewConfig) {
+        self.after_n_tasks = other.after_n_tasks;
+        self.after_epic = other.after_epic;
+        self.batch_size = other.batch_size;
+    }
+}
+
+impl TestingConfig {
+    pub fn merge(&mut self, other: TestingConfig) {
+        self.require = other.require;
+    }
+}
+
+impl CraftConfig {
+    pub fn merge(&mut self, other: CraftConfig) {
+        self.max_function_lines = other.max_function_lines;
+        self.warn_on_unused = other.warn_on_unused;
+        self.symbol_trace = other.symbol_trace;
+    }
+}
+
+impl CompactConfig {
+    pub fn merge(&mut self, other: CompactConfig) {
+        self.dry_run_default = other.dry_run_default;
+        self.granularity_default = other.granularity_default;
+        self.target_clusters_cap = other.target_clusters_cap;
+        self.allow_recompact_default = other.allow_recompact_default;
+        merge_vec_dedup(&mut self.exempt, other.exempt);
+    }
+}
+
+impl LoopConfig {
+    pub fn merge(&mut self, other: LoopConfig) {
+        self.fallback_runtime = other.fallback_runtime.or_else(|| self.fallback_runtime.take());
+        self.fallback_cooldown_iters =
+            other.fallback_cooldown_iters.or(self.fallback_cooldown_iters);
+        self.model.merge(other.model);
+        self.planner.merge(other.planner);
+        self.end_of_run.merge(other.end_of_run);
+    }
+}
+
+impl LoopModelConfig {
+    pub fn merge(&mut self, other: LoopModelConfig) {
+        self.default = other.default.or_else(|| self.default.take());
+        // BTreeMap: extend; project wins on key collision.
+        for (k, v) in other.by_priority {
+            self.by_priority.insert(k, v);
+        }
+        for (k, v) in other.by_type {
+            self.by_type.insert(k, v);
+        }
+    }
+}
+
+impl LoopPlannerConfig {
+    pub fn merge(&mut self, other: LoopPlannerConfig) {
+        self.enabled = other.enabled;
+        self.budget_tokens = other.budget_tokens;
+        self.runtime = other.runtime.or_else(|| self.runtime.take());
+    }
+}
+
+impl LoopEndOfRunConfig {
+    pub fn merge(&mut self, other: LoopEndOfRunConfig) {
+        self.verify_tests = other.verify_tests;
+        self.verify_command = other.verify_command;
+        self.verify_budget_wall = other.verify_budget_wall;
+    }
+}
+
+fn merge_vec_dedup<T: PartialEq>(base: &mut Vec<T>, other: Vec<T>) {
+    for item in other {
+        if !base.contains(&item) {
+            base.push(item);
+        }
     }
 }
 
@@ -1636,5 +1793,245 @@ fallback_runtime = "codex"
     fn discover_project_config_returns_none_when_neither() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(discover_project_config(tmp.path()).is_none());
+    }
+
+    // ──────── load_layered ────────
+
+    #[test]
+    fn load_layered_no_files_returns_default() {
+        let cfg = load_layered(None, None).unwrap();
+        let def = Config::default();
+        // Spot-check a few fields across kinds.
+        assert_eq!(cfg.update_check, def.update_check);
+        assert_eq!(cfg.branching.strategy, def.branching.strategy);
+        assert!(cfg.compact.exempt.is_empty());
+    }
+
+    #[test]
+    fn load_layered_user_only_matches_legacy_behavior() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+update_check = false
+default_runtime = "claude"
+
+[branching]
+strategy = "always"
+
+[compact]
+exempt = ["STATUS:keep"]
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), None).unwrap();
+        assert!(!cfg.update_check);
+        assert_eq!(cfg.default_runtime.as_deref(), Some("claude"));
+        assert_eq!(cfg.branching.strategy, "always");
+        assert_eq!(cfg.compact.exempt, vec!["STATUS:keep"]);
+    }
+
+    #[test]
+    fn load_layered_project_overrides_user_scalar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[branching]
+strategy = "none"
+
+[review]
+batch_size = 4
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[branching]
+strategy = "always"
+
+[review]
+batch_size = 16
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        assert_eq!(cfg.branching.strategy, "always");
+        assert_eq!(cfg.review.batch_size, 16);
+    }
+
+    #[test]
+    fn load_layered_project_inherits_user_when_project_value_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        // User sets the Option<String> fields; project omits them.
+        std::fs::write(
+            &user_path,
+            r#"
+default_runtime = "codex"
+default_scope = "epic"
+
+[loop]
+fallback_runtime = "claude"
+fallback_cooldown_iters = 9
+
+[loop.model]
+default = "sonnet-4-6"
+
+[loop.planner]
+runtime = "codex"
+"#,
+        )
+        .unwrap();
+        // Empty project file → every Option<T> deserializes to None →
+        // user value should survive via Option::or.
+        std::fs::write(&project_path, "").unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        assert_eq!(cfg.default_runtime.as_deref(), Some("codex"));
+        assert_eq!(cfg.default_scope.as_deref(), Some("epic"));
+        assert_eq!(cfg.loop_cfg.fallback_runtime.as_deref(), Some("claude"));
+        assert_eq!(cfg.loop_cfg.fallback_cooldown_iters, Some(9));
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+        assert_eq!(cfg.loop_cfg.planner.runtime.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn load_layered_arrays_append_and_dedupe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[compact]
+exempt = ["STATUS:user-a", "STATUS:shared"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[compact]
+exempt = ["STATUS:shared", "STATUS:project-b"]
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        // Order preserved: user entries first, then new project entries;
+        // duplicates from project dropped.
+        assert_eq!(cfg.compact.exempt, vec!["STATUS:user-a", "STATUS:shared", "STATUS:project-b"]);
+    }
+
+    #[test]
+    fn load_layered_nested_table_merge_recursive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[loop.model]
+default = "sonnet-4-6"
+
+[loop.model.by_priority]
+P0 = "opus-user"
+P3 = "haiku-user"
+
+[loop.model.by_type]
+bug = "sonnet-user"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[loop.model.by_priority]
+P0 = "opus-project"
+P1 = "sonnet-project"
+
+[loop.model.by_type]
+chore = "haiku-project"
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        // user-only P3 survives; user P0 overridden; new P1 added.
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P0").map(String::as_str),
+            Some("opus-project")
+        );
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P1").map(String::as_str),
+            Some("sonnet-project")
+        );
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P3").map(String::as_str),
+            Some("haiku-user")
+        );
+        // by_type: user bug + project chore both present.
+        assert_eq!(cfg.loop_cfg.model.by_type.get("bug").map(String::as_str), Some("sonnet-user"));
+        assert_eq!(
+            cfg.loop_cfg.model.by_type.get("chore").map(String::as_str),
+            Some("haiku-project")
+        );
+        // Option default: user kept (project omitted).
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+    }
+
+    // The `load()` env-driven path mutates process-global state
+    // (HEW_CONFIG + cwd), so the integration smokes below are kept to
+    // one combined test that scrubs around itself. Running it in
+    // isolation matches how the rest of this module handles env-touchy
+    // assertions.
+    #[test]
+    fn load_env_var_hew_config_bypasses_layering_and_project_discovery() {
+        // Build a sole-file config that load() should return unchanged
+        // when HEW_CONFIG points at it — even though we drop the agent
+        // inside a tempdir that has both `.beads/` AND `.hew.toml`.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        std::fs::create_dir(project_root.join(".beads")).unwrap();
+        std::fs::write(
+            project_root.join(".hew.toml"),
+            r#"
+update_check = false
+"#,
+        )
+        .unwrap();
+        let sole = project_root.join("sole.toml");
+        std::fs::write(
+            &sole,
+            r#"
+update_check = true
+default_runtime = "claude"
+"#,
+        )
+        .unwrap();
+
+        let prev_cwd = std::env::current_dir().unwrap();
+        let prev_hew_config = std::env::var_os("HEW_CONFIG");
+        std::env::set_current_dir(project_root).unwrap();
+        // SAFETY: see other env-mutating tests in this module — env is
+        // process-global, tests touching it accept the race.
+        unsafe { std::env::set_var("HEW_CONFIG", &sole) };
+
+        let cfg = load().unwrap();
+
+        // Restore before asserting so a panic still cleans up.
+        match prev_hew_config {
+            Some(v) => unsafe { std::env::set_var("HEW_CONFIG", v) },
+            None => unsafe { std::env::remove_var("HEW_CONFIG") },
+        }
+        std::env::set_current_dir(prev_cwd).unwrap();
+
+        // HEW_CONFIG path won; project's `.hew.toml` (which would have
+        // flipped update_check to false) was bypassed.
+        assert!(cfg.update_check);
+        assert_eq!(cfg.default_runtime.as_deref(), Some("claude"));
     }
 }
