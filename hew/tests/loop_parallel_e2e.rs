@@ -313,14 +313,23 @@ impl RuntimeSpawner for ConflictingSpawner {
         // Resolve which worker dir this call corresponds to. The
         // dispatcher created `<wt_root>/<run-id>/{0,1,...}` before the
         // serial worker loop began, so we just discover the (single)
-        // run-id dir and pick `n`.
+        // run-id dir and round-robin across whatever worker subdirs are
+        // present. Modulo keeps the test robust to extra spawns made
+        // by the iter-end planner (which reuses this same spawner) —
+        // every call still writes to an existing worktree.
         let run_dir = std::fs::read_dir(&self.wt_root)
             .expect("wt_root populated")
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .find(|p| p.is_dir())
             .expect("run-id subdir");
-        let wt = run_dir.join(n.to_string());
+        let worker_dirs: Vec<PathBuf> = std::fs::read_dir(&run_dir)
+            .expect("read run dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        let wt = worker_dirs[(n as usize) % worker_dirs.len()].clone();
         let body = format!("worker {n} version line\n");
         std::fs::write(wt.join(&self.conflict_file), body).unwrap();
         git(&wt, &["add", &self.conflict_file]);
@@ -498,4 +507,86 @@ fn e2e_parallel_merge_conflict_files_bug_task() {
         "worker 0 worktree (clean merge) should be pruned by graceful teardown"
     );
     assert!(run_dir.join("1").is_dir(), "worker 1 worktree (conflict) must remain on disk");
+}
+
+/// Regression for hew-zt4z. The parallel dispatcher's atomic claim
+/// flips each assigned task to `in_progress`, which removes it from
+/// `bd ready`. Before the `Worker.assigned_task` hand-off, the worker
+/// loop's `bd.ready()` poll saw an empty queue and exited on iter 0
+/// (`stop_reason: ready_empty`), stranding the claims in_progress
+/// with zero spawns. This test pins the bug: with exactly `jobs` ready
+/// tasks (no surplus) every worker must still drive its pre-claimed
+/// assignment to a real spawn.
+#[test]
+#[ignore = "slow"]
+fn e2e_parallel_dispatcher_claim_removes_task_from_ready_but_worker_still_runs_it() {
+    if !git_available() {
+        eprintln!("git not on PATH, skipping");
+        return;
+    }
+    let (_home, _home_dir) = HomeGuard::install();
+
+    let repo_tmp = tempfile::tempdir().expect("repo tempdir");
+    let repo = repo_tmp.path().to_path_buf();
+    seed_repo(&repo);
+
+    // Exactly two ready tasks for two workers — no surplus. The
+    // dispatcher's pre-claim drains `bd ready` before either worker
+    // gets a turn; the only way both spawns fire is via the
+    // `Worker.assigned_task` hand-off.
+    let bd = SharedBd::with(vec![ready_task("hew-r1"), ready_task("hew-r2")]);
+    let spawner = DrainingMockSpawner::new(bd.clone());
+    let gate =
+        StaticGateRunner(GateCheck { tests_passed: true, lint_passed: true, ..Default::default() });
+
+    let mut args = args_parallel(2);
+    // One iter per worker is the minimum signal — each worker must
+    // spawn once against its pre-claim. Without `until_empty` capped
+    // the workers would loop into a now-empty bd.ready and inflate
+    // the call count.
+    args.max_iter = Some(1);
+    args.until_empty = false;
+
+    run_loop_with(
+        &ctx(),
+        args,
+        &*bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &repo,
+    )
+    .expect("parallel loop runs");
+
+    // Both pre-claims surfaced into real spawns. Pre-fix this was 0
+    // (the workers exited on iter 0 with `stop_reason: ready_empty`).
+    // Pin loosely (`>= 2`) so the iter-end planner — which spawns
+    // through the same `RuntimeSpawner` once per iter — doesn't break
+    // the regression signal. The hard assertion is on the manifest's
+    // per-worker `iter_count` below.
+    assert!(
+        spawner.call_count() >= 2,
+        "expected at least one spawn per worker against the pre-claimed task, got {}",
+        spawner.call_count(),
+    );
+
+    // Manifest pins each worker actually ran an iter (vs the pre-fix
+    // `stop_reason: ready_empty` with `iter_count: 0`).
+    let m = read_manifest(&repo);
+    let workers = m["workers"].as_array().expect("workers array");
+    assert_eq!(workers.len(), 2);
+    for w in workers {
+        assert_eq!(
+            w["iter_count"].as_u64(),
+            Some(1),
+            "every worker must run at least one iter against its pre-claim, got {w}",
+        );
+        assert_ne!(
+            w["stop_reason"].as_str(),
+            Some("ready_empty"),
+            "worker exited on `ready_empty` — pre-claim hand-off regression, got {w}",
+        );
+    }
 }

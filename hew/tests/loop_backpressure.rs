@@ -959,6 +959,7 @@ fn gate_is_called_with_worker_worktree_dir() {
         branch: "loop/test/w0".into(),
         worker_n: None,
         log_dir: log_dir.clone(),
+        assigned_task: None,
     };
     let stop_path = log_dir.join(".stop");
 
@@ -1144,6 +1145,7 @@ fn run_worker_loop_uses_worker_worktree_for_git_calls() {
         branch: "loop/test/w0".into(),
         worker_n: None,
         log_dir: log_dir.clone(),
+        assigned_task: None,
     };
     let stop_path = log_dir.join(".stop");
 
@@ -1288,4 +1290,174 @@ fn jobs_2_uses_dispatcher_path() {
     let body = std::fs::read_to_string(&manifest_path).expect("read manifest");
     let m: serde_json::Value = serde_json::from_str(&body).expect("parse manifest");
     assert_eq!(m["jobs"].as_u64(), Some(2), "parallel path Manifest.jobs == args.jobs");
+}
+
+/// Records the per-iter prompt tail (which carries the task id the
+/// worker decided to run). Used by the `worker.assigned_task` hand-off
+/// regression tests below.
+#[derive(Debug, Default)]
+struct PromptRecordingSpawner {
+    tails: std::sync::Mutex<Vec<String>>,
+}
+
+impl RuntimeSpawner for PromptRecordingSpawner {
+    fn spawn(
+        &self,
+        prompt: &AssembledPrompt,
+        _tools: &[String],
+        _opts: &SpawnOpts,
+    ) -> HewResult<SpawnOutcome> {
+        self.tails.lock().unwrap().push(prompt.tail.clone());
+        Ok(SpawnOutcome {
+            success: true,
+            closed_task: None,
+            tokens: TokenSpend::default(),
+            stderr_tail: String::new(),
+            raw_text: String::new(),
+            failure_class: SpawnFailureClass::Success,
+        })
+    }
+}
+
+fn synthetic_ready(id: &str) -> ReadyTask {
+    ReadyTask {
+        id: id.into(),
+        title: format!("synthetic {id}"),
+        description: String::new(),
+        priority: 1,
+        status: "open".into(),
+        issue_type: "task".into(),
+        parent: None,
+    }
+}
+
+/// Regression for hew-zt4z. When the parallel dispatcher pre-claims a
+/// task and hands it to a worker via `Worker.assigned_task`, the worker
+/// must run that task on iter 1 even though `bd.ready()` no longer
+/// includes it (the claim flipped it to `in_progress`). Without this
+/// hand-off the worker would exit on iter 0 with `stop_reason:
+/// ready_empty`, stranding the claim.
+#[test]
+fn worker_runs_assigned_task_when_some_skipping_bd_ready_poll() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    // Empty bd.ready — mirrors the parallel-dispatch state where the
+    // dispatcher already claimed every ready task before the worker ran.
+    let bd = CapturingBd { ready: vec![], remembered: RefCell::new(Vec::new()) };
+    let spawner = PromptRecordingSpawner::default();
+    let gate = RecordingGateRunner::passing();
+
+    let args = args_one_iter();
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        worker_n: None,
+        log_dir: log_dir.clone(),
+        assigned_task: Some(synthetic_ready("hew-preclaimed")),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    let tails = spawner.tails.lock().unwrap();
+    assert_eq!(tails.len(), 1, "expected exactly one spawn against the pre-claimed task");
+    assert!(
+        tails[0].contains("hew-preclaimed"),
+        "spawn prompt must reference the pre-claimed task, got tail: {}",
+        tails[0],
+    );
+}
+
+/// Companion to `worker_runs_assigned_task_when_some_skipping_bd_ready_poll`:
+/// after the pre-claimed task is consumed, iter 2+ must source from
+/// `bd.ready()` like the serial path. Pre-claim is one-shot, not a
+/// pinned override.
+#[test]
+fn worker_falls_back_to_bd_ready_for_subsequent_iters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let worktree = tmp.path().join("wt");
+    let log_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&worktree).expect("mkdir worktree");
+    std::fs::create_dir_all(&log_dir).expect("mkdir logs");
+
+    // A fresh task waiting in bd.ready that iter 2 should pick up.
+    let bd = CapturingBd {
+        ready: vec![synthetic_ready("hew-followup")],
+        remembered: RefCell::new(Vec::new()),
+    };
+    let spawner = PromptRecordingSpawner::default();
+    let gate = RecordingGateRunner::passing();
+
+    let mut args = args_one_iter();
+    args.max_iter = Some(2);
+    let skill = hew_core::skills::find("hew-execute").expect("hew-execute skill present");
+    let allowed = hew_core::allowed_tools::for_skill("hew-execute");
+    let worker = Worker {
+        id: 0,
+        worktree_dir: worktree.clone(),
+        branch: "loop/test/w0".into(),
+        worker_n: None,
+        log_dir: log_dir.clone(),
+        assigned_task: Some(synthetic_ready("hew-preclaimed")),
+    };
+    let stop_path = log_dir.join(".stop");
+
+    run_worker_loop(
+        &ctx(),
+        &args,
+        &bd,
+        Some(&spawner),
+        None,
+        FallbackConfig::default(),
+        LoopModelConfig::default(),
+        &gate,
+        &worker,
+        &skill,
+        "",
+        "loop-test",
+        &allowed,
+        &stop_path,
+    )
+    .expect("worker loop runs");
+
+    let tails = spawner.tails.lock().unwrap();
+    assert_eq!(tails.len(), 2, "expected two spawns: pre-claim then bd.ready fallback");
+    assert!(
+        tails[0].contains("hew-preclaimed"),
+        "iter 1 must run the pre-claimed task, got tail: {}",
+        tails[0],
+    );
+    assert!(
+        tails[1].contains("hew-followup"),
+        "iter 2 must fall back to bd.ready, got tail: {}",
+        tails[1],
+    );
+    assert!(
+        !tails[1].contains("hew-preclaimed"),
+        "iter 2 must not re-run the pre-claim, got tail: {}",
+        tails[1],
+    );
 }
