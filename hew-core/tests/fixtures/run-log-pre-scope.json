@@ -1,0 +1,11 @@
+{
+  "id": "loop-pre-scope",
+  "started_at": "2026-05-26T00:00:00Z",
+  "last_updated_at": "2026-05-26T00:01:00Z",
+  "iter_count": 2,
+  "cumulative_tokens": 1500,
+  "stop_reason": "ready_empty",
+  "max_iter": null,
+  "strict": true,
+  "interactive": false
+}

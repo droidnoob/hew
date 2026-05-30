@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::runner::{Iter, IterOutcome, Run, StopReason, TokenSpend};
+use crate::scope::Scope;
 use crate::time::iso_now_utc;
 
 /// Default root for loop artifacts, relative to the project root.
@@ -158,6 +159,14 @@ pub struct RunLog {
     pub max_iter: Option<u32>,
     pub strict: bool,
     pub interactive: bool,
+    /// Which slice of bd-ready tasks this run was scoped to. `None` in
+    /// pre-scope run.json files (treated as [`Scope::Ready`] by
+    /// downstream readers); explicit `Some(Scope::Ready)` is preserved
+    /// verbatim so future post-mortems can tell "scope was defaulted"
+    /// apart from "scope was explicitly Ready". Populated by `hew loop`
+    /// after `from_run` once `RunConfig.scope` lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
 }
 
 impl RunLog {
@@ -172,6 +181,7 @@ impl RunLog {
             max_iter: run.config.max_iter,
             strict: run.config.strict,
             interactive: run.config.interactive,
+            scope: None,
         }
     }
 }
@@ -642,6 +652,67 @@ mod tests {
         assert_eq!(parsed.outcome.as_deref(), Some("closed"));
         assert_eq!(parsed.runtime_used.as_deref(), Some("claude"));
         assert!(parsed.model.is_none(), "missing model must deserialize to None");
+    }
+
+    #[test]
+    fn run_log_persists_scope_ready() {
+        let run = Run::new("loop-r", "2026-05-30T00:00:00Z", RunConfig::default());
+        let mut log = RunLog::from_run(&run);
+        log.scope = Some(Scope::Ready);
+        let json = serde_json::to_string(&log).unwrap();
+        // Some(Scope::Ready) must serialize verbatim — not be suppressed.
+        assert!(json.contains("\"scope\""), "explicit Ready scope must be serialized: {json}");
+        assert!(json.contains("\"ready\""));
+        let parsed: RunLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.scope, Some(Scope::Ready));
+    }
+
+    #[test]
+    fn run_log_persists_scope_epics() {
+        let run = Run::new("loop-e", "2026-05-30T00:00:00Z", RunConfig::default());
+        let mut log = RunLog::from_run(&run);
+        log.scope = Some(Scope::Epics { epic_ids: vec!["hew-6az".into()] });
+        let json = serde_json::to_string(&log).unwrap();
+        let parsed: RunLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.scope, Some(Scope::Epics { epic_ids: vec!["hew-6az".into()] }));
+    }
+
+    #[test]
+    fn run_log_backward_compat_missing_scope_deserializes_as_none() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("run-log-pre-scope.json");
+        let body = std::fs::read_to_string(&path).expect("read pre-scope fixture");
+        let parsed: RunLog = serde_json::from_str(&body).expect("parse pre-scope fixture");
+        assert_eq!(parsed.id, "loop-pre-scope");
+        assert_eq!(parsed.iter_count, 2);
+        assert!(parsed.scope.is_none(), "missing scope must deserialize to None");
+    }
+
+    #[test]
+    fn run_log_roundtrip_with_scope_epics_two_ids() {
+        let run = Run::new("loop-e2", "2026-05-30T00:00:00Z", RunConfig::default());
+        let mut log = RunLog::from_run(&run);
+        log.scope = Some(Scope::Epics { epic_ids: vec!["hew-6az".into(), "hew-b3yl".into()] });
+        let json = serde_json::to_string_pretty(&log).unwrap();
+        let parsed: RunLog = serde_json::from_str(&json).unwrap();
+        match parsed.scope {
+            Some(Scope::Epics { epic_ids }) => {
+                assert_eq!(epic_ids, vec!["hew-6az".to_string(), "hew-b3yl".to_string()]);
+            }
+            other => panic!("expected Epics scope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_log_from_run_defaults_scope_to_none() {
+        let run = Run::new("loop-d", "2026-05-30T00:00:00Z", RunConfig::default());
+        let log = RunLog::from_run(&run);
+        assert!(log.scope.is_none());
+        // None must round-trip as a missing field (skip_serializing_if).
+        let json = serde_json::to_string(&log).unwrap();
+        assert!(!json.contains("\"scope\""), "None scope must be omitted: {json}");
     }
 
     #[test]
