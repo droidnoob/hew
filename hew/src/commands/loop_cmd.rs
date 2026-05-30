@@ -39,7 +39,7 @@ use hew_core::runtime::{
     ClaudeSpawner, CodexSpawner, FallbackConfig, RuntimeKind, RuntimeSpawner, SpawnFailureClass,
     SpawnOpts,
 };
-use hew_core::scope::Scope;
+use hew_core::scope::{self, Scope};
 use hew_core::stop_signals::Collector;
 use hew_core::tasks;
 use hew_core::time::iso_now_utc;
@@ -841,6 +841,16 @@ pub struct Worker {
     /// existing `hew loop summary` / `hew loop logs` surfaces continue
     /// to find logs at the run-dir root.
     pub worker_n: Option<u32>,
+    /// Task pre-claimed by the dispatcher for this worker's first iter.
+    /// The parallel dispatcher claims tasks atomically before any worker
+    /// starts, which removes them from `bd ready` — a worker that
+    /// re-polled `bd.ready()` for its initial task would see an empty
+    /// set and exit on iter 0 (`stop_reason: ready_empty`), stranding
+    /// the claim in `in_progress`. Threading the assignment through the
+    /// `Worker` lets iter 1 run against the pre-claimed task; iter 2+
+    /// fall back to `bd.ready()` as before. `None` for the serial path
+    /// (no pre-claim) and for tests that drive the worker loop directly.
+    pub assigned_task: Option<ReadyTask>,
 }
 
 /// Final state returned by [`run_worker_loop`]. The dispatcher reads
@@ -1069,6 +1079,7 @@ fn run_loop_serial(
         branch: String::new(),
         log_dir: dir.clone(),
         worker_n: None,
+        assigned_task: None,
     };
 
     let started_at = iso_now_utc();
@@ -1253,6 +1264,7 @@ fn run_loop_parallel(
             branch: branch_str,
             log_dir: dir.clone(),
             worker_n: Some(n),
+            assigned_task: Some(a.task.clone()),
         });
     }
 
@@ -1489,9 +1501,48 @@ pub fn run_worker_loop_with_scope(
 
     let mut last_outcome: Option<IterOutcome> = None;
     let mut iter_logs: Vec<IterLog> = Vec::new();
+    // Pre-claimed task from the parallel dispatcher. Consumed on the
+    // first iter that needs a task; iter 2+ fall back to `bd.ready()`.
+    // The dispatcher claimed this task atomically before the worker
+    // started, so it is already in `in_progress` and absent from
+    // `bd.ready()` — without this hand-off the worker would exit on
+    // iter 0 with `stop_reason: ready_empty`.
+    let mut pending_assigned: Option<ReadyTask> = worker.assigned_task.clone();
 
     loop {
-        let ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+        let bd_ready = bd.ready().map_err(|e| miette::miette!("bd ready: {e}"))?;
+        // Surface the pre-claimed task to the iter as if it were the
+        // head of `bd ready` (hew-zt4z) — the dispatcher claimed it
+        // atomically before the worker started, so it's already in
+        // `in_progress` and absent from the raw `bd.ready()`. Prepending
+        // it makes the rest of the loop body (signal eval, task pick,
+        // out-of-band closure detection) work unchanged.
+        let raw_ready: Vec<ReadyTask> = if let Some(t) = pending_assigned.as_ref() {
+            std::iter::once(t.clone()).chain(bd_ready).collect()
+        } else {
+            bd_ready
+        };
+
+        // Apply the run's scope filter at the candidate-set boundary
+        // (hew-s9mb). The parallel `Dispatcher` enforces this in
+        // `dispatch_tick`; without the same filter here, the serial
+        // (`--jobs=1`) path would claim any bd-ready task — leaking
+        // outside the agent-explicit `--scope=epics --epics=<id>`
+        // contract. Re-resolve descendants every iter so children
+        // added to a selected epic mid-run get picked up, mirroring
+        // dispatcher behavior. The pre-claimed task survives the
+        // filter as long as it's a descendant — the dispatcher
+        // already enforced this at claim time, so this is a no-op
+        // for the normal case but covers a mid-run epic-edit race.
+        let ready: Vec<ReadyTask> = match &cfg.scope {
+            Scope::Ready => raw_ready,
+            Scope::Epics { epic_ids } => {
+                let set = scope::resolve_descendants(bd, epic_ids)
+                    .map_err(|e| miette::miette!("resolve epic descendants: {e}"))?;
+                raw_ready.into_iter().filter(|t| cfg.scope.includes(&t.id, &set)).collect()
+            }
+        };
+
         let signals = collector.snapshot(&run_state, ready.len() as u32, last_outcome);
         if let Some(reason) = signals.evaluate(&cfg) {
             run_state.stop_reason = Some(reason);
@@ -1516,6 +1567,9 @@ pub fn run_worker_loop_with_scope(
                 break;
             }
         };
+        // The pre-claim is one-shot: once we've picked a task this iter,
+        // future iters source from `bd.ready()` like the serial path.
+        pending_assigned = None;
 
         let iter_number = run_state.next_iter_number();
         let started_at = iso_now_utc();
@@ -2027,6 +2081,14 @@ pub fn run_summary(ctx: &Ctx, args: SummaryArgs) -> miette::Result<()> {
         return run_summary_parallel(ctx, &dir, &manifest_path);
     }
 
+    // No manifest. Branch on what we have on disk: a real run.json
+    // (today's path), or one of the in-flight states (degraded view
+    // instead of a raw ENOENT on `read run.json`).
+    let state = hew_core::loop_log::inspect_run_dir(&dir);
+    if !matches!(state, hew_core::loop_log::RunDirState::Completed) {
+        return render_in_flight_summary(ctx, &dir, &run_id, &state);
+    }
+
     // Load the persisted run header for id + stop reason.
     let rl_body = std::fs::read_to_string(run_log_path(&dir, None))
         .map_err(|e| miette::miette!("read run.json: {e}"))?;
@@ -2070,6 +2132,45 @@ fn collect_worker_iter_logs(run_dir: &Path, worker_n: u32) -> Vec<IterLog> {
         return Vec::new();
     }
     collect_iter_logs(&dir).unwrap_or_default()
+}
+
+/// Render a degraded summary for an in-flight run (no `run.json` yet).
+/// Branches on the run-dir's classification so the operator sees a
+/// useful state report instead of the raw "No such file or directory"
+/// that surfaced before. Always returns `Ok(())` — an in-flight run is
+/// not a failure.
+fn render_in_flight_summary(
+    ctx: &Ctx,
+    dir: &Path,
+    run_id: &str,
+    state: &hew_core::loop_log::RunDirState,
+) -> miette::Result<()> {
+    if ctx.quiet {
+        return Ok(());
+    }
+    let started = hew_core::loop_log::run_dir_started_at(dir);
+    let age_secs = started
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|d| d.as_secs() as i64);
+    let worker_count = match state {
+        hew_core::loop_log::RunDirState::ParallelInFlight { worker_count } => Some(*worker_count),
+        _ => None,
+    };
+    // Pull whatever iter logs may have landed (the SerialIterLogsOnly
+    // case races run.json — every other state has none). Empty vec on
+    // any read error so the in-flight view still renders.
+    let iter_logs = collect_iter_logs(dir).unwrap_or_default();
+    let logs_path = dir.display().to_string();
+    let in_flight = hew_core::loop_summary::InFlight {
+        run_id,
+        age_secs,
+        worker_count,
+        iter_logs: &iter_logs,
+        logs_path: &logs_path,
+    };
+    let colorize = std::env::var_os("NO_COLOR").is_none();
+    print!("{}", hew_core::loop_summary::render_in_flight(&in_flight, colorize));
+    Ok(())
 }
 
 fn run_summary_parallel(ctx: &Ctx, dir: &Path, manifest_path: &Path) -> miette::Result<()> {

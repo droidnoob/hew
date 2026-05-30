@@ -6,6 +6,24 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Project-local config file `.hew.toml` (`hew-c0pa`).** Hew settings
+  now layer across user-global (`~/.config/hew/config.toml`) and
+  project-local (`<repo>/.hew.toml`, `hew.toml` legacy fallback). `hew
+  init` emits a starter `.hew.toml` with header + `version = 1`. `hew
+  config set` takes `--global` / `--project` flags (mutually exclusive)
+  to pick the target; refuses to silently write user-global when a
+  project file exists. `hew config show` renders the merged effective
+  config with `(user-global)` / `(project)` / `(merged)` / `(env)` /
+  `(default)` attribution per key, in text and `--json`. Merge rules:
+  scalars project-wins, `Option<T>` falls back via `or`, arrays
+  concat+dedupe, maps extend, tables recurse. Discovery anchors on the
+  first `.beads/` / `.git` ancestor (root-only; no ancestor walk in
+  v1). New `HEW_USER_CONFIG` env var overrides the XDG user path
+  without bypassing layering (`HEW_CONFIG` retains single-file bypass
+  semantics). See [`docs/CONFIG.md`](docs/CONFIG.md).
+
 ## [0.11.0] — 2026-05-30
 
 ### Added

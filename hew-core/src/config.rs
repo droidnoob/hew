@@ -347,9 +347,24 @@ pub struct OptionalSkills {
     pub security: SkillMode,
 }
 
-/// Resolve the user-config path. Honors `HEW_CONFIG` for tests.
+/// Resolve the user-config path. Honors `HEW_CONFIG` for tests (highest
+/// precedence — single-file bypass). Also honors `HEW_USER_CONFIG` which
+/// overrides only the XDG-resolved user-global path, leaving layered
+/// project discovery intact.
 pub fn config_path() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("HEW_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
+    if let Ok(p) = std::env::var("HEW_USER_CONFIG") {
+        return Ok(PathBuf::from(p));
+    }
+    use etcetera::BaseStrategy;
+    let strategy = etcetera::choose_base_strategy().map_err(|e| HewError::Io(io_other(e)))?;
+    Ok(strategy.config_dir().join("hew").join("config.toml"))
+}
+
+fn user_config_path() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("HEW_USER_CONFIG") {
         return Ok(PathBuf::from(p));
     }
     use etcetera::BaseStrategy;
@@ -362,7 +377,17 @@ fn io_other(e: impl std::fmt::Display) -> std::io::Error {
 }
 
 pub fn load() -> Result<Config> {
-    load_from(&config_path()?)
+    // `HEW_CONFIG` is the documented escape hatch for tests / scripts:
+    // it bypasses layering entirely and treats the named file as the
+    // sole config source. `HEW_USER_CONFIG` only overrides the
+    // XDG-resolved user-global path; layered project discovery still runs.
+    if let Ok(p) = std::env::var("HEW_CONFIG") {
+        return load_from(&PathBuf::from(p));
+    }
+    let user_path = user_config_path()?;
+    let cwd = std::env::current_dir().map_err(HewError::Io)?;
+    let project_path = discover_project_root(&cwd).and_then(|root| discover_project_config(&root));
+    load_layered(Some(&user_path), project_path.as_deref())
 }
 
 pub fn load_from(path: &Path) -> Result<Config> {
@@ -370,6 +395,152 @@ pub fn load_from(path: &Path) -> Result<Config> {
         Ok(s) => toml::from_str(&s).map_err(|e| HewError::Io(io_other(e))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(HewError::Io(e)),
+    }
+}
+
+/// Read the user and project config files (each missing = empty
+/// [`Config`]) and merge them per the documented rules: project wins
+/// for scalars, `Option::or` for `Option<T>`, concat+dedupe for
+/// `Vec<T>`, recursive per-field merge for nested structs, and
+/// project-wins-on-collision for `BTreeMap`. Project-side absent fields
+/// still deserialize to `serde(default)` values — write project configs
+/// sparsely.
+pub fn load_layered(user: Option<&Path>, project: Option<&Path>) -> Result<Config> {
+    let mut merged = match user {
+        Some(p) if p.is_file() => load_from(p)?,
+        _ => Config::default(),
+    };
+    if let Some(p) = project
+        && p.is_file()
+    {
+        let project_cfg = load_from(p)?;
+        merged.merge(project_cfg);
+    }
+    Ok(merged)
+}
+
+impl Config {
+    /// Layer `other` (the project config) on top of `self` (the user
+    /// config) in place. See [`load_layered`] for the merge contract.
+    pub fn merge(&mut self, other: Config) {
+        // Bare scalars: project wins outright. Because we serde(default)
+        // every field, "absent in the project file" deserializes to the
+        // default value — so projects should be written sparsely or risk
+        // clobbering the user-level setting back to default.
+        self.update_check = other.update_check;
+        self.git_track = other.git_track;
+        // Option<T>: project None falls back to user's Some.
+        self.default_runtime = other.default_runtime.or_else(|| self.default_runtime.take());
+        self.default_scope = other.default_scope.or_else(|| self.default_scope.take());
+        // Nested structs: recurse per-field.
+        self.optional_skills.merge(other.optional_skills);
+        self.branching.merge(other.branching);
+        self.research.merge(other.research);
+        self.review.merge(other.review);
+        self.testing.merge(other.testing);
+        self.craft.merge(other.craft);
+        self.compact.merge(other.compact);
+        self.loop_cfg.merge(other.loop_cfg);
+    }
+}
+
+impl OptionalSkills {
+    pub fn merge(&mut self, other: OptionalSkills) {
+        self.deps = other.deps;
+        self.research = other.research;
+        self.security = other.security;
+    }
+}
+
+impl BranchingConfig {
+    pub fn merge(&mut self, other: BranchingConfig) {
+        self.strategy = other.strategy;
+    }
+}
+
+impl ResearchConfig {
+    pub fn merge(&mut self, other: ResearchConfig) {
+        self.default = other.default;
+    }
+}
+
+impl ReviewConfig {
+    pub fn merge(&mut self, other: ReviewConfig) {
+        self.after_n_tasks = other.after_n_tasks;
+        self.after_epic = other.after_epic;
+        self.batch_size = other.batch_size;
+    }
+}
+
+impl TestingConfig {
+    pub fn merge(&mut self, other: TestingConfig) {
+        self.require = other.require;
+    }
+}
+
+impl CraftConfig {
+    pub fn merge(&mut self, other: CraftConfig) {
+        self.max_function_lines = other.max_function_lines;
+        self.warn_on_unused = other.warn_on_unused;
+        self.symbol_trace = other.symbol_trace;
+    }
+}
+
+impl CompactConfig {
+    pub fn merge(&mut self, other: CompactConfig) {
+        self.dry_run_default = other.dry_run_default;
+        self.granularity_default = other.granularity_default;
+        self.target_clusters_cap = other.target_clusters_cap;
+        self.allow_recompact_default = other.allow_recompact_default;
+        merge_vec_dedup(&mut self.exempt, other.exempt);
+    }
+}
+
+impl LoopConfig {
+    pub fn merge(&mut self, other: LoopConfig) {
+        self.fallback_runtime = other.fallback_runtime.or_else(|| self.fallback_runtime.take());
+        self.fallback_cooldown_iters =
+            other.fallback_cooldown_iters.or(self.fallback_cooldown_iters);
+        self.model.merge(other.model);
+        self.planner.merge(other.planner);
+        self.end_of_run.merge(other.end_of_run);
+    }
+}
+
+impl LoopModelConfig {
+    pub fn merge(&mut self, other: LoopModelConfig) {
+        self.default = other.default.or_else(|| self.default.take());
+        // BTreeMap: extend; project wins on key collision.
+        for (k, v) in other.by_priority {
+            self.by_priority.insert(k, v);
+        }
+        for (k, v) in other.by_type {
+            self.by_type.insert(k, v);
+        }
+    }
+}
+
+impl LoopPlannerConfig {
+    pub fn merge(&mut self, other: LoopPlannerConfig) {
+        self.enabled = other.enabled;
+        self.budget_tokens = other.budget_tokens;
+        self.runtime = other.runtime.or_else(|| self.runtime.take());
+    }
+}
+
+impl LoopEndOfRunConfig {
+    pub fn merge(&mut self, other: LoopEndOfRunConfig) {
+        self.verify_tests = other.verify_tests;
+        self.verify_command = other.verify_command;
+        self.verify_budget_wall = other.verify_budget_wall;
+    }
+}
+
+fn merge_vec_dedup<T: PartialEq>(base: &mut Vec<T>, other: Vec<T>) {
+    for item in other {
+        if !base.contains(&item) {
+            base.push(item);
+        }
     }
 }
 
@@ -385,6 +556,201 @@ pub fn save_to(path: &Path, cfg: &Config) -> Result<()> {
     }
     let serialized = toml::to_string_pretty(cfg).map_err(|e| HewError::Io(io_other(e)))?;
     std::fs::write(path, serialized)?;
+    Ok(())
+}
+
+/// Where a given setting came from after layering. `Merged` is reserved
+/// for the small set of keys whose values are concatenated/extended
+/// (arrays, maps) — see [`is_merged_key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigSource {
+    /// Set explicitly in `~/.config/hew/config.toml`.
+    UserGlobal,
+    /// Set explicitly in `<root>/.hew.toml` (or `hew.toml`).
+    Project,
+    /// Set via the `HEW_CONFIG` environment-variable bypass file. This
+    /// source is single-file and short-circuits both user-global and
+    /// project layering.
+    Env,
+    /// Neither file set the key — value comes from the Rust default.
+    Default,
+    /// Both user-global and project files contributed (arrays
+    /// concatenated, maps unioned).
+    Merged,
+}
+
+impl std::fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::UserGlobal => "user-global",
+            Self::Project => "project",
+            Self::Env => "env",
+            Self::Default => "default",
+            Self::Merged => "merged",
+        };
+        f.write_str(s)
+    }
+}
+
+/// A list of canonical keys whose merge semantics produce a union of
+/// both sides (arrays append+dedupe, maps extend). Used by
+/// [`load_with_provenance`] to label these as [`ConfigSource::Merged`]
+/// when both files contribute, instead of crediting only the winning
+/// side.
+fn is_merged_key(key: &str) -> bool {
+    matches!(key, "compact.exempt" | "loop.model.by_priority" | "loop.model.by_type")
+}
+
+/// Translate a public dotted key (as used by [`get`] / [`set`] / [`keys`])
+/// into the TOML path used in on-disk files. Top-level hyphens become
+/// underscores; dotted segments are walked verbatim.
+fn key_to_toml_path(key: &str) -> Vec<String> {
+    key.split('.').map(|seg| seg.replace('-', "_")).collect()
+}
+
+fn has_dotted_key(table: &toml::Table, path: &[String]) -> bool {
+    match path {
+        [] => false,
+        [last] => table.contains_key(last),
+        [head, rest @ ..] => match table.get(head) {
+            Some(toml::Value::Table(sub)) => has_dotted_key(sub, rest),
+            _ => false,
+        },
+    }
+}
+
+fn read_toml_table(path: &Path) -> toml::Table {
+    std::fs::read_to_string(path).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Result of [`load_with_provenance`]: the merged config plus per-key
+/// source attribution and the on-disk file paths that contributed.
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub config: Config,
+    pub sources: BTreeMap<String, ConfigSource>,
+    /// File paths in precedence order (later overrides earlier). `None`
+    /// means the slot did not contribute (no file at that path).
+    pub user_path: Option<PathBuf>,
+    pub project_path: Option<PathBuf>,
+    pub env_path: Option<PathBuf>,
+}
+
+impl LoadedConfig {
+    /// File paths that actually contributed, in precedence order
+    /// (user-global, then project, then env). Used by `hew config show`
+    /// to render the "sources" header.
+    pub fn source_paths(&self) -> Vec<(&'static str, &Path)> {
+        let mut out = Vec::new();
+        if let Some(p) = &self.env_path {
+            out.push(("env (HEW_CONFIG)", p.as_path()));
+            return out;
+        }
+        if let Some(p) = &self.user_path
+            && p.is_file()
+        {
+            out.push(("user-global", p.as_path()));
+        }
+        if let Some(p) = &self.project_path {
+            out.push(("project", p.as_path()));
+        }
+        out
+    }
+}
+
+/// Same as [`load`], but tracks per-key provenance so `hew config show`
+/// can attribute each setting to its source file.
+///
+/// Source-attribution rules:
+/// - When [`HEW_CONFIG`] is set, every key is labeled [`ConfigSource::Env`]
+///   iff the file contains the key, else [`ConfigSource::Default`].
+/// - Otherwise: if both user and project files explicitly set a
+///   [`is_merged_key`] key → [`ConfigSource::Merged`]. Else attribute to
+///   whichever file set the key, with project winning ties (matching
+///   the load-time merge rule). If neither file set it →
+///   [`ConfigSource::Default`].
+pub fn load_with_provenance() -> Result<LoadedConfig> {
+    if let Ok(p) = std::env::var("HEW_CONFIG") {
+        let path = PathBuf::from(&p);
+        let cfg = load_from(&path)?;
+        let raw = read_toml_table(&path);
+        let mut sources = BTreeMap::new();
+        for k in keys() {
+            let path = key_to_toml_path(k);
+            let src =
+                if has_dotted_key(&raw, &path) { ConfigSource::Env } else { ConfigSource::Default };
+            sources.insert((*k).to_string(), src);
+        }
+        return Ok(LoadedConfig {
+            config: cfg,
+            sources,
+            user_path: None,
+            project_path: None,
+            env_path: Some(path),
+        });
+    }
+
+    let user_path = user_config_path()?;
+    let cwd = std::env::current_dir().map_err(HewError::Io)?;
+    let project_path = discover_project_root(&cwd).and_then(|root| discover_project_config(&root));
+
+    let user_raw =
+        if user_path.is_file() { read_toml_table(&user_path) } else { toml::Table::new() };
+    let project_raw = project_path.as_ref().map(|p| read_toml_table(p)).unwrap_or_default();
+
+    let cfg = load_layered(Some(&user_path), project_path.as_deref())?;
+
+    let mut sources = BTreeMap::new();
+    for k in keys() {
+        let toml_path = key_to_toml_path(k);
+        let user_has = has_dotted_key(&user_raw, &toml_path);
+        let project_has = has_dotted_key(&project_raw, &toml_path);
+        let src = match (user_has, project_has) {
+            (false, false) => ConfigSource::Default,
+            (true, false) => ConfigSource::UserGlobal,
+            (false, true) => ConfigSource::Project,
+            (true, true) if is_merged_key(k) => ConfigSource::Merged,
+            (true, true) => ConfigSource::Project,
+        };
+        sources.insert((*k).to_string(), src);
+    }
+
+    Ok(LoadedConfig {
+        config: cfg,
+        sources,
+        user_path: Some(user_path),
+        project_path,
+        env_path: None,
+    })
+}
+
+/// Header prepended to a freshly-created project config file so the
+/// operator who later opens `.hew.toml` by hand sees what it is. Matches
+/// the starter template emitted by `hew init` (modulo the example-only
+/// commented blocks — the live values follow this header).
+const PROJECT_STARTER_HEADER: &str = "\
+# hew project config — https://hew.sh/docs/config
+#
+# Team-shared settings live here; personal overrides live in
+# ~/.config/hew/config.toml (managed via `hew config set --global ...`).
+# See `hew config show` for the merged effective config.
+version = 1
+";
+
+/// Write a project-local config TOML. On the first write to a path that
+/// doesn't yet exist, prepends [`PROJECT_STARTER_HEADER`] so the file
+/// carries the `# hew project config` banner + `version = 1` marker.
+/// Subsequent writes overwrite the body and lose the header (acceptable
+/// trade-off: the operator who's hand-editing the file knows what it is).
+pub fn save_project_to(path: &Path, cfg: &Config) -> Result<()> {
+    let is_new = !path.exists();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let serialized = toml::to_string_pretty(cfg).map_err(|e| HewError::Io(io_other(e)))?;
+    let body = if is_new { format!("{PROJECT_STARTER_HEADER}\n{serialized}") } else { serialized };
+    std::fs::write(path, body)?;
     Ok(())
 }
 
@@ -782,6 +1148,91 @@ pub fn parse_budget_wall(raw: &str) -> Result<std::time::Duration> {
         }
     };
     Ok(dur)
+}
+
+/// Walk `cwd` ancestors looking for the project root. At each level,
+/// `.beads/` wins over `.git`; the first hit terminates the walk.
+/// When `.git` is a file (worktree gitlink — common in hew's own
+/// `~/.hew/wt/<run-id>/<n>/` workers), resolves to the underlying
+/// main-repo working tree via `git rev-parse --show-toplevel` rather
+/// than the worktree directory itself.
+///
+/// Returns `None` if neither marker is found before the filesystem
+/// root.
+pub fn discover_project_root(cwd: &Path) -> Option<PathBuf> {
+    for dir in cwd.ancestors() {
+        if dir.join(".beads").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        let git = dir.join(".git");
+        let meta = match std::fs::symlink_metadata(&git) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        if meta.is_file() {
+            return Some(resolve_worktree_root(dir).unwrap_or_else(|| dir.to_path_buf()));
+        }
+    }
+    None
+}
+
+/// Resolve the real repo root for a git worktree by asking git
+/// directly. Returns `None` on any failure — caller falls back to the
+/// worktree directory.
+fn resolve_worktree_root(worktree_dir: &Path) -> Option<PathBuf> {
+    // `git rev-parse --show-toplevel` inside a linked worktree returns
+    // the worktree's own working dir — not what we want here. The
+    // main repo's working tree is the parent of its `.git` dir, which
+    // `--git-common-dir` reports (shared across all linked worktrees).
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(worktree_dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let common = PathBuf::from(s);
+    // common dir is typically `<main-repo>/.git`; the main repo root
+    // is its parent. Bare repos have no working tree — fall back to
+    // the worktree dir in that case.
+    let parent = common.parent()?;
+    if parent.as_os_str().is_empty() { None } else { Some(parent.to_path_buf()) }
+}
+
+/// Locate the project-local config file at `<root>`. Prefers
+/// `.hew.toml` (dotfile convention); falls back to `hew.toml`. When
+/// both exist, the dotfile wins and a warning is emitted so the user
+/// notices the duplicate.
+pub fn discover_project_config(root: &Path) -> Option<PathBuf> {
+    let dotfile = root.join(".hew.toml");
+    let plain = root.join("hew.toml");
+    let dot_present = dotfile.is_file();
+    let plain_present = plain.is_file();
+    if dot_present && plain_present {
+        tracing::warn!(
+            target: "hew::config",
+            ".hew.toml and hew.toml both present in {}; using .hew.toml",
+            root.display()
+        );
+    }
+    if dot_present {
+        Some(dotfile)
+    } else if plain_present {
+        Some(plain)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1396,5 +1847,501 @@ fallback_runtime = "codex"
         assert_eq!(loaded.compact.target_clusters_cap, 4);
         assert!(loaded.compact.allow_recompact_default);
         assert_eq!(loaded.compact.exempt, vec!["STATUS:custom", "STATUS:other"]);
+    }
+
+    // ──────── load_with_provenance (hew-leh9) ────────
+
+    #[test]
+    fn provenance_default_when_no_keys_set() {
+        // Pure-fn slice: the source-attribution rule itself. Avoids
+        // touching process-global env by running through the underlying
+        // primitives directly.
+        let empty = toml::Table::new();
+        let path = key_to_toml_path("update-check");
+        assert!(!has_dotted_key(&empty, &path));
+    }
+
+    #[test]
+    fn provenance_user_only_when_only_user_has_key() {
+        let mut user_raw = toml::Table::new();
+        user_raw.insert("default_runtime".to_string(), toml::Value::String("claude".into()));
+        let project_raw = toml::Table::new();
+        let path = key_to_toml_path("default-runtime");
+        assert!(has_dotted_key(&user_raw, &path));
+        assert!(!has_dotted_key(&project_raw, &path));
+    }
+
+    #[test]
+    fn provenance_merged_label_only_for_array_and_map_keys() {
+        assert!(is_merged_key("compact.exempt"));
+        assert!(is_merged_key("loop.model.by_priority"));
+        assert!(is_merged_key("loop.model.by_type"));
+        assert!(!is_merged_key("default-runtime"));
+        assert!(!is_merged_key("loop.fallback_runtime"));
+    }
+
+    #[test]
+    fn key_to_toml_path_translates_dashes_at_each_segment() {
+        assert_eq!(key_to_toml_path("update-check"), vec!["update_check"]);
+        assert_eq!(key_to_toml_path("branching.strategy"), vec!["branching", "strategy"]);
+        assert_eq!(key_to_toml_path("review.after-n-tasks"), vec!["review", "after_n_tasks"]);
+    }
+
+    #[test]
+    fn has_dotted_key_walks_nested_tables() {
+        let raw: toml::Table = toml::from_str(
+            r#"
+[loop]
+fallback_runtime = "codex"
+
+[loop.model]
+default = "claude-opus-4-7"
+"#,
+        )
+        .unwrap();
+        assert!(has_dotted_key(&raw, &key_to_toml_path("loop.fallback_runtime")));
+        assert!(has_dotted_key(&raw, &key_to_toml_path("loop.model.default")));
+        assert!(!has_dotted_key(&raw, &key_to_toml_path("loop.model.default-runtime")));
+    }
+
+    // ──────── save_project_to (hew-k2gm) ────────
+
+    #[test]
+    fn save_project_to_new_file_prepends_starter_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.fallback_runtime", "codex").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("# hew project config"), "header present: {body}");
+        assert!(body.contains("version = 1"), "version marker present");
+        assert!(body.contains("fallback_runtime = \"codex\""), "set value present");
+    }
+
+    #[test]
+    fn save_project_to_existing_file_drops_header_on_overwrite() {
+        // Second write to an existing project file overwrites the body —
+        // the starter header is a create-time courtesy, not preserved on
+        // every save. (Documented in save_project_to's doc comment.)
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        std::fs::write(&path, "version = 1\nupdate_check = false\n").unwrap();
+        let mut cfg = Config::default();
+        set(&mut cfg, "default-runtime", "claude").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("# hew project config"), "no starter prepended on overwrite");
+        assert!(body.contains("default_runtime = \"claude\""));
+    }
+
+    #[test]
+    fn save_project_to_round_trips_through_load_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.default", "claude-opus-4-7").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        // The `version = 1` header line must not break deserialize.
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.loop_cfg.model.default.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    // ──────── discover_project_root / discover_project_config ────────
+
+    fn scrub_git_env_in_process() {
+        // SAFETY: integration with the host pre-commit hook can leak
+        // GIT_* into our subprocess invocations. The test binary may
+        // run multiple tests in threads, but these vars only need to
+        // be absent at the moment we spawn git; once removed they
+        // stay removed for the process lifetime.
+        for var in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+        ] {
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    fn discover_root_finds_beads_dir_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".beads")).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = discover_project_root(&sub).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_root_falls_back_to_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let sub = root.join("nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let found = discover_project_root(&sub).unwrap();
+        assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_root_returns_none_when_neither_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("x").join("y");
+        std::fs::create_dir_all(&sub).unwrap();
+        // Avoid walking into an ancestor that happens to contain
+        // a .git (e.g. /Users/.../hew) by canonicalizing into the
+        // tempdir then asserting Option::is_none only when None.
+        // If a parent contains .git, this test would resolve there —
+        // which is still a valid behavior; we only assert "no panic"
+        // and that the result, if Some, is an ancestor of cwd.
+        if let Some(found) = discover_project_root(&sub) {
+            assert!(
+                sub.starts_with(&found) || sub.canonicalize().unwrap().starts_with(&found),
+                "found {found:?} is not an ancestor of {sub:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn discover_root_stops_at_filesystem_root_when_no_marker_found() {
+        // Walking from "/" (an existing path with no .beads/.git of
+        // our making) must terminate cleanly — not loop forever.
+        // We can't guarantee "/" has no .git on the host, so we only
+        // assert termination.
+        let _ = discover_project_root(Path::new("/"));
+    }
+
+    #[test]
+    fn discover_root_resolves_worktree_to_real_repo() {
+        use std::process::Command;
+        if which::which("git").is_err() {
+            eprintln!("git not on PATH, skipping");
+            return;
+        }
+        scrub_git_env_in_process();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "hew-test")
+                .env("GIT_AUTHOR_EMAIL", "hew@test.local")
+                .env("GIT_COMMITTER_NAME", "hew-test")
+                .env("GIT_COMMITTER_EMAIL", "hew@test.local")
+                .output()
+                .expect("git invocation");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("README"), "x\n").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+
+        let wt = tmp.path().join("worker");
+        git(&repo, &["worktree", "add", "-b", "worker-br", wt.to_str().unwrap(), "main"]);
+
+        // From inside the worktree, discover_project_root must resolve
+        // to the main repo, not the worktree dir.
+        let found = discover_project_root(&wt).expect("found root");
+        assert_eq!(found.canonicalize().unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discover_project_config_dotfile_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".hew.toml"), "").unwrap();
+        std::fs::write(root.join("hew.toml"), "").unwrap();
+        let found = discover_project_config(root).unwrap();
+        assert_eq!(found, root.join(".hew.toml"));
+    }
+
+    #[test]
+    fn discover_project_config_falls_back_to_plain_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("hew.toml"), "").unwrap();
+        let found = discover_project_config(root).unwrap();
+        assert_eq!(found, root.join("hew.toml"));
+    }
+
+    #[test]
+    fn discover_project_config_warns_when_both_exist() {
+        // The warning goes through tracing; we can't easily intercept it
+        // here without pulling in a subscriber. Smoke-check that the
+        // dotfile is still selected deterministically.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".hew.toml"), "a = 1\n").unwrap();
+        std::fs::write(root.join("hew.toml"), "b = 2\n").unwrap();
+        assert_eq!(discover_project_config(root), Some(root.join(".hew.toml")));
+    }
+
+    #[test]
+    fn discover_project_config_returns_none_when_neither() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(discover_project_config(tmp.path()).is_none());
+    }
+
+    // ──────── load_layered ────────
+
+    #[test]
+    fn load_layered_no_files_returns_default() {
+        let cfg = load_layered(None, None).unwrap();
+        let def = Config::default();
+        // Spot-check a few fields across kinds.
+        assert_eq!(cfg.update_check, def.update_check);
+        assert_eq!(cfg.branching.strategy, def.branching.strategy);
+        assert!(cfg.compact.exempt.is_empty());
+    }
+
+    #[test]
+    fn load_layered_user_only_matches_legacy_behavior() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+update_check = false
+default_runtime = "claude"
+
+[branching]
+strategy = "always"
+
+[compact]
+exempt = ["STATUS:keep"]
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), None).unwrap();
+        assert!(!cfg.update_check);
+        assert_eq!(cfg.default_runtime.as_deref(), Some("claude"));
+        assert_eq!(cfg.branching.strategy, "always");
+        assert_eq!(cfg.compact.exempt, vec!["STATUS:keep"]);
+    }
+
+    #[test]
+    fn load_layered_project_overrides_user_scalar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[branching]
+strategy = "none"
+
+[review]
+batch_size = 4
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[branching]
+strategy = "always"
+
+[review]
+batch_size = 16
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        assert_eq!(cfg.branching.strategy, "always");
+        assert_eq!(cfg.review.batch_size, 16);
+    }
+
+    #[test]
+    fn load_layered_project_inherits_user_when_project_value_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        // User sets the Option<String> fields; project omits them.
+        std::fs::write(
+            &user_path,
+            r#"
+default_runtime = "codex"
+default_scope = "epic"
+
+[loop]
+fallback_runtime = "claude"
+fallback_cooldown_iters = 9
+
+[loop.model]
+default = "sonnet-4-6"
+
+[loop.planner]
+runtime = "codex"
+"#,
+        )
+        .unwrap();
+        // Empty project file → every Option<T> deserializes to None →
+        // user value should survive via Option::or.
+        std::fs::write(&project_path, "").unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        assert_eq!(cfg.default_runtime.as_deref(), Some("codex"));
+        assert_eq!(cfg.default_scope.as_deref(), Some("epic"));
+        assert_eq!(cfg.loop_cfg.fallback_runtime.as_deref(), Some("claude"));
+        assert_eq!(cfg.loop_cfg.fallback_cooldown_iters, Some(9));
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+        assert_eq!(cfg.loop_cfg.planner.runtime.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn load_layered_arrays_append_and_dedupe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[compact]
+exempt = ["STATUS:user-a", "STATUS:shared"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[compact]
+exempt = ["STATUS:shared", "STATUS:project-b"]
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        // Order preserved: user entries first, then new project entries;
+        // duplicates from project dropped.
+        assert_eq!(cfg.compact.exempt, vec!["STATUS:user-a", "STATUS:shared", "STATUS:project-b"]);
+    }
+
+    #[test]
+    fn load_layered_nested_table_merge_recursive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let user_path = tmp.path().join("user.toml");
+        let project_path = tmp.path().join(".hew.toml");
+        std::fs::write(
+            &user_path,
+            r#"
+[loop.model]
+default = "sonnet-4-6"
+
+[loop.model.by_priority]
+P0 = "opus-user"
+P3 = "haiku-user"
+
+[loop.model.by_type]
+bug = "sonnet-user"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+[loop.model.by_priority]
+P0 = "opus-project"
+P1 = "sonnet-project"
+
+[loop.model.by_type]
+chore = "haiku-project"
+"#,
+        )
+        .unwrap();
+        let cfg = load_layered(Some(&user_path), Some(&project_path)).unwrap();
+        // user-only P3 survives; user P0 overridden; new P1 added.
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P0").map(String::as_str),
+            Some("opus-project")
+        );
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P1").map(String::as_str),
+            Some("sonnet-project")
+        );
+        assert_eq!(
+            cfg.loop_cfg.model.by_priority.get("P3").map(String::as_str),
+            Some("haiku-user")
+        );
+        // by_type: user bug + project chore both present.
+        assert_eq!(cfg.loop_cfg.model.by_type.get("bug").map(String::as_str), Some("sonnet-user"));
+        assert_eq!(
+            cfg.loop_cfg.model.by_type.get("chore").map(String::as_str),
+            Some("haiku-project")
+        );
+        // Option default: user kept (project omitted).
+        assert_eq!(cfg.loop_cfg.model.default.as_deref(), Some("sonnet-4-6"));
+    }
+
+    // The `load()` env-driven path mutates process-global state
+    // (HEW_CONFIG + cwd), so the integration smokes below are kept to
+    // one combined test that scrubs around itself. Running it in
+    // isolation matches how the rest of this module handles env-touchy
+    // assertions.
+    #[test]
+    fn load_env_var_hew_config_bypasses_layering_and_project_discovery() {
+        // Build a sole-file config that load() should return unchanged
+        // when HEW_CONFIG points at it — even though we drop the agent
+        // inside a tempdir that has both `.beads/` AND `.hew.toml`.
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        std::fs::create_dir(project_root.join(".beads")).unwrap();
+        std::fs::write(
+            project_root.join(".hew.toml"),
+            r#"
+update_check = false
+"#,
+        )
+        .unwrap();
+        let sole = project_root.join("sole.toml");
+        std::fs::write(
+            &sole,
+            r#"
+update_check = true
+default_runtime = "claude"
+"#,
+        )
+        .unwrap();
+
+        let prev_cwd = std::env::current_dir().unwrap();
+        let prev_hew_config = std::env::var_os("HEW_CONFIG");
+        std::env::set_current_dir(project_root).unwrap();
+        // SAFETY: see other env-mutating tests in this module — env is
+        // process-global, tests touching it accept the race.
+        unsafe { std::env::set_var("HEW_CONFIG", &sole) };
+
+        let cfg = load().unwrap();
+
+        // Restore before asserting so a panic still cleans up.
+        match prev_hew_config {
+            Some(v) => unsafe { std::env::set_var("HEW_CONFIG", v) },
+            None => unsafe { std::env::remove_var("HEW_CONFIG") },
+        }
+        std::env::set_current_dir(prev_cwd).unwrap();
+
+        // HEW_CONFIG path won; project's `.hew.toml` (which would have
+        // flipped update_check to false) was bypassed.
+        assert!(cfg.update_check);
+        assert_eq!(cfg.default_runtime.as_deref(), Some("claude"));
     }
 }

@@ -1,0 +1,25 @@
+# hew project config — https://hew.sh/docs/config
+#
+# Team-shared settings live here; personal overrides live in
+# ~/.config/hew/config.toml (managed via `hew config set --global ...`).
+# See `hew config show` for the merged effective config.
+version = 1
+
+# [loop]
+# fallback_runtime = "codex"
+# fallback_cooldown_iters = 3
+
+# [loop.model]
+# default = "claude-opus-4-7"
+# by_priority = { "0" = "claude-opus-4-7", "2" = "claude-sonnet-4-6" }
+
+# [loop.planner]
+# enabled = true
+# budget_tokens = 10000
+
+# [loop.end_of_run]
+# verify_tests = false
+
+# [compact]
+# target_clusters_cap = 1
+# allow_recompact_default = false
