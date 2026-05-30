@@ -1,4 +1,4 @@
-<!-- hew:version=0.11.0 -->
+<!-- hew:version=0.12.0 -->
 # Hew loop — batch planner
 
 You are the planner subprocess inside `hew loop run --jobs N`. Your only

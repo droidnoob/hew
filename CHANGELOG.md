@@ -6,6 +6,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-05-31
+
 ### Added
 
 - **Project-local config file `.hew.toml` (`hew-c0pa`).** Hew settings
@@ -23,6 +25,45 @@ versioning follows [Semantic Versioning](https://semver.org/).
   v1). New `HEW_USER_CONFIG` env var overrides the XDG user path
   without bypassing layering (`HEW_CONFIG` retains single-file bypass
   semantics). See [`docs/CONFIG.md`](docs/CONFIG.md).
+
+### Fixed
+
+- **`hew loop run --jobs >= 2` now actually runs N workers (`hew-zt4z`).**
+  The parallel dispatcher claimed N tasks at slot-fill time, but the
+  per-worker loop then re-queried `bd.ready()` independently — and saw
+  an empty list (since the dispatcher's own claim removed those tasks
+  from ready). Result: 0 iters per worker, tasks stranded in
+  `in_progress`. Fix threads the assigned `ReadyTask` into the worker
+  via `Worker.assigned_task`; the worker prepends it to its
+  `bd.ready()` poll for the first iter, then falls back to the normal
+  query for iter 2+. Verified end-to-end: 2 workers, real `claude -p`
+  spawns, real per-worker worktrees at `~/.hew/wt/<run-id>/{0,1}/`,
+  real merge-back, both worker branches landed cleanly.
+- **`hew loop run --jobs=1 --scope=epics` now honors the scope filter
+  (`hew-s9mb`).** The serial path's `bd.ready()` poll skipped the
+  scope-descendant check that the parallel `Dispatcher::dispatch_tick`
+  enforces. Result: agent-explicit `--scope=epics --epics=<id>` could
+  silently consume any bd-ready task. Fix re-resolves the descendant
+  set at the worker's bd.ready() poll and filters every iter, matching
+  dispatcher semantics. Verified: with P1 standalones at the top of
+  `bd ready` and a P2 in the scoped epic, the loop now picks the P2.
+- **`hew loop summary` renders an in-flight view instead of erroring
+  with `No such file` (`hew-cn2y`).** The command crashed with raw
+  `× read run.json: No such file or directory` when called against a
+  run whose first iter hadn't completed yet. Fix classifies four
+  cases: no run-dir → today's "not found" error; run-dir with
+  manifest.json but no run.json → render parallel in-flight view from
+  manifest worker states; run-dir with iter-*.json but no run.json →
+  render serial in-flight view from latest iter; empty run-dir →
+  minimal "iter 0 in flight" view with elapsed time. Includes a
+  `note:` line pointing at re-running summary after iter 1 ends.
+
+### Changed
+
+- **`/hew:auto` slash description** corrected from the legacy
+  "Run plan → decompose → execute → verify autonomously" to the
+  in-conversation epic walk it actually does (per the rewrite in
+  `hew-6n0v` / 0.11.0).
 
 ## [0.11.0] — 2026-05-30
 

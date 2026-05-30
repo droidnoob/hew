@@ -375,15 +375,19 @@ fn docs_config_md_contains_merge_semantics_section() {
 }
 
 #[test]
-fn changelog_unreleased_has_project_local_config_entry() {
+fn changelog_has_project_local_config_entry() {
+    // Originally asserted the entry sat under [Unreleased]; the entry
+    // promoted into [0.12.0] at release time. The test stays as a
+    // "didn't accidentally drop the entry" guard against the shipped
+    // version's section.
     let body = fs::read_to_string(workspace_root().join("CHANGELOG.md")).unwrap();
-    let unreleased = body
-        .split("## [Unreleased]")
+    let section = body
+        .split("## [0.12.0]")
         .nth(1)
         .and_then(|s| s.split("## [").next())
-        .expect("[Unreleased] section");
-    assert!(unreleased.contains("hew-c0pa") || unreleased.contains(".hew.toml"));
-    assert!(unreleased.contains("project") || unreleased.contains("Project"));
+        .expect("[0.12.0] section");
+    assert!(section.contains("hew-c0pa") || section.contains(".hew.toml"));
+    assert!(section.contains("project") || section.contains("Project"));
 }
 
 #[test]
