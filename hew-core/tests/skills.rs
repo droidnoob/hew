@@ -20,6 +20,13 @@ fn collect_md(dir: &std::path::Path, into: &mut BTreeSet<String>, prefix: &str) 
         let ft = entry.file_type().expect("file_type");
         let name = entry.file_name().to_string_lossy().to_string();
         if ft.is_dir() {
+            // `skills/data/` holds embedded resource files (prompts,
+            // TOML catalogs) — not skill bodies. They ship via
+            // `include_str!` from the consuming module and aren't
+            // registered in `skills::CORE/BROWNFIELD/OPTIONAL`.
+            if prefix.is_empty() && name == "data" {
+                continue;
+            }
             let nested_prefix =
                 if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
             collect_md(&entry.path(), into, &nested_prefix);

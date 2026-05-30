@@ -22,7 +22,9 @@ use std::time::Duration;
 
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use hew_core::backpressure::{self, GateCheck, Verdict};
-use hew_core::bd::{BdClient, RealBd};
+use hew_core::batch_plan::{BatchPlan, BatchSource, SCHEMA_VERSION as BATCH_PLAN_SCHEMA_VERSION};
+use hew_core::batch_plan_parse::extract_next_iteration;
+use hew_core::bd::{BdClient, ReadyTask, RealBd};
 use hew_core::config::LoopModelConfig;
 use hew_core::error::HewError;
 use hew_core::loop_log::{
@@ -1945,6 +1947,139 @@ fn print_iter(log: &IterLog) {
     );
 }
 
+/// Embedded planner system prompt. Lives at `skills/data/planner-prompt.md`
+/// so it can be tuned without recompile is not the goal — embedding via
+/// `include_str!` keeps the binary self-contained while the file on disk
+/// remains the canonical edit surface for prompt iteration during dev.
+const PLANNER_PROMPT_BODY: &str = include_str!("../../../skills/data/planner-prompt.md");
+
+/// Compact view of a ready task that's safe to serialize into the
+/// planner prompt. We deliberately drop `description` and `parent` so
+/// the prompt stays small — the planner picks parallel-safe ids by
+/// title + priority, not by re-reading the whole task graph.
+#[derive(serde::Serialize)]
+struct PlannerReadyView<'a> {
+    id: &'a str,
+    title: &'a str,
+    priority: u8,
+    #[serde(rename = "type")]
+    issue_type: &'a str,
+}
+
+/// Build the per-iter planner prompt. The system body
+/// (`PLANNER_PROMPT_BODY`) goes in the cache-prefix slot; bd-ready +
+/// recent-touches JSON payloads go in the tail.
+fn assemble_planner_prompt(
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+) -> prompt::AssembledPrompt {
+    let view: Vec<PlannerReadyView<'_>> = bd_ready
+        .iter()
+        .map(|t| PlannerReadyView {
+            id: &t.id,
+            title: &t.title,
+            priority: t.priority,
+            issue_type: &t.issue_type,
+        })
+        .collect();
+    let bd_ready_json = serde_json::to_string(&view).unwrap_or_else(|_| "[]".to_string());
+    let touches_json = serde_json::to_string(recent_touches).unwrap_or_else(|_| "[]".to_string());
+    let tail = format!("## bd_ready\n\n{bd_ready_json}\n\n## recent_touches\n\n{touches_json}\n");
+    prompt::assemble(PLANNER_PROMPT_BODY, "", &tail)
+}
+
+/// Build a `Skipped` batch plan with the given reason. Used by every
+/// non-success path in [`spawn_planner`] so the caller sees one
+/// shape regardless of why the planner declined.
+fn skipped_plan(iter_number: u32, reason: impl Into<String>) -> BatchPlan {
+    BatchPlan {
+        schema_version: BATCH_PLAN_SCHEMA_VERSION,
+        iter_number,
+        task_ids: Vec::new(),
+        source: BatchSource::Skipped,
+        reason: Some(reason.into()),
+        created_at: iso_now_utc(),
+        planner_tokens: None,
+    }
+}
+
+/// Spawn the planner runtime to suggest a batch for `iter_number`.
+///
+/// Per `hew-pxw9` acceptance: this function NEVER propagates an error —
+/// every failure path returns `BatchPlan { source: Skipped, ... }`. The
+/// planner is an advisory signal layered on top of trust-the-graph, and
+/// a broken planner must not kill the loop.
+///
+/// Pre-spawn budget check skips the subprocess entirely when the
+/// assembled prompt's `token_estimate` exceeds `budget_tokens` — we
+/// never truncate context to fit a budget per the plan's "refusing to
+/// plan is strictly better than guessing badly" rule.
+pub fn spawn_planner(
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+    budget_tokens: u32,
+    runtime: RuntimeKind,
+    project_root: &Path,
+    iter_number: u32,
+) -> miette::Result<BatchPlan> {
+    let spawner = build_spawner_for(runtime);
+    Ok(spawn_planner_with(
+        spawner.as_ref(),
+        bd_ready,
+        recent_touches,
+        budget_tokens,
+        project_root,
+        iter_number,
+    ))
+}
+
+/// Spawner-injected variant of [`spawn_planner`]. Production wires the
+/// real runtime; unit tests pass a `MockSpawner` (or a custom error-
+/// returning one) so the budget / parse / runtime-error branches are
+/// each exercisable without touching a real subprocess.
+fn spawn_planner_with(
+    spawner: &dyn RuntimeSpawner,
+    bd_ready: &[ReadyTask],
+    recent_touches: &[String],
+    budget_tokens: u32,
+    project_root: &Path,
+    iter_number: u32,
+) -> BatchPlan {
+    let prompt = assemble_planner_prompt(bd_ready, recent_touches);
+    let estimate = prompt.token_estimate;
+    if estimate > budget_tokens as u64 {
+        return skipped_plan(
+            iter_number,
+            format!("budget_exceeded: estimated {estimate} tokens > budget {budget_tokens}"),
+        );
+    }
+    let opts = SpawnOpts { model_override: None, working_dir: Some(project_root.to_path_buf()) };
+    let outcome = match spawner.spawn(&prompt, &[], &opts) {
+        Ok(o) => o,
+        Err(e) => return skipped_plan(iter_number, format!("runtime_error: {e}")),
+    };
+    match extract_next_iteration(&outcome.raw_text) {
+        Some(ids) => BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number,
+            task_ids: ids,
+            source: BatchSource::Planner,
+            reason: None,
+            created_at: iso_now_utc(),
+            planner_tokens: Some(outcome.tokens),
+        },
+        None => BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number,
+            task_ids: Vec::new(),
+            source: BatchSource::Skipped,
+            reason: Some("parse_error: planner response missing next_iteration block".into()),
+            created_at: iso_now_utc(),
+            planner_tokens: Some(outcome.tokens),
+        },
+    }
+}
+
 fn parse_duration(s: &str) -> Result<Duration, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -2148,5 +2283,139 @@ mod tests {
         let bd = FakeBd::open_epic("hew-6az");
         let err = resolve_scope(&args, &non_interactive_ctx(), &bd).unwrap_err();
         assert!(format!("{err:?}").contains("not found"));
+    }
+
+    // ---- spawn_planner (hew-pxw9) -----------------------------------
+
+    use hew_core::runner::TokenSpend;
+    use hew_core::runtime::{MockSpawner, SpawnFailureClass, SpawnOutcome};
+
+    fn ready(id: &str, prio: u8) -> ReadyTask {
+        ReadyTask {
+            id: id.into(),
+            title: format!("title for {id}"),
+            description: String::new(),
+            priority: prio,
+            status: "open".into(),
+            issue_type: "task".into(),
+            parent: None,
+        }
+    }
+
+    fn planner_outcome_with(raw_text: impl Into<String>) -> SpawnOutcome {
+        SpawnOutcome {
+            success: true,
+            closed_task: None,
+            tokens: TokenSpend { input: 1234, output: 56, cache_read: 0, cache_create: 0 },
+            stderr_tail: String::new(),
+            raw_text: raw_text.into(),
+            failure_class: SpawnFailureClass::Success,
+        }
+    }
+
+    #[test]
+    fn planner_skips_when_estimated_tokens_exceed_budget() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 2)];
+        let touches = vec!["src/foo.rs:bar".to_string()];
+        let mock = MockSpawner::new(planner_outcome_with(""));
+        let plan =
+            spawn_planner_with(&mock, &bd_ready, &touches, /*budget*/ 1, Path::new("/"), 7);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert!(plan.task_ids.is_empty());
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("budget_exceeded:") && reason.contains("budget 1"),
+            "reason should name the cause + budget: {reason}",
+        );
+        // No subprocess spawned.
+        assert!(
+            mock.last_args.borrow().is_none(),
+            "spawner must not be invoked when budget already exceeded",
+        );
+        assert!(plan.planner_tokens.is_none(), "no spawn → no tokens accounted");
+        assert_eq!(plan.iter_number, 7);
+        assert_eq!(plan.schema_version, BATCH_PLAN_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn planner_returns_plan_on_clean_response() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 2)];
+        let mock = MockSpawner::new(planner_outcome_with(
+            "thinking...\n\n```next_iteration\n[\"hew-aaa\", \"hew-bbb\"]\n```\n",
+        ));
+        let plan =
+            spawn_planner_with(&mock, &bd_ready, &[], /*budget*/ 100_000, Path::new("/"), 3);
+        assert_eq!(plan.source, BatchSource::Planner);
+        assert_eq!(plan.task_ids, vec!["hew-aaa".to_string(), "hew-bbb".to_string()]);
+        assert_eq!(plan.iter_number, 3);
+        assert!(plan.reason.is_none());
+    }
+
+    #[test]
+    fn planner_skips_on_parse_error() {
+        let mock = MockSpawner::new(planner_outcome_with("no fenced block here, just prose"));
+        let plan =
+            spawn_planner_with(&mock, &[ready("hew-aaa", 1)], &[], 100_000, Path::new("/"), 1);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert!(plan.task_ids.is_empty());
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(reason.starts_with("parse_error:"), "got {reason:?}");
+    }
+
+    #[test]
+    fn planner_skips_on_runtime_error() {
+        #[derive(Debug)]
+        struct ErrSpawner;
+        impl RuntimeSpawner for ErrSpawner {
+            fn spawn(
+                &self,
+                _: &prompt::AssembledPrompt,
+                _: &[String],
+                _: &SpawnOpts,
+            ) -> hew_core::error::Result<SpawnOutcome> {
+                Err(std::io::Error::other("simulated spawn failure").into())
+            }
+        }
+        let plan = spawn_planner_with(
+            &ErrSpawner,
+            &[ready("hew-aaa", 1)],
+            &[],
+            100_000,
+            Path::new("/"),
+            4,
+        );
+        assert_eq!(plan.source, BatchSource::Skipped);
+        let reason = plan.reason.as_deref().unwrap_or("");
+        assert!(reason.starts_with("runtime_error:"), "got {reason:?}");
+        assert!(reason.contains("simulated spawn failure"), "must surface the cause: {reason}");
+    }
+
+    #[test]
+    fn planner_prompt_includes_bd_ready_and_recent_touches() {
+        let bd_ready = vec![ready("hew-aaa", 1), ready("hew-bbb", 3)];
+        let touches = vec!["src/dispatcher.rs:run".into(), "src/loop_log.rs:write".into()];
+        let prompt = assemble_planner_prompt(&bd_ready, &touches);
+        // System body lands in the cache prefix.
+        assert!(prompt.prefix.contains("Hew loop"), "prefix must carry the system body");
+        // Task tail carries both inputs.
+        assert!(prompt.tail.contains("hew-aaa"), "bd_ready ids missing from tail");
+        assert!(prompt.tail.contains("hew-bbb"));
+        assert!(prompt.tail.contains("\"priority\":1"), "priority emitted");
+        assert!(prompt.tail.contains("src/dispatcher.rs:run"), "touches missing from tail");
+        assert!(prompt.tail.contains("src/loop_log.rs:write"));
+        // The full prompt is what the spawner actually receives — it
+        // must contain both halves.
+        assert!(prompt.full_text.contains("Hew loop"));
+        assert!(prompt.full_text.contains("hew-aaa"));
+    }
+
+    #[test]
+    fn planner_tokens_field_populated_on_success() {
+        let mock = MockSpawner::new(planner_outcome_with("```next_iteration\n[\"hew-aaa\"]\n```"));
+        let plan =
+            spawn_planner_with(&mock, &[ready("hew-aaa", 1)], &[], 100_000, Path::new("/"), 2);
+        let tokens = plan.planner_tokens.expect("planner_tokens populated on success");
+        assert_eq!(tokens.input, 1234);
+        assert_eq!(tokens.output, 56);
     }
 }
