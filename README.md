@@ -43,7 +43,7 @@ Hew inverts that. **Beads is the graph. The agent queries it.**
 There's a known trick for autonomous coding — [Ralph](https://ghuntley.com/ralph/), Geoffrey Huntley's one-liner that pipes a prompt into the agent in an infinite shell loop. It works better than it has any right to, and it's where `hew loop` starts. The difference is what hew adds around the loop so it can run unattended without drifting:
 
 ```sh
-hew loop run --until-empty
+hew loop run --scope=ready
 ```
 
 <p align="center">
@@ -53,7 +53,10 @@ hew loop run --until-empty
 - **The graph is the state.** Each iter asks `bd ready` for the next unblocked task instead of re-reading a prose prompt that drifts. The agent queries; it doesn't re-narrate what to do next.
 - **A backpressure gate with rollback.** After each iter, hew runs your project's tests and lint; if they fail, the iter is reverted with `git reset --hard <pre-iter-sha>` so a bad pass can't compound. The gate runs *your* commands — a `test` / `lint` target in your `Makefile`, a `justfile` recipe, or a `package.json` script — across Rust, Python, Go, Node, whatever your project already uses. No signal, no gate: the loop trusts the agent and keeps moving.
 - **A byte-stable prompt prefix.** The skill body and memory primer are identical across iters, so the prompt cache hits instead of paying full input cost every pass.
-- **Budgets and clean stops.** `--max-iter`, `--budget-tokens`, `--budget-wall`, and `--until-empty` bound the run; Ctrl+C lets the in-flight iter finish cleanly rather than corrupting state.
+- **Parallel workers via git worktrees.** `--jobs N` fans out across N out-of-tree worktrees at `~/.hew/wt/<run-id>/<n>/`, merges each worker's branch back at shutdown, and files a `[merge-conflict]` bug task if any merge isn't clean. `--jobs=1` (the default) is byte-identical to today's single-worker loop.
+- **Scoped runs and per-task models.** `--scope=epics --epics=hew-XXXX` restricts the run to one epic's descendants; `loop.model.by_priority`/`by_type` route heavy tasks to a stronger model without changing the rest of the queue. Per-iter token spend is reported per model in the summary.
+- **End-of-run verification (opt-in).** `--verify-tests` (or `loop.end_of_run.verify_tests = true`) runs your test command after the last iter to prove the final stacked state is green; failures surface as a `STATUS:loop-verify-failed:` memory plus a non-zero exit.
+- **Budgets and clean stops.** `--max-iter`, `--budget-tokens`, `--budget-wall`, and `--until-empty` (default) bound the run; Ctrl+C lets the in-flight iter finish cleanly rather than corrupting state.
 
 Full guide: [`docs/LOOP.md`](./docs/LOOP.md).
 
@@ -241,7 +244,7 @@ Open your agent (Claude Code, Cursor, etc.) and route on intent — skills auto-
 /hew:next       Claim the top unblocked task and start work
 /hew:verify     End-to-end verification after a batch closes
 /hew:quick      Fast mode — one task, no plan overhead
-/hew:auto       Run plan → decompose → execute → verify autonomously
+/hew:auto       Walk the active epic in-conversation, one task at a time
 /hew:loop       Drive the autonomous outer loop (process-level)
 ```
 
@@ -250,16 +253,23 @@ ready queue across many tasks while you do something else — drive
 [the loop](#the-autonomous-loop) directly:
 
 ```sh
-hew loop run --until-empty            # drain everything ready
-hew loop run --max-iter 5             # bounded
-hew loop run --unattended             # auto-resolve DEFERRED: memories
-hew loop list                         # recent runs
-hew loop logs --tail 5                # last 5 iters of latest run
-hew loop cancel                       # touch stop-file on latest run
+hew loop run --scope=ready                       # drain every bd-ready task
+hew loop run --scope=epics --epics=hew-XXXX      # one epic only
+hew loop run --scope=ready --jobs 4              # 4 parallel workers via git worktrees
+hew loop run --scope=ready --verify-tests        # run your test suite after the last iter
+hew loop run --max-iter 5 --budget-tokens 200k   # bounded
+hew loop list                                    # recent runs
+hew loop logs --tail 5                           # last 5 iters of latest run
+hew loop summary                                 # re-render the end-of-run report
+hew loop graph                                   # render the run as a mermaid DAG
+hew loop cancel                                  # touch stop-file on latest run
 ```
 
 End of run prints a summary with the cache hit rate, token breakdown, a
-sparkline of per-iter spend, and the symbols the run touched.
+sparkline of per-iter spend, and the symbols the run touched. With
+`--jobs N` the same summary adds a per-worker table; with `--verify-tests`
+it adds a `verify:` line and a `STATUS:loop-verify-failed:` memory on
+failure.
 
 On Claude Code the agent statusline shows what hew is working on (scope, progress bar, phase, epic fraction) — auto-wired by `hew init --runtime=claude`. See `hew statusline --help` for `--compact` / `--full` / `--width` overrides.
 
@@ -278,13 +288,13 @@ A brief table of the most-used slashes. Full reference: [`docs/COMMANDS.md`](./d
 | `/hew:quick` | One task, one commit — no plan/decompose overhead |
 | `/hew:verify` | Batch-level end-to-end verification |
 | `/hew:ship` | Create a PR and prepare for merge after verify passes |
-| `/hew:auto` | Run plan → decompose → execute → verify autonomously |
+| `/hew:auto` | Walk the active epic in this Claude session, one task at a time |
 | `/hew:loop` | Drive the autonomous outer loop (process-level, drains the ready queue) |
 | `/hew:checkpoint` | Save rich session state before `/clear` |
 | `/hew:status` | Human-readable project state |
 | `/hew:compact` | Reduce a noisy memory prefix from N entries to ~K canonical ones |
 
-**40 total slashes** covering:
+**41 total slashes** covering:
 
 - Brownfield onboarding — `/hew:scan`, `/hew:convention`, `/hew:audit`, `/hew:boundary`, `/hew:migrate`
 - Reviews — `/hew:review`, `/hew:adversarial-review`
@@ -354,6 +364,13 @@ Selected knobs:
 | `craft.max_function_lines` | `0` | Soft-warn when a changed function exceeds this many lines (0 = disabled) |
 | `compact.dry_run_default` | `true` | `/hew:compact` starts in dry-run mode unless `--apply` passed |
 | `review.after_n_tasks` | `0` | Fire the review picker after this many closed tasks (0 = disabled) |
+| `loop.model.default` | unset | Model passed to the spawner per iter; precedence is description-tag > label > `by_priority` > `by_type` > this |
+| `loop.model.by_priority` | `{}` | Per-priority override map, e.g. `{ "0" = "claude-opus-4-7", "2" = "claude-sonnet-4-6" }` |
+| `loop.model.by_type` | `{}` | Per-task-type override map, e.g. `{ "bug" = "claude-opus-4-7" }` |
+| `loop.planner.enabled` | `true` | When `--jobs >= 2` and the iter agent didn't suggest a `next_iteration`, spawn a small planner subprocess to pick the next batch |
+| `loop.planner.budget_tokens` | `10000` | Pre-spawn budget cap; planner skips rather than truncating context when over |
+| `loop.end_of_run.verify_tests` | `false` | Opt-in mandatory test step after the last iter (stack-detected test command + budget cap) |
+| `loop.fallback_runtime` | unset | When set (`claude` / `codex`), the loop switches to it on `RuntimeError` for `loop.fallback_cooldown_iters` iters before retrying primary |
 
 Run `hew config keys` for the full list.
 
