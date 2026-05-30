@@ -545,6 +545,35 @@ pub fn save_to(path: &Path, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Header prepended to a freshly-created project config file so the
+/// operator who later opens `.hew.toml` by hand sees what it is. Matches
+/// the starter template emitted by `hew init` (modulo the example-only
+/// commented blocks — the live values follow this header).
+const PROJECT_STARTER_HEADER: &str = "\
+# hew project config — https://hew.sh/docs/config
+#
+# Team-shared settings live here; personal overrides live in
+# ~/.config/hew/config.toml (managed via `hew config set --global ...`).
+# See `hew config show` for the merged effective config.
+version = 1
+";
+
+/// Write a project-local config TOML. On the first write to a path that
+/// doesn't yet exist, prepends [`PROJECT_STARTER_HEADER`] so the file
+/// carries the `# hew project config` banner + `version = 1` marker.
+/// Subsequent writes overwrite the body and lose the header (acceptable
+/// trade-off: the operator who's hand-editing the file knows what it is).
+pub fn save_project_to(path: &Path, cfg: &Config) -> Result<()> {
+    let is_new = !path.exists();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let serialized = toml::to_string_pretty(cfg).map_err(|e| HewError::Io(io_other(e)))?;
+    let body = if is_new { format!("{PROJECT_STARTER_HEADER}\n{serialized}") } else { serialized };
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 /// Get a single key's value as a string (for `hew config get`).
 pub fn get(cfg: &Config, key: &str) -> Option<String> {
     match key {
@@ -1638,6 +1667,52 @@ fallback_runtime = "codex"
         assert_eq!(loaded.compact.target_clusters_cap, 4);
         assert!(loaded.compact.allow_recompact_default);
         assert_eq!(loaded.compact.exempt, vec!["STATUS:custom", "STATUS:other"]);
+    }
+
+    // ──────── save_project_to (hew-k2gm) ────────
+
+    #[test]
+    fn save_project_to_new_file_prepends_starter_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.fallback_runtime", "codex").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.starts_with("# hew project config"), "header present: {body}");
+        assert!(body.contains("version = 1"), "version marker present");
+        assert!(body.contains("fallback_runtime = \"codex\""), "set value present");
+    }
+
+    #[test]
+    fn save_project_to_existing_file_drops_header_on_overwrite() {
+        // Second write to an existing project file overwrites the body —
+        // the starter header is a create-time courtesy, not preserved on
+        // every save. (Documented in save_project_to's doc comment.)
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        std::fs::write(&path, "version = 1\nupdate_check = false\n").unwrap();
+        let mut cfg = Config::default();
+        set(&mut cfg, "default-runtime", "claude").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("# hew project config"), "no starter prepended on overwrite");
+        assert!(body.contains("default_runtime = \"claude\""));
+    }
+
+    #[test]
+    fn save_project_to_round_trips_through_load_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(".hew.toml");
+        let mut cfg = Config::default();
+        set(&mut cfg, "loop.model.default", "claude-opus-4-7").unwrap();
+        save_project_to(&path, &cfg).unwrap();
+
+        // The `version = 1` header line must not break deserialize.
+        let loaded = load_from(&path).unwrap();
+        assert_eq!(loaded.loop_cfg.model.default.as_deref(), Some("claude-opus-4-7"));
     }
 
     // ──────── discover_project_root / discover_project_config ────────
