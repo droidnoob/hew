@@ -22,10 +22,11 @@ use std::time::Duration;
 
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use hew_core::backpressure::{self, GateCheck, Verdict};
+use hew_core::batch_plan;
 use hew_core::batch_plan::{BatchPlan, BatchSource, SCHEMA_VERSION as BATCH_PLAN_SCHEMA_VERSION};
 use hew_core::batch_plan_parse::extract_next_iteration;
 use hew_core::bd::{BdClient, ReadyTask, RealBd};
-use hew_core::config::LoopModelConfig;
+use hew_core::config::{LoopModelConfig, LoopPlannerConfig};
 use hew_core::error::HewError;
 use hew_core::loop_log::{
     IterLog, LOOP_ROOT, Manifest, ManifestWorker, RunLog, iter_log_path, new_run_id, run_dir,
@@ -382,6 +383,67 @@ pub struct Args {
     /// list. Example: `--epic hew-6az --epic hew-1tq`.
     #[arg(long = "epic", value_name = "EPIC_ID")]
     pub epic: Vec<String>,
+
+    /// Disable the inter-iter planner for this run. When set, every
+    /// iter-end that doesn't surface an agent-named `next_iteration:`
+    /// block writes a `Skipped { reason: "planner_disabled" }` batch
+    /// plan instead of spawning a planner subprocess. Overrides
+    /// `loop.planner.enabled` config.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+    pub no_planner: bool,
+
+    /// Per-spawn token-estimate budget for the planner. Overrides
+    /// `loop.planner.budget_tokens` config. `0` disables planner
+    /// spawns without flipping `--no-planner`. Default `10000`.
+    #[arg(long)]
+    pub planner_budget: Option<u32>,
+
+    /// Runtime to drive the planner. Overrides
+    /// `loop.planner.runtime` config; falling back to the loop's
+    /// primary runtime when unset.
+    #[arg(
+        long,
+        value_parser = clap::builder::PossibleValuesParser::new(RuntimeKind::VARIANTS),
+    )]
+    pub planner_runtime: Option<String>,
+}
+
+/// Resolve the effective [`LoopPlannerConfig`] for this run. Precedence:
+///
+/// 1. `--no-planner` CLI flag (sticky `enabled = false`)
+/// 2. Per-flag overrides (`--planner-budget`, `--planner-runtime`)
+/// 3. `loop.planner.*` config values
+/// 4. Compiled-in defaults (enabled, 10_000 tokens, runtime = primary)
+///
+/// Validates the planner runtime is a known [`RuntimeKind`] so a bad
+/// CLI/config value fails before the run starts rather than at first
+/// iter-end spawn attempt.
+pub fn resolve_planner_config(
+    args: &Args,
+    base: &LoopPlannerConfig,
+) -> miette::Result<LoopPlannerConfig> {
+    let mut out = base.clone();
+    if args.no_planner {
+        out.enabled = false;
+    }
+    if let Some(b) = args.planner_budget {
+        out.budget_tokens = b;
+    }
+    if let Some(r) = args.planner_runtime.as_deref() {
+        // Validate against the RuntimeKind allowlist. Empty string
+        // clears the override.
+        if r.is_empty() {
+            out.runtime = None;
+        } else {
+            let _: RuntimeKind = r.parse().map_err(|e: String| miette::miette!("{e}"))?;
+            out.runtime = Some(r.to_string());
+        }
+    } else if let Some(r) = out.runtime.as_deref() {
+        // Validate config-sourced runtime too — bad on-disk config
+        // shouldn't silently turn into a missing planner.
+        let _: RuntimeKind = r.parse().map_err(|e: String| miette::miette!("{e}"))?;
+    }
+    Ok(out)
 }
 
 /// CLI surface of [`Scope`]. The runtime type lives in
@@ -457,6 +519,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         if args.dry_run { None } else { fallback.runtime.map(build_spawner_for) };
     let gate = AutoGateRunner;
     let loop_model = cfg.loop_cfg.model.clone();
+    let planner_cfg = resolve_planner_config(&args, &cfg.loop_cfg.planner)?;
     run_loop_with_scope(
         ctx,
         args,
@@ -465,6 +528,7 @@ pub fn run_loop(ctx: &Ctx, args: Args) -> miette::Result<()> {
         fallback_spawner.as_deref(),
         fallback,
         loop_model,
+        planner_cfg,
         &gate,
         &project_root,
         scope,
@@ -715,6 +779,7 @@ pub fn run_loop_with(
         fallback_spawner,
         fallback,
         loop_model,
+        LoopPlannerConfig::default(),
         gate,
         project_root,
         Scope::Ready,
@@ -730,6 +795,7 @@ pub fn run_loop_with_scope(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -747,6 +813,7 @@ pub fn run_loop_with_scope(
             fallback_spawner,
             fallback,
             loop_model,
+            planner_cfg,
             gate,
             project_root,
             scope,
@@ -760,6 +827,7 @@ pub fn run_loop_with_scope(
         fallback_spawner,
         fallback,
         loop_model,
+        planner_cfg,
         gate,
         project_root,
         scope,
@@ -779,6 +847,7 @@ fn run_loop_serial(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -831,6 +900,7 @@ fn run_loop_serial(
         fallback_spawner,
         fallback,
         loop_model.clone(),
+        planner_cfg.clone(),
         gate,
         &worker,
         &skill,
@@ -894,6 +964,7 @@ fn run_loop_parallel(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     project_root: &Path,
     scope: Scope,
@@ -1006,6 +1077,7 @@ fn run_loop_parallel(
             fallback_spawner,
             fallback,
             loop_model.clone(),
+            planner_cfg.clone(),
             gate,
             worker,
             &skill,
@@ -1138,6 +1210,7 @@ pub fn run_worker_loop(
         fallback_spawner,
         fallback,
         loop_model,
+        LoopPlannerConfig::default(),
         gate,
         worker,
         skill,
@@ -1158,6 +1231,7 @@ pub fn run_worker_loop_with_scope(
     fallback_spawner: Option<&dyn RuntimeSpawner>,
     fallback: FallbackConfig,
     loop_model: LoopModelConfig,
+    planner_cfg: LoopPlannerConfig,
     gate: &dyn GateRunner,
     worker: &Worker,
     skill: &skills::Skill,
@@ -1310,7 +1384,8 @@ pub fn run_worker_loop_with_scope(
         );
         let spawn_opts = SpawnOpts { model_override, working_dir: None };
 
-        let (mut outcome, tokens, mut stderr_tail, failure_class) = if let Some(s) = active_spawner
+        let (mut outcome, tokens, mut stderr_tail, failure_class, raw_text) = if let Some(s) =
+            active_spawner
         {
             match s.spawn(&assembled, allowed, &spawn_opts) {
                 Ok(out) => {
@@ -1321,7 +1396,7 @@ pub fn run_worker_loop_with_scope(
                     } else {
                         IterOutcome::RuntimeError
                     };
-                    (oc, out.tokens, Some(out.stderr_tail), out.failure_class)
+                    (oc, out.tokens, Some(out.stderr_tail), out.failure_class, out.raw_text)
                 }
                 Err(e) => {
                     if !ctx.quiet {
@@ -1332,11 +1407,18 @@ pub fn run_worker_loop_with_scope(
                         Default::default(),
                         Some(format!("{e}")),
                         SpawnFailureClass::RuntimeError(hew_core::runtime::RuntimeErrorKind::Spawn),
+                        String::new(),
                     )
                 }
             }
         } else {
-            (IterOutcome::NoClose, Default::default(), None, SpawnFailureClass::Success)
+            (
+                IterOutcome::NoClose,
+                Default::default(),
+                None,
+                SpawnFailureClass::Success,
+                String::new(),
+            )
         };
 
         // Out-of-band closure detection. detect_closed_task only
@@ -1503,6 +1585,54 @@ pub fn run_worker_loop_with_scope(
         write_json_atomic(&iter_log_path(&worker.log_dir, worker.worker_n, iter_number), &log)
             .map_err(|e| miette::miette!("write iter log: {e}"))?;
         iter_logs.push(log);
+
+        // Iter-end batch-plan hook (hew-7k1m). Only fires for the
+        // parallel path (`--jobs >= 2`); the N=1 fast path never writes
+        // a batch file. The plan describes the NEXT iter's batch and
+        // resolves via four branches:
+        //   1. Agent: previous iter's raw_text named a `next_iteration:`
+        //      block.
+        //   2. Planner: planner runtime returns a fresh batch (Planner
+        //      source) or declines (Skipped with parse/runtime/budget
+        //      reason).
+        //   3. Skipped: planner disabled → `reason = "planner_disabled"`.
+        //   4. (jobs == 1): layer bypassed entirely.
+        if args.jobs > 1 {
+            let next_iter = iter_number + 1;
+            let planner_kind = planner_cfg
+                .runtime
+                .as_deref()
+                .map(|r| r.parse::<RuntimeKind>())
+                .transpose()
+                .map_err(|e: String| miette::miette!("{e}"))?
+                .unwrap_or(primary_kind);
+            let plan = resolve_iter_completion_plan(&raw_text, &planner_cfg, next_iter, |ni| {
+                // Reuse the active loop spawner when it matches the
+                // planner's runtime — avoids constructing a second
+                // subprocess channel for the common config-less path.
+                let inherited = if planner_kind == active_kind { active_spawner } else { None };
+                let built;
+                let planner_spawner: &dyn RuntimeSpawner = if let Some(s) = inherited {
+                    s
+                } else {
+                    built = build_spawner_for(planner_kind);
+                    &*built
+                };
+                spawn_planner_with(
+                    planner_spawner,
+                    &[],
+                    &[],
+                    planner_cfg.budget_tokens,
+                    &worker.worktree_dir,
+                    ni,
+                )
+            });
+            if let Err(e) = batch_plan::write(&worker.log_dir, &plan)
+                && !ctx.quiet
+            {
+                eprintln!("iter {iter_number} batch-plan write failed: {e}");
+            }
+        }
 
         // When a fallback is wired and the cooldown machinery is
         // actively routing iters, swallow RuntimeError from the
@@ -1988,6 +2118,45 @@ fn assemble_planner_prompt(
     prompt::assemble(PLANNER_PROMPT_BODY, "", &tail)
 }
 
+/// Pure resolution of the iter-end batch plan when the parallel
+/// dispatcher (`--jobs >= 2`) needs to seed the next iter. Splits the
+/// four branches per `hew-7k1m`:
+///
+/// - `Some(Ok(ids))` from `extract_next_iteration(raw_text)` → Agent
+/// - planner disabled OR budget = 0 → Skipped { planner_disabled }
+/// - planner enabled → returned by the injected closure (which the
+///   caller wires to [`spawn_planner_with`])
+///
+/// Splitting this away from the worker loop's side-effects keeps the
+/// branch arithmetic test-friendly: no git, no bd, no spawner ctor.
+pub fn resolve_iter_completion_plan<F>(
+    raw_text: &str,
+    planner_cfg: &LoopPlannerConfig,
+    next_iter: u32,
+    planner_fn: F,
+) -> BatchPlan
+where
+    F: FnOnce(u32) -> BatchPlan,
+{
+    if !raw_text.is_empty()
+        && let Some(ids) = hew_core::batch_plan_parse::extract_next_iteration(raw_text)
+    {
+        return BatchPlan {
+            schema_version: BATCH_PLAN_SCHEMA_VERSION,
+            iter_number: next_iter,
+            task_ids: ids,
+            source: BatchSource::Agent,
+            reason: None,
+            created_at: iso_now_utc(),
+            planner_tokens: None,
+        };
+    }
+    if !planner_cfg.enabled || planner_cfg.budget_tokens == 0 {
+        return skipped_plan(next_iter, "planner_disabled");
+    }
+    planner_fn(next_iter)
+}
+
 /// Build a `Skipped` batch plan with the given reason. Used by every
 /// non-success path in [`spawn_planner`] so the caller sees one
 /// shape regardless of why the planner declined.
@@ -2132,6 +2301,9 @@ mod tests {
             scope: None,
             epics: Vec::new(),
             epic: Vec::new(),
+            no_planner: false,
+            planner_budget: None,
+            planner_runtime: None,
         }
     }
 
@@ -2407,6 +2579,120 @@ mod tests {
         // must contain both halves.
         assert!(prompt.full_text.contains("Hew loop"));
         assert!(prompt.full_text.contains("hew-aaa"));
+    }
+
+    // ---- iter-end batch hook (hew-7k1m) -----------------------------
+
+    fn agent_plan_via_fenced_block() -> &'static str {
+        "thinking...\n\n```next_iteration\n[\"hew-foo\", \"hew-bar\"]\n```\nDone.\n"
+    }
+
+    fn never_planner(_ni: u32) -> BatchPlan {
+        panic!("planner closure must not run for this branch");
+    }
+
+    #[test]
+    fn iter_completion_writes_agent_sourced_batch_when_block_present() {
+        let cfg = LoopPlannerConfig::default();
+        let plan =
+            resolve_iter_completion_plan(agent_plan_via_fenced_block(), &cfg, 7, never_planner);
+        assert_eq!(plan.source, BatchSource::Agent);
+        assert_eq!(plan.iter_number, 7);
+        assert_eq!(plan.task_ids, vec!["hew-foo".to_string(), "hew-bar".to_string()]);
+        assert!(plan.reason.is_none());
+        assert!(plan.planner_tokens.is_none());
+    }
+
+    #[test]
+    fn iter_completion_writes_planner_sourced_batch_when_agent_silent() {
+        let cfg = LoopPlannerConfig::default();
+        let plan = resolve_iter_completion_plan("no fenced block, just prose", &cfg, 4, |ni| {
+            // Stand-in for spawn_planner_with: returns a Planner-sourced plan.
+            BatchPlan {
+                schema_version: BATCH_PLAN_SCHEMA_VERSION,
+                iter_number: ni,
+                task_ids: vec!["hew-planned".into()],
+                source: BatchSource::Planner,
+                reason: None,
+                created_at: iso_now_utc(),
+                planner_tokens: Some(TokenSpend {
+                    input: 1,
+                    output: 1,
+                    cache_read: 0,
+                    cache_create: 0,
+                }),
+            }
+        });
+        assert_eq!(plan.source, BatchSource::Planner);
+        assert_eq!(plan.iter_number, 4);
+        assert_eq!(plan.task_ids, vec!["hew-planned".to_string()]);
+        assert!(plan.planner_tokens.is_some());
+    }
+
+    #[test]
+    fn iter_completion_writes_skipped_batch_when_planner_disabled() {
+        let cfg = LoopPlannerConfig { enabled: false, ..Default::default() };
+        let plan = resolve_iter_completion_plan("", &cfg, 3, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.iter_number, 3);
+        assert!(plan.task_ids.is_empty());
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn iter_completion_skipped_when_budget_zero() {
+        // `--planner-budget 0` is the documented "off without flipping
+        // --no-planner" knob; it must short-circuit before the closure
+        // runs.
+        let cfg = LoopPlannerConfig { budget_tokens: 0, ..Default::default() };
+        let plan = resolve_iter_completion_plan("", &cfg, 2, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn iter_completion_agent_wins_over_planner() {
+        // Agent block in raw_text → planner closure must not fire even
+        // when planner is enabled.
+        let cfg = LoopPlannerConfig::default();
+        let plan =
+            resolve_iter_completion_plan(agent_plan_via_fenced_block(), &cfg, 9, never_planner);
+        assert_eq!(plan.source, BatchSource::Agent);
+    }
+
+    #[test]
+    fn cli_no_planner_skips_planner_call_even_when_agent_silent() {
+        let mut args = default_args();
+        args.no_planner = true;
+        let resolved = resolve_planner_config(&args, &LoopPlannerConfig::default()).unwrap();
+        assert!(!resolved.enabled);
+        let plan = resolve_iter_completion_plan("", &resolved, 1, never_planner);
+        assert_eq!(plan.source, BatchSource::Skipped);
+        assert_eq!(plan.reason.as_deref(), Some("planner_disabled"));
+    }
+
+    #[test]
+    fn cli_planner_budget_overrides_config() {
+        let mut args = default_args();
+        args.planner_budget = Some(42);
+        let base = LoopPlannerConfig { budget_tokens: 999, ..Default::default() };
+        let resolved = resolve_planner_config(&args, &base).unwrap();
+        assert_eq!(resolved.budget_tokens, 42);
+    }
+
+    #[test]
+    fn cli_planner_runtime_overrides_config() {
+        let mut args = default_args();
+        args.planner_runtime = Some("codex".into());
+        let resolved = resolve_planner_config(&args, &LoopPlannerConfig::default()).unwrap();
+        assert_eq!(resolved.runtime.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn cli_planner_runtime_rejects_unknown_kind() {
+        let mut args = default_args();
+        args.planner_runtime = Some("cursor".into());
+        assert!(resolve_planner_config(&args, &LoopPlannerConfig::default()).is_err());
     }
 
     #[test]

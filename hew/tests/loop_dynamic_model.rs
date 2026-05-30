@@ -67,6 +67,9 @@ fn args_one_dry_iter() -> Args {
         scope: None,
         epics: Vec::new(),
         epic: Vec::new(),
+        no_planner: false,
+        planner_budget: None,
+        planner_runtime: None,
     }
 }
 

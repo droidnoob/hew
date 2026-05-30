@@ -149,6 +149,9 @@ fn args_parallel(jobs: u32) -> Args {
         scope: None,
         epics: Vec::new(),
         epic: Vec::new(),
+        no_planner: false,
+        planner_budget: None,
+        planner_runtime: None,
     }
 }
 
